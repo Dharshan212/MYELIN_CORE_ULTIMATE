@@ -109,10 +109,10 @@ from .lifecycle import LifecycleController, StartupGateResult
 from .navigation import NavigationController
 from .settings import TIMEZONE_CHOICES, SettingsController
 from .tray import TrayController
+from COSECANT_STUDY_MODE.notes import NoteSession, NotesWorkspace
 from COSECANT_STUDY_MODE.planner import StudyPlanner
 from COSECANT_STUDY_MODE.view import StudyView
-from PERSISTENCE.schema import ensure_production_schema
-from PERSISTENCE.storage import EngineStorage
+from PERSISTENCE.storage import EngineStorage, bootstrap_production_schema
 from PROFILES.profiles import ProfileController
 from UI_THEMES.animation import (
     AxonCanvas,
@@ -3006,6 +3006,12 @@ class ControlStationWindow(QMainWindow):
         # openings and no second plan_id is ever minted.
         self.storage = EngineStorage()
         self.planner = StudyPlanner(repository=self.storage)
+        # ONE long-lived Notes session and workspace for the whole shell.
+        # EngineStorage already satisfies the NoteStore protocol, so no
+        # adapter or second repository exists.  Reopening STUDY NOTES reuses
+        # this workspace rather than building another autosave worker.
+        self.note_session = NoteSession(store=self.storage)
+        self.notes_workspace = NotesWorkspace(session=self.note_session)
 
     def _create_pages(self) -> None:
         """Create the real pages and preserve their approved order."""
@@ -3025,6 +3031,8 @@ class ControlStationWindow(QMainWindow):
                     for choice in TIMEZONE_CHOICES
                     if choice.key != "local"
                 ),
+                notes_workspace=self.notes_workspace,
+                note_store=self.storage,
             ),
             # Showcase visual body; the read-model page is reconnected in a
             # later approved phase.  analytics.py itself is untouched.
@@ -3279,8 +3287,24 @@ class ControlStationWindow(QMainWindow):
         self._shutdown_is_authorized = True
         self.lifecycle.shutdown()
         self.navigation.shutdown()
-        self.analytics.shutdown()
+        # Analytics workers READ persistence, so they must finish before this
+        # facade releases the shared SQLite lane below.  The wait is bounded;
+        # an overrun is reported, never silently ignored (C12-C).
+        try:
+            if not self.analytics.shutdown():
+                print("[MYELIN][SHUTDOWN] analytics worker did not finish", flush=True)
+        except Exception as exc:
+            print(f"[MYELIN][SHUTDOWN] analytics shutdown failed: {exc}", flush=True)
         self.tray.shutdown()
+        # Stop accepting new Notes edits and drain accepted ones through the
+        # existing bounded contract, BEFORE the engine stops and before this
+        # facade releases the shared lane -- otherwise an accepted edit could
+        # still be queued when persistence goes away.
+        try:
+            if not self.notes_workspace.shutdown(timeout=2.0):
+                print("[MYELIN][SHUTDOWN] notes flush incomplete", flush=True)
+        except Exception as exc:
+            print(f"[MYELIN][SHUTDOWN] notes shutdown failed: {exc}", flush=True)
         self.engine.shutdown()
         # Release this facade's share of the process-wide SQLite lane. The
         # lane itself closes only when the last owner lets go, so this never
@@ -3452,7 +3476,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # Persistence owns schema creation and verification. The launcher only
     # enforces that it completes before any runtime authority is constructed.
-    ensure_production_schema()
+    # This is THE process bootstrap (C12-B): it latches, so no later facade
+    # construction or dashboard read reinstalls the schema behind the shared
+    # SQLite writer lane.
+    bootstrap_production_schema()
 
     _set_windows_application_identity()
     app = QApplication(arguments)

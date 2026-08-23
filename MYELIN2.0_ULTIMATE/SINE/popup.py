@@ -636,7 +636,13 @@ class SinePopupWindow(QWidget):
         if screen is None:
             return
         area = screen.availableGeometry()
-        x = area.x() + max(12, area.width() - self.width() - 28)
+        # UAT-03: centre the intervention on the ACTIVE screen's work area.
+        # ``availableGeometry`` already excludes the taskbar, and the screen is
+        # the one chosen above from the cursor/origin point, so this stays
+        # correct on secondary monitors and never assumes the primary screen.
+        # The max(12, ...) floor keeps the popup on-screen if it is ever wider
+        # or taller than the work area.
+        x = area.x() + max(12, (area.width() - self.width()) // 2)
         y = area.y() + max(12, (area.height() - self.height()) // 2)
         self.move(x, y)
 

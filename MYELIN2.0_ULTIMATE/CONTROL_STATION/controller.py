@@ -241,6 +241,9 @@ class ControlStationController(QObject):
         self._active_seconds = 0.0
         self._last_active_tick: float | None = None
         self._report_session_lease = None
+        # Held from the moment a start is admitted until the active-session
+        # source is bound and the worker is running (C12-G).
+        self._session_start_reservation = None
 
         # QTimers run on the GUI thread.  Therefore every Qt signal below is
         # emitted on the GUI thread, never from the monitor worker.
@@ -478,18 +481,26 @@ class ControlStationController(QObject):
         if self._is_shutting_down or self.is_session_active():
             return False
 
+        # C12-G.  The start reservation is what makes "a session is starting"
+        # visible to report access, and the active-session SOURCE does not
+        # exist yet.  Releasing the reservation before that source is bound
+        # left a window in which the coordinator could see neither, and a
+        # report export was admitted underneath a session that was starting.
+        # The reservation is therefore held across the whole handoff and
+        # released only once the worker is running -- or, on every failure
+        # path, exactly once by ``_release_session_start_reservation``.
         try:
-            lease = self.report_access.begin_session_start()
+            self._session_start_reservation = self.report_access.begin_session_start()
         except Exception as exc:  # report authority supplies user-safe text
             self._fail_start(f"Engine could not start: {self._safe_error(exc)}")
             return False
 
         self._set_status(EngineStatus.STARTING)
-        lease.release()
 
         try:
             from CORE_ENGINE.monitor import run as run_core_monitor
         except (ImportError, SystemExit) as exc:
+            self._release_session_start_reservation()
             self._fail_start(f"Core Engine is unavailable: {self._safe_error(exc)}")
             return False
 
@@ -511,12 +522,36 @@ class ControlStationController(QObject):
         except Exception as exc:
             self._is_monitoring = False
             self._release_report_lease()
+            self._release_session_start_reservation()
             self._fail_start(f"Core Engine could not start: {self._safe_error(exc)}")
             return False
+
+        # Session-start authority is fully established: the active-session
+        # source is bound and the worker is running, so the bound source now
+        # refuses reports on its own.  Only now may the reservation go.
+        self._release_session_start_reservation()
 
         self._worker_timer.start()
         self._telemetry_timer.start()
         return True
+
+    def _release_session_start_reservation(self) -> None:
+        """Release the session-start reservation exactly once, if held.
+
+        Every ``start_engine`` exit -- success or failure -- passes through
+        here.  Clearing the attribute before releasing means a second call can
+        never evict a reservation belonging to a later start attempt.
+        """
+
+        reservation = self._session_start_reservation
+        self._session_start_reservation = None
+        if reservation is None:
+            return
+        try:
+            reservation.release()
+        except Exception:
+            # A reservation that is already gone is not a start failure.
+            pass
 
     def _prepare_new_session(self) -> None:
         """Reset transport state before creating the only worker thread."""

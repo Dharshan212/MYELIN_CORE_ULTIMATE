@@ -1688,6 +1688,12 @@ class StudyNotesPanel(QWidget):
     QListWidget#studyNoteList::item:selected {
         background: %(cyan)s; color: %(base)s;
     }
+    QWidget#studyNotesPanel QLineEdit,
+    QWidget#studyNotesPanel QTextEdit,
+    QWidget#studyNotesPanel QPlainTextEdit {
+        background: %(raised)s; color: %(text)s;
+        border: 1px solid %(border)s; border-radius: 8px; padding: 7px;
+    }
     """
 
     def _apply_panel_style(self) -> None:

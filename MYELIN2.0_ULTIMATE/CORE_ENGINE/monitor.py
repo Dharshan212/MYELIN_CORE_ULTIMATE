@@ -359,6 +359,8 @@ class StorageAuthority(Protocol):
 
     def wait(self, receipt_id: str, *, timeout_seconds: float) -> object | None: ...
 
+    def forget_receipt(self, receipt_id: str) -> bool: ...
+
     def close_monitor_session(
         self,
         *,
@@ -537,24 +539,26 @@ def _field(value: object, name: str, default=None):
     return getattr(value, name, default)
 
 
-#: One command carried an expected-identity group that is absent entirely.
-#: Internal and C0-C10 LAB commands are identity-free by design and keep their
-#: existing behaviour; only a supplied identity is enforced.
-LEGACY_IDENTITY: Final = object()
-
-#: One command carried a partial or unreadable expected-identity group.  This
-#: is never silently downgraded to legacy: a half-supplied identity is a
-#: malformed request, and a malformed request is refused.
+#: One command carried an absent, partial or unreadable expected-identity
+#: group.  A command that cannot name the generation it was issued against
+#: cannot be checked against current authority, so it is refused (C12-F).
+#:
+#: This used to distinguish "absent entirely" as a LEGACY exemption that
+#: returned admitted=True unconditionally, which meant simply omitting the
+#: fields walked a command straight past the C11-A stale-generation fence.
+#: The production caller matrix proved no live sender can produce such a
+#: command -- every Study/COSECANT request goes through the Control Station
+#: controller, which copies the identity in unconditionally -- so the
+#: exemption was dead authority protecting nothing but historical LAB calls.
 MALFORMED_IDENTITY: Final = object()
 
 
 def _expected_identity(payload: object, text_names, number_names):
     """Read one expected-identity group off a command payload.
 
-    Returns ``LEGACY_IDENTITY`` when the whole group is absent,
-    ``MALFORMED_IDENTITY`` when it is partly supplied or unreadable, and
-    otherwise a tuple of the declared values in ``text_names + number_names``
-    order.
+    Returns ``MALFORMED_IDENTITY`` when the group is absent, partly supplied
+    or unreadable, and otherwise a tuple of the declared values in
+    ``text_names + number_names`` order.
 
     Empty text with a zero number is a COMPLETE identity, not an absent one:
     it is exactly what a Study runtime that has never prepared a block
@@ -563,8 +567,6 @@ def _expected_identity(payload: object, text_names, number_names):
 
     names = tuple(text_names) + tuple(number_names)
     values = [_field(payload, name, None) for name in names]
-    if all(value is None for value in values):
-        return LEGACY_IDENTITY
     if any(value is None for value in values):
         return MALFORMED_IDENTITY
     resolved: list[object] = []
@@ -1439,6 +1441,51 @@ class WindowsMonitorCoordinator:
         )
         self._apply_trigger_receipt(receipt)
 
+    # ------------------------------------------------------------------
+    # Receipt consumption.  C12-D2.
+    # ------------------------------------------------------------------
+    #
+    # A receipt exists so its OWNER can learn one transaction's fate.  Storage
+    # consumes the receipts it owns end to end; the lifecycle receipts handed
+    # back raw -- session open/close, emergency, profile learning, trigger
+    # persistence -- belong to this coordinator, so only this coordinator can
+    # say when it has finished reading one.  Without that, a long MYELIN
+    # process accumulated one permanent in-memory record per session and per
+    # trigger, all of them long since terminal and long since consumed.
+    #
+    # The rule is strict: release ONLY after the terminal state has been
+    # observed AND its result fully processed.  Storage independently refuses
+    # to forget a RUNNING receipt, so an outstanding transaction can never be
+    # dropped through this path even by mistake.
+
+    def _consume_receipt(self, receipt_id: str) -> None:
+        """Release one terminal receipt this coordinator has finished with."""
+
+        if not receipt_id:
+            return
+        try:
+            self.services.storage.forget_receipt(receipt_id)
+        except Exception:
+            # Receipt bookkeeping is not domain truth.  A failure to release
+            # an already-consumed record must never change a commit into an
+            # error, so this deliberately does not touch cleanup errors.
+            pass
+
+    def _clear_pending_trigger(self) -> None:
+        """Drop the pending workflow and consume its now-terminal receipt.
+
+        Clearing and consuming are done together so the two can never drift:
+        the receipt is released at exactly the moment nothing in Monitor
+        refers to it any more.  While ``_pending_trigger`` still points at a
+        workflow -- including a RUNNING one that a later ordered write may yet
+        settle -- the receipt stays observable.
+        """
+
+        pending = self._pending_trigger
+        self._pending_trigger = None
+        if pending is not None:
+            self._consume_receipt(pending.receipt_id)
+
     def _reconcile_pending_trigger(self) -> None:
         pending = self._pending_trigger
         if pending is None:
@@ -1464,7 +1511,7 @@ class WindowsMonitorCoordinator:
                 operational_event_id=event_id,
             )
             if not admitted:
-                self._pending_trigger = None
+                self._clear_pending_trigger()
                 raise RuntimeError("durable trigger admission invariant failed")
 
             # MIRL preparation is factual but additive. A refused/disabled
@@ -1479,7 +1526,7 @@ class WindowsMonitorCoordinator:
                 operational_event_id=event_id,
                 mirl_display_token=mirl_token,
             )
-            self._pending_trigger = None
+            self._clear_pending_trigger()
             if not accepted:
                 raise RuntimeError("SINE rejected a durably admitted trigger")
             _telemetry(
@@ -1499,7 +1546,7 @@ class WindowsMonitorCoordinator:
             candidate_uid=pending.candidate_uid,
             reason="trigger_persistence_failed",
         )
-        self._pending_trigger = None
+        self._clear_pending_trigger()
         if not rejected:
             raise RuntimeError("failed trigger candidate could not be rejected")
         _telemetry(
@@ -1833,12 +1880,34 @@ class WindowsMonitorCoordinator:
                 reason = (
                     str(outcome.value) if hasattr(outcome, "value") else str(outcome or "")
                 ) or str(_field(result, "detail", "") or "")
-            self.services.sine.record_study_material_result(
+            # UAT-02.  SINE may REFUSE this callback -- a superseded or stale
+            # occurrence, a terminal episode, an episode/occurrence identity
+            # mismatch, or a response this occurrence never carried.  A refusal
+            # produces NO SINE fact at all, so the popup is never told anything
+            # and sits on "ACTION SENT ... WAITING FOR ACCEPTANCE" forever.
+            #
+            # Presentation cannot be repaired from here: only SINE may close a
+            # popup, and inventing a close here would make the UI an authority.
+            # What Monitor owes is the truth, so a rejected authority callback
+            # is reported instead of disappearing silently.
+            recorded = self.services.sine.record_study_material_result(
                 request_id=request_id,
                 granted=granted,
                 occurred_monotonic_ns=max(1, occurred_ns),
                 reason=reason,
             )
+            if not recorded:
+                _telemetry(
+                    self.telemetry_queue,
+                    "engine_command_rejected",
+                    message=(
+                        "SINE refused the Study Material result; no result fact "
+                        "was produced and the popup was not informed"
+                    ),
+                    request_id=request_id,
+                    granted=granted,
+                    reason=reason,
+                )
 
         # The popup's factual DISPLAYED event—not a schedule request—creates
         # MIRL episode evidence. Trigger also receives the exact same fact.
@@ -2399,9 +2468,9 @@ class WindowsMonitorCoordinator:
                     continue
                 self._request_cosecant_break(
                     int(_field(payload, "selected_break_seconds", 0) or 0),
-                    expected_study_identity=(
-                        None if expected is LEGACY_IDENTITY else expected
-                    ),
+                    # Admission above already refused a malformed identity,
+                    # so this is always a complete declared pair (C12-F).
+                    expected_study_identity=expected,
                 )
                 continue
             if kind == "cosecant_return_intent":
@@ -2514,11 +2583,9 @@ class WindowsMonitorCoordinator:
             ("expected_study_block_id",),
             ("expected_study_generation",),
         )
-        if expected is LEGACY_IDENTITY:
-            return True
         if expected is MALFORMED_IDENTITY:
             return self._reject_command(
-                f"{label} carried an incomplete expected Study identity"
+                f"{label} carried an absent or incomplete expected Study identity"
             )
         return self._study_identity_matches(expected, label)
 
@@ -2552,11 +2619,9 @@ class WindowsMonitorCoordinator:
             ("expected_break_id", "expected_study_block_id"),
             ("expected_cosecant_generation", "expected_study_generation"),
         )
-        if expected is LEGACY_IDENTITY:
-            return True
         if expected is MALFORMED_IDENTITY:
             return self._reject_command(
-                "return intent carried an incomplete expected identity"
+                "return intent carried an absent or incomplete expected identity"
             )
 
         break_id, study_block_id, generation, study_generation = expected
@@ -3109,7 +3174,15 @@ class WindowsMonitorCoordinator:
         state = _receipt_state(current)
         if state != COMMITTED_STATE:
             detail = _receipt_error(current) or state
+            # The failure has now been read off the captured receipt, so the
+            # registry copy has no remaining reader.  A still-RUNNING receipt
+            # is refused by storage and stays observable for reconciliation.
+            self._consume_receipt(receipt_id)
             raise RuntimeError(f"{operation} was not committed: {detail}")
+        # This helper is the FINAL consumer for session open, session close,
+        # emergency record and profile learning update: every caller uses the
+        # returned receipt and never looks the id up again (C12-D2).
+        self._consume_receipt(receipt_id)
         return current
 
     def _cleanup(self) -> bool:
@@ -3265,7 +3338,7 @@ class WindowsMonitorCoordinator:
                     "operational_event_id": event_id,
                 }
             )
-            self._pending_trigger = None
+            self._clear_pending_trigger()
             return
 
         rejected = self.services.trigger.reject_candidate(
@@ -3277,7 +3350,7 @@ class WindowsMonitorCoordinator:
                 "Failed pending trigger could not be rejected"
             )
             return
-        self._pending_trigger = None
+        self._clear_pending_trigger()
 
 
 def run(

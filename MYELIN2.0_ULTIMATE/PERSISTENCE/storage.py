@@ -236,6 +236,19 @@ def _exact_index(value: object, name: str) -> int:
 
 
 def _terminal(lane: SQLiteTransactionLane, receipt: TransactionReceipt) -> TransactionReceipt:
+    """Drive one submission to a terminal outcome and CONSUME its receipt.
+
+    Every caller of this helper observes the outcome inline and never looks the
+    receipt up again -- storage is the whole owner, start to finish.  So this
+    is the natural consumption point: once the terminal receipt has been
+    handed back, the lane's registry copy has no remaining reader and is
+    released (C12-D).
+
+    A still-RUNNING receipt is deliberately NOT forgotten.  Its fate is
+    unknown, monitor cleanup can still reconcile it, and an outstanding
+    transaction must stay observable.
+    """
+
     if receipt.state is ReceiptState.RUNNING:
         waited = lane.wait(receipt.receipt_id, timeout_seconds=DURABLE_WAIT_SECONDS)
         if waited is not None:
@@ -244,6 +257,7 @@ def _terminal(lane: SQLiteTransactionLane, receipt: TransactionReceipt) -> Trans
         # The caller must never mistake this for failure or success.  Escalate
         # the unknown terminal state; monitor cleanup can still reconcile it.
         raise RuntimeError(f"persistence is still RUNNING for {receipt.operation}")
+    lane.forget(receipt.receipt_id)
     return receipt
 
 
@@ -557,6 +571,52 @@ class _SharedStorageLane:
         with cls._lock:
             return len(cls._owners)
 
+# ---------------------------------------------------------------------------
+# Schema bootstrap.  C12-B.
+# ---------------------------------------------------------------------------
+#
+# ``ensure_production_schema()`` is NOT a read.  It opens its own writable
+# SQLite connection and runs ``BEGIN IMMEDIATE``.  Calling it from runtime
+# reader entry points therefore let a dashboard refresh open a second writable
+# transaction against the database the shared writer lane already owned --
+# exactly the two-writer condition ``_SharedStorageLane`` exists to prevent.
+#
+# The law is now:
+#
+#     PROCESS BOOTSTRAP  -> schema installed and verified, exactly once
+#     runtime writes     -> ONE shared SQLite lane
+#     runtime reads      -> read-only connections, never schema mutation
+#
+# Bootstrap stays reachable from storage so a standalone tool or LAB process
+# that never goes through the launcher still gets a usable database.  It is
+# latched, so the launcher's startup call is the only one that does work in a
+# normal MYELIN process.  The owners check makes the ordering an invariant
+# rather than a convention: once a shared writer lane exists, its creator has
+# already bootstrapped, so reaching an uninstalled schema here would mean a
+# lane was built out of order and we fail closed instead of opening a second
+# writable connection underneath it.
+
+_SCHEMA_BOOTSTRAP_LOCK = threading.Lock()
+_SCHEMA_BOOTSTRAPPED = False
+
+
+def bootstrap_production_schema() -> None:
+    """Install and verify the production schema once per process."""
+
+    global _SCHEMA_BOOTSTRAPPED
+    with _SCHEMA_BOOTSTRAP_LOCK:
+        if _SCHEMA_BOOTSTRAPPED:
+            return
+        if _SharedStorageLane.owners():
+            raise RuntimeError(
+                "schema bootstrap was reached while a shared SQLite writer "
+                "lane is already active; refusing to open a second writable "
+                "connection"
+            )
+        ensure_production_schema()
+        _SCHEMA_BOOTSTRAPPED = True
+
+
 class EngineStorage:
     """One durable-writer facade over the shared lane, plus readers.
 
@@ -566,7 +626,9 @@ class EngineStorage:
     """
 
     def __init__(self) -> None:
-        ensure_production_schema()
+        # Bootstrap, not reinstall.  A second facade joining a live lane does
+        # no schema work at all (C12-B).
+        bootstrap_production_schema()
         # An opaque per-facade token.  Ownership of the shared lane is held by
         # identity, so this facade releasing twice can never evict another.
         self._owner_token = object()
@@ -578,6 +640,36 @@ class EngineStorage:
     # every consumer a ``shutdown()`` handle on process-wide persistence and
     # let them bypass the owner protocol entirely.  Writes go through the
     # methods below; the LAB inspects ``_lane`` for white-box assertions.
+
+    # ------------------------------------------------------------------
+    # Write admission.  C12-A.
+    # ------------------------------------------------------------------
+    #
+    # ``shutdown`` ends THIS facade's writer lifetime, but the shared lane
+    # outlives it whenever another owner is still holding on.  A write method
+    # calling ``self._lane.submit`` directly therefore could not tell the
+    # difference between "the lane is alive" and "I am still allowed to use
+    # it", and a released owner could commit durable rows after its own
+    # lifetime had ended.
+    #
+    # Every MUTATING operation now enters the lane through ``_submit``, so
+    # closed-facade admission is decided in exactly one place.  Reads are NOT
+    # routed here: they open their own read-only connection and never touch
+    # the lane, so a closed facade stays readable.  ``receipt``/``wait`` are
+    # observations of work this facade submitted while it was still open --
+    # refusing those would strand a caller that shut down mid-flight.
+
+    def _require_open(self) -> None:
+        with self._lifetime_lock:
+            if self._closed:
+                raise RuntimeError(
+                    "EngineStorage facade is closed; this owner released the "
+                    "shared persistence lane and may no longer write"
+                )
+
+    def _submit(self, operation: str, callback) -> TransactionReceipt:
+        self._require_open()
+        return self._lane.submit(operation, callback)
 
     def load_profile_learning(self, *, profile_key: str) -> ProfileLearningState:
         """Load the latest committed learning state for one profile.
@@ -796,7 +888,7 @@ class EngineStorage:
                 session_id=sid,
             )
 
-        return self._lane.submit("update profile learning session", write)
+        return self._submit("update profile learning session", write)
 
     def open_monitor_session(self, *, profile_type: str) -> TransactionReceipt:
         profile = " ".join(str(profile_type).split())[:80]
@@ -811,7 +903,7 @@ class EngineStorage:
             session_id = int(cursor.lastrowid)
             return TransactionResult(result_id=session_id, session_id=session_id)
 
-        return self._lane.submit("open monitor session", write)
+        return self._submit("open monitor session", write)
 
     def persist_trigger(self, *, session_id: int, candidate: object) -> TransactionReceipt:
         if type(session_id) is not int or session_id <= 0:
@@ -836,13 +928,24 @@ class EngineStorage:
             )
             return TransactionResult(result_id=int(cursor.lastrowid), session_id=session_id)
 
-        return self._lane.submit("persist trigger", write)
+        return self._submit("persist trigger", write)
 
     def receipt(self, receipt_id: str) -> TransactionReceipt | None:
         return self._lane.receipt(receipt_id)
 
     def wait(self, receipt_id: str, *, timeout_seconds: float) -> TransactionReceipt | None:
         return self._lane.wait(receipt_id, timeout_seconds=timeout_seconds)
+
+    def forget_receipt(self, receipt_id: str) -> bool:
+        """Release a terminal receipt this facade handed to its owner.
+
+        Storage consumes the receipts it owns end to end (see ``_terminal``).
+        The lifecycle receipts returned raw -- session open/close, emergency,
+        trigger persistence -- belong to their caller, so only that caller can
+        say when it has finished reading one.  A RUNNING receipt is refused.
+        """
+
+        return self._lane.forget(receipt_id)
 
     def close_monitor_session(self, *, session_id: int, reason: str) -> TransactionReceipt:
         clean_reason = " ".join(str(reason).split())[:80] or "STOPPED"
@@ -856,7 +959,7 @@ class EngineStorage:
                 raise RuntimeError("session close did not update exactly one open session")
             return TransactionResult(result_id=session_id, session_id=session_id)
 
-        return self._lane.submit("close monitor session", write)
+        return self._submit("close monitor session", write)
 
     def record_emergency(self, *, session_id: int) -> TransactionReceipt:
         def write(connection):
@@ -883,7 +986,7 @@ class EngineStorage:
             )
             return TransactionResult(result_id=emergency_id, session_id=session_id)
 
-        return self._lane.submit("record emergency", write)
+        return self._submit("record emergency", write)
 
     def append_cosine_events(self, events) -> bool:
         batch = tuple(events)
@@ -940,7 +1043,7 @@ class EngineStorage:
                 )
             return TransactionResult()
 
-        receipt = _terminal(self._lane, self._lane.submit("append COSINE event batch", write))
+        receipt = _terminal(self._lane, self._submit("append COSINE event batch", write))
         return receipt.state is ReceiptState.COMMITTED
 
     def append_mirl_events(self, events) -> bool:
@@ -966,7 +1069,7 @@ class EngineStorage:
                 )
             return TransactionResult()
 
-        receipt = _terminal(self._lane, self._lane.submit("append MIRL event batch", write))
+        receipt = _terminal(self._lane, self._submit("append MIRL event batch", write))
         return receipt.state is ReceiptState.COMMITTED
 
     def append_sine_facts(self, facts) -> bool:
@@ -992,7 +1095,7 @@ class EngineStorage:
                 )
             return TransactionResult()
 
-        receipt = _terminal(self._lane, self._lane.submit("append SINE fact batch", write))
+        receipt = _terminal(self._lane, self._submit("append SINE fact batch", write))
         return receipt.state is ReceiptState.COMMITTED
 
     def append_cosecant_facts(self, *, session_id: int | None, facts) -> bool:
@@ -1017,7 +1120,7 @@ class EngineStorage:
                 )
             return TransactionResult()
 
-        receipt = _terminal(self._lane, self._lane.submit("append COSECANT fact batch", write))
+        receipt = _terminal(self._lane, self._submit("append COSECANT fact batch", write))
         return receipt.state is ReceiptState.COMMITTED
 
     def record_study_snapshot(self, *, session_id: int | None, action: str, snapshot: object) -> bool:
@@ -1033,7 +1136,7 @@ class EngineStorage:
             )
             return TransactionResult()
 
-        receipt = _terminal(self._lane, self._lane.submit("record Study snapshot", write))
+        receipt = _terminal(self._lane, self._submit("record Study snapshot", write))
         return receipt.state is ReceiptState.COMMITTED
 
     # ------------------------------------------------------------------
@@ -1134,7 +1237,7 @@ class EngineStorage:
             return TransactionResult()
 
         receipt = _terminal(
-            self._lane, self._lane.submit("save planner block", write)
+            self._lane, self._submit("save planner block", write)
         )
         if receipt.state is not ReceiptState.COMMITTED:
             raise RuntimeError(
@@ -1179,7 +1282,7 @@ class EngineStorage:
             return TransactionResult()
 
         receipt = _terminal(
-            self._lane, self._lane.submit("archive planner block", write)
+            self._lane, self._submit("archive planner block", write)
         )
         return receipt.state is ReceiptState.COMMITTED
 
@@ -1283,7 +1386,7 @@ class EngineStorage:
             )
             return TransactionResult()
 
-        receipt = _terminal(self._lane, self._lane.submit("save note", write))
+        receipt = _terminal(self._lane, self._submit("save note", write))
         if receipt.state is not ReceiptState.COMMITTED:
             raise RuntimeError(
                 f"note was not durably accepted: {receipt.error or 'refused'}"
@@ -1314,7 +1417,7 @@ class EngineStorage:
             )
             return TransactionResult()
 
-        receipt = _terminal(self._lane, self._lane.submit("archive note", write))
+        receipt = _terminal(self._lane, self._submit("archive note", write))
         return receipt.state is ReceiptState.COMMITTED
 
     def read_cosine_events(self):
@@ -1345,7 +1448,7 @@ class EngineStorage:
 def read_cosine_events():
     from COSINE.cosine import CosineEvent, EventClass
 
-    ensure_production_schema()
+    bootstrap_production_schema()
     connection = connect_database(read_only=True)
     try:
         rows = connection.execute(
@@ -1377,7 +1480,7 @@ def read_cosine_events():
 def read_mirl_events():
     from MIRL.mirl import MirlEvent, MirlEventClass, MirlEventName
 
-    ensure_production_schema()
+    bootstrap_production_schema()
     connection = connect_database(read_only=True)
     try:
         rows = connection.execute(
@@ -1440,7 +1543,7 @@ def read_control_station_analytics() -> ControlStationAnalyticsSnapshot:
     from COSINE.report import CosineReadAuthority
     from MIRL.read_model import IntegrityStatus, MirlReadAuthority, MirlReadInput
 
-    ensure_production_schema()
+    bootstrap_production_schema()
     session_count, trigger_count = _counts()
     mirl_source = MirlReadInput(
         events=read_mirl_events(),
@@ -1472,7 +1575,7 @@ def read_control_station_analytics() -> ControlStationAnalyticsSnapshot:
 # ---------------------------------------------------------------------------
 
 def emergency_followup_required() -> bool:
-    ensure_production_schema()
+    bootstrap_production_schema()
     connection = connect_database(read_only=True)
     try:
         row = connection.execute(
@@ -1487,7 +1590,7 @@ def record_emergency_followup_reason(reason_code: str) -> bool:
     reason = " ".join(str(reason_code).split())[:80]
     if not reason:
         return False
-    ensure_production_schema()
+    bootstrap_production_schema()
     connection = connect_database(read_only=False)
     try:
         connection.execute("BEGIN IMMEDIATE")
@@ -1559,6 +1662,7 @@ def export_analytics_sheet(*, snapshot: object, request: object) -> str:
 
 __all__ = [
     "EngineStorage",
+    "bootstrap_production_schema",
     "PROFILE_LEARNING_MODEL_VERSION",
     "ProfileLearningState",
     "REPORT_ACCESS_COORDINATOR",

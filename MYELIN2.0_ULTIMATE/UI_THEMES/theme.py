@@ -96,7 +96,10 @@ class ThemeController(QObject):
     # BrandConsole -- shell/topbar composition belongs with the shell.
 
 def _assets_root() -> Path:
-    return Path(__file__).resolve().parents[1] / "Required_assets"
+    # One canonical asset root, shared with PERSISTENCE.database (C12-E).
+    from PERSISTENCE.database import ASSET_ROOT_NAME
+
+    return Path(__file__).resolve().parents[1] / ASSET_ROOT_NAME
 
 def resource_icon(relative_path: str) -> QIcon:
     relative = Path(str(relative_path))

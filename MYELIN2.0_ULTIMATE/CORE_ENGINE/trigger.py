@@ -92,12 +92,13 @@ MODEL_MAGNITUDE_MULTIPLIERS: Final[tuple[tuple[str, float], ...]] = (
     ("generic", 0.70),
 )
 
-# Mapping from the already-authoritative Executive Blacklist surface into the
-# legacy model category.  No platform/title lookup is performed here.
+# Mapping from Resource Intent's canonical resource surface into the legacy
+# model category.  No platform/title lookup and no Blacklist-vocabulary
+# translation is performed here.
 MODEL_CATEGORY_BY_SURFACE: Final[tuple[tuple[str, str], ...]] = (
-    ("short_feed", "short_form_video"),
-    ("social_feed", "social_feed"),
-    ("selected_video", "media_hub"),
+    ("youtube_shorts", "short_form_video"),
+    ("social", "social_feed"),
+    ("youtube_watch", "media_hub"),
 )
 
 
@@ -561,6 +562,16 @@ def _enum_value(value: object) -> str:
     return str(getattr(value, "value", value) or "")
 
 
+def _canonical_resource_surface(context: object) -> str:
+    """Return only Resource Intent's already-built canonical surface fact."""
+
+    intent_snapshot = _field(context, "resource_intent")
+    verdict = _field(intent_snapshot, "verdict")
+    resource_identity = _field(verdict, "resource_identity")
+    surface = _enum_value(_field(resource_identity, "surface", ""))
+    return surface.strip().casefold() or "unknown"
+
+
 def _normalise_process(value: object) -> str:
     return str(value or "").strip().casefold()
 
@@ -1006,7 +1017,7 @@ class TriggerAuthority:
             source_policy_version=str(_field(verdict, "classifier_version", "") or ""),
             correlation_keys=tuple(dict.fromkeys(aliases)),
             platform_key=str(_field(resource_identity, "platform_key", "") or ""),
-            surface_class=_enum_value(_field(resource_identity, "surface", "")),
+            surface_class=_canonical_resource_surface(context),
             resource_key=resource_key,
             study_context_token=study_token,
             observation_token=observation_token,
@@ -1048,7 +1059,7 @@ class TriggerAuthority:
             source_policy_version=str(_field(offer, "policy_version", "") or ""),
             correlation_keys=(self._opaque_evidence_key("blacklist", offer_uid),),
             platform_key=str(_field(offer, "platform_key", "") or ""),
-            surface_class=str(_field(offer, "surface_class", "") or ""),
+            surface_class=_canonical_resource_surface(context),
             resource_key=str(_field(offer, "resource_key", "") or ""),
             study_context_token=str(_field(intent_verdict, "study_context_token", "") or ""),
             observation_token=str(_field(intent_verdict, "observation_token", "") or ""),

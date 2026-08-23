@@ -24,6 +24,9 @@ from typing import Callable, Final
 
 
 DATABASE_FILENAME: Final = "myelin2.0_session.db"
+
+#: The one canonical runtime asset root inside MYELIN2.0_ULTIMATE.
+ASSET_ROOT_NAME: Final = "ASSETS"
 WRITE_QUEUE_CAPACITY: Final = 128
 SQLITE_BUSY_TIMEOUT_MS: Final = 5_000
 
@@ -89,12 +92,14 @@ def resource_path(relative_path: str | os.PathLike[str]) -> Path:
     if relative.is_absolute():
         raise ValueError("resource path must be relative to MYELIN2.0_ULTIMATE")
     root = project_root()
-    candidate = (root / "Required_assets" / relative).resolve()
-    asset_root = (root / "Required_assets").resolve()
+    # ASSETS/ is the one canonical runtime asset root and the only asset tree
+    # the production body ships (C12-E).
+    candidate = (root / ASSET_ROOT_NAME / relative).resolve()
+    asset_root = (root / ASSET_ROOT_NAME).resolve()
     try:
         candidate.relative_to(asset_root)
     except ValueError as exc:
-        raise ValueError("resource path escapes Required_assets") from exc
+        raise ValueError(f"resource path escapes {ASSET_ROOT_NAME}") from exc
     return candidate
 
 
@@ -199,6 +204,40 @@ class SQLiteTransactionLane:
         record.done.wait(max(0.0, float(timeout_seconds)))
         return self.receipt(receipt_id)
 
+    def forget(self, receipt_id: str) -> bool:
+        """Release one receipt whose owner has finished observing it.
+
+        A receipt exists so its owner can learn the transaction's fate.  Once
+        that owner has seen a TERMINAL state the record has no further reader,
+        and keeping it forever makes a long MYELIN process accumulate one
+        in-memory record per durable write (C12-D).
+
+        This is a CONSUMPTION, not a cap.  There is no size limit and no TTL,
+        because neither can tell an abandoned receipt from one an owner is
+        still about to read.  Only the owner knows, so only the owner may
+        forget.
+
+        A RUNNING receipt is never dropped -- an outstanding transaction must
+        stay observable no matter who asks -- and ``False`` says exactly that:
+        nothing was released.
+        """
+
+        key = str(receipt_id or "")
+        with self._lock:
+            record = self._records.get(key)
+            if record is None:
+                return False
+            if record.receipt.state is ReceiptState.RUNNING:
+                return False
+            del self._records[key]
+            return True
+
+    def outstanding(self) -> int:
+        """How many receipts the lane is still holding.  For tests/telemetry."""
+
+        with self._lock:
+            return len(self._records)
+
     def shutdown(self, *, timeout_seconds: float = 8.0) -> None:
         with self._lock:
             if self._closed:
@@ -266,6 +305,7 @@ class SQLiteTransactionLane:
 
 
 __all__ = [
+    "ASSET_ROOT_NAME",
     "ReceiptState",
     "SQLiteTransactionLane",
     "TransactionReceipt",

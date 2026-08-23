@@ -52,6 +52,15 @@ from .lifecycle import SurfaceKind
 
 
 POLL_INTERVAL_MS: Final = 120
+
+#: How long analytics shutdown waits for an already-accepted worker.  Analytics
+#: workers READ persistence, and the launcher releases its share of the SQLite
+#: lane immediately after ``analytics.shutdown()`` returns, so an unjoined
+#: worker would still be inside a database that is going away.  The wait is
+#: deliberately BOUNDED: a GUI shutdown must never hang on a stuck reader, so a
+#: worker that overruns is reported truthfully instead of waited on forever
+#: (C12-C).
+ANALYTICS_SHUTDOWN_TIMEOUT_SECONDS: Final = 2.0
 MAX_ERROR_LENGTH: Final = 220
 
 PAGE_METRIC_HUB: Final = "metric-hub"
@@ -238,12 +247,30 @@ class SharedDashboardRefresh(QObject):
             self._poll.start()
         return True
 
-    def shutdown(self) -> None:
-        """Stop result delivery without joining a possibly blocked reader."""
+    def shutdown(
+        self,
+        *,
+        timeout: float = ANALYTICS_SHUTDOWN_TIMEOUT_SECONDS,
+    ) -> bool:
+        """Reject new work, stop delivery, then wait BOUNDED for the reader.
+
+        Returns whether the accepted worker actually finished.  ``False`` means
+        a reader overran the budget and is still touching persistence -- the
+        caller is told the truth rather than being blocked indefinitely.
+        """
 
         self._closed = True
         self._pending = False
         self._poll.stop()
+        worker = self._worker
+        if worker is None or not worker.is_alive():
+            self._worker = None
+            return True
+        worker.join(max(0.0, float(timeout)))
+        if worker.is_alive():
+            return False
+        self._worker = None
+        return True
 
     def _take_result(self) -> None:
         if self._closed:
@@ -743,6 +770,9 @@ class _AnalyticsExport(QObject):
         self._snapshot = None
         self._busy = False
         self._closed = False
+        # The worker is retained so shutdown can join it (C12-C).  An export
+        # discarded its thread entirely, which made a bounded wait impossible.
+        self._worker: threading.Thread | None = None
         self._results: queue.Queue = queue.Queue(maxsize=1)
         self._poll = QTimer(self)
         self._poll.setInterval(POLL_INTERVAL_MS)
@@ -785,17 +815,36 @@ class _AnalyticsExport(QObject):
                     pass
             _publish_latest(self._results, result)
 
-        threading.Thread(
+        self._worker = threading.Thread(
             target=export,
             name="MyelinAnalyticsExport",
             daemon=True,
-        ).start()
+        )
+        self._worker.start()
         self._poll.start()
         return True
 
-    def shutdown(self) -> None:
+    def shutdown(
+        self,
+        *,
+        timeout: float = ANALYTICS_SHUTDOWN_TIMEOUT_SECONDS,
+    ) -> bool:
+        """Reject new exports, stop delivery, then wait BOUNDED for the writer.
+
+        Returns whether the accepted export actually finished.
+        """
+
         self._closed = True
         self._poll.stop()
+        worker = self._worker
+        if worker is None or not worker.is_alive():
+            self._worker = None
+            return True
+        worker.join(max(0.0, float(timeout)))
+        if worker.is_alive():
+            return False
+        self._worker = None
+        return True
 
     def _take_result(self) -> None:
         if self._closed:
@@ -891,18 +940,28 @@ class AnalyticsController(QObject):
         self._refresh.request_refresh()
         return True
 
-    def shutdown(self) -> None:
-        """Stop delivery without waiting on analytics or export workers."""
+    def shutdown(
+        self,
+        *,
+        timeout: float = ANALYTICS_SHUTDOWN_TIMEOUT_SECONDS,
+    ) -> bool:
+        """Stop delivery and bound-wait for accepted analytics workers.
 
-        if self._closed:
-            return
+        Returns whether every accepted worker finished inside the budget.
+        Both lanes are always asked to stop even if the first one overruns, and
+        a repeat call still reports the current worker truth -- a shutdown that
+        returned ``False`` may be retried once the surface is really idle.
+        """
+
         self._closed = True
-        self._refresh.shutdown()
-        self._export.shutdown()
+        budget = max(0.0, float(timeout))
+        drained = self._refresh.shutdown(timeout=budget)
+        drained = self._export.shutdown(timeout=budget) and drained
         if self._composer is not None:
             self._composer.close()
             self._composer.deleteLater()
             self._composer = None
+        return drained
 
     def _create_page(self, name: str, page_type):
         existing = self._pages.get(name)
