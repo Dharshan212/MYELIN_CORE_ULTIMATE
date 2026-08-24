@@ -1,0 +1,96 @@
+================================================================================
+MYELIN 2.0 — C9-A EXCLUDED RUN LEDGER
+RUNS THAT MUST NOT INFLUENCE THE CHOICE OF G
+DATE: 22 August 2026
+================================================================================
+
+PURPOSE
+    Every measurement attempt that was started and then discarded is listed
+    here with its reason. None of these contributed a single sample to the
+    authoritative statistics. This exists so the false starts are auditable
+    rather than quietly forgotten.
+
+    Authoritative rows live only in C9_RUNTIME_GAP_RAW.csv, which was deleted
+    and recreated after the exclusions below.
+
+
+--------------------------------------------------------------------------------
+EXCLUSION 1 — SMOKE TEST
+--------------------------------------------------------------------------------
+    label                 SMOKE
+    intervals collected   8
+    samples used          0
+    artifacts             deleted before authoritative collection began
+
+    REASON
+    Instrument verification only. Eight intervals cannot support a p99 -- at
+    n=8 the nearest-rank p99 IS the maximum. It confirmed that the wrappers
+    work, that the identity E == dO + L holds (worst delta 1e-9 s), and that
+    L is a real non-zero term. It is directional evidence that the corrected
+    variable matters. It is NOT calibration data and selects nothing.
+
+    Directional values, recorded for the narrative only:
+        dO median 1.506 s   max 2.622 s
+        L  median 0.157 s   max 0.259 s
+        E  median 1.675 s   max 2.683 s
+
+
+--------------------------------------------------------------------------------
+EXCLUSION 2 — CONCURRENT-MONITOR CONTAMINATION
+--------------------------------------------------------------------------------
+    labels                A_desktop_baseline (attempt 1 and attempt 2)
+    target                320 intervals each
+    samples used          0
+    artifacts             none -- neither attempt reached CSV write
+
+    PROCESSES
+        py     PID 70848   started 2026-08-22 01:07:51   attempt 1
+        python PID 49808   started 2026-08-22 01:07:51   attempt 1
+        py     PID 23752   started 2026-08-22 01:09:26   attempt 2
+        python PID 30780   started 2026-08-22 01:09:26   attempt 2
+
+    REASON
+    Attempt 1 was launched with a trailing "&" inside the shell command. The
+    harness reported that task as completed with exit code 0, but the Python
+    child process outlived the shell and kept running. Attempt 2 was then
+    started while attempt 1 was still polling.
+
+    For roughly two minutes TWO real WindowsMonitorCoordinator instances were
+    polling the same machine at 1.5 s. That invalidates the data in both
+    directions at once:
+        - each coordinator's foreground read, UIA read and downstream
+          processing competed with the other for CPU, inflating L and
+          therefore E;
+        - both were queued to append to the same CSV, so the interval
+          sequence would have interleaved two unrelated cycle streams.
+
+    DETECTION
+    The contamination was found before any data was used, by checking for
+    live processes rather than trusting the harness completion notification:
+        Get-Process python*,py*  ->  four live processes, two start times.
+
+    DISPOSITION
+    All four PIDs terminated. Neither attempt had written
+    C9_RUNTIME_GAP_RAW.csv, so no contaminated row ever entered the artifacts.
+    The whole c9_artifacts directory was deleted and recreated before the
+    authoritative run.
+
+    CORRECTIVE ACTION -- LAB ONLY, PRODUCTION DIFF STILL ZERO
+    measure_c9_runtime_gap.py now takes an exclusive lock
+    (c9_artifacts/measurement.lock) recording pid, condition and UTC start
+    time. A second invocation refuses to start and exits 2 rather than
+    producing quietly contaminated data. The lock is released in a finally
+    block. Verified: guard blocks a second start, and releases cleanly on
+    normal exit.
+
+
+--------------------------------------------------------------------------------
+AUTHORITATIVE DATA BEGINS AFTER THIS POINT
+--------------------------------------------------------------------------------
+    The C9-A dataset consists solely of runs recorded in
+    C9_RUNTIME_GAP_RAW.csv after the exclusions above, each collected by a
+    single lock-holding measurement process at production cadence
+    (DEFAULT_POLL_SECONDS = 1.5) with the real Windows foreground reader and
+    the real Browser/UIA address-bar reader.
+
+================================================================================

@@ -1017,6 +1017,15 @@ class SinePopupPresenter(QObject):
         if window is not None:
             window.close_from_authority(reason)
 
+    def show_action_rejection(self, request_id: str, message: str) -> bool:
+        """Keep the exact popup open and retryable after transport rejection."""
+
+        window = self._windows.get(str(request_id or ""))
+        if window is None:
+            return False
+        window.show_action_result(message, allow_retry=True)
+        return True
+
     @pyqtSlot(str)
     def _emergency_close_on_gui_thread(self, reason: str) -> None:
         self._accepting_requests = False

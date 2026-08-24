@@ -1091,7 +1091,7 @@ class FeedTag(QLabel):
         self.setObjectName("feedTag")
         if tone:
             self.setProperty("tone", tone)
-        self.setFont(make_font(10, 600, spacing=0.6))
+        self.setFont(make_font(9, 600, spacing=0.4))
 
 
 class HeroCard(QFrame):
@@ -1264,15 +1264,16 @@ class FeedList(QWidget):
         row.setObjectName("feedItem")
         row.setFrameShape(QFrame.Shape.NoFrame)
         layout = QHBoxLayout(row)
-        layout.setContentsMargins(8, 10, 8, 10)
-        layout.setSpacing(12)
+        layout.setContentsMargins(6, 9, 6, 9)
+        layout.setSpacing(8)
 
         layout.addWidget(Dot(8, tone or "cyan", glow=False))
-        stamp = label(time_text, 12.5, 400, "muted", mono=True)
-        stamp.setFixedWidth(56)
+        stamp = label(time_text, 11, 400, "muted", mono=True)
+        stamp.setFixedWidth(50)
         layout.addWidget(stamp)
-        body = label(text, 12.5, 400, "text")
-        body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        body = label(text, 11, 400, "text", wrap=True)
+        body.setMinimumWidth(0)
+        body.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         layout.addWidget(body, 1)
         if tag:
             layout.addWidget(FeedTag(tag, tone))
@@ -2533,6 +2534,8 @@ class ControlPage(QWidget):
         self._lifecycle = lifecycle
         self._profiles = profiles
         self._last_sine_console_signature: tuple[object, ...] | None = None
+        self._latest_blacklist_live_view = None
+        self._latest_sine_live_view = None
         self._session_elapsed = QElapsedTimer()
         self._session_tick = QTimer(self)
         self._session_tick.setInterval(1000)
@@ -2593,10 +2596,23 @@ class ControlPage(QWidget):
         head, self._current_hint = card_head("Current Resource", "Idle")
         current_body.addWidget(head)
         current_body.addSpacing(16)
-        self._resource_label = label("\u2014", 16, 600, "text", mono=True)
+        self._resource_label = label("\u2014", 13.5, 600, "text", mono=True)
+        self._resource_label.setMinimumWidth(0)
+        self._resource_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
         current_body.addWidget(self._resource_label)
-        current_body.addSpacing(12)
+        self._resource_title = label("", 11.5, 400, "muted", mono=True)
+        self._resource_title.setMinimumWidth(0)
+        self._resource_title.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        current_body.addWidget(self._resource_title)
+        current_body.addSpacing(10)
         dwell_row, self._dwell_track, self._dwell_value = bar_row("Dwell / target")
+        self._dwell_value.setFixedWidth(118)
         current_body.addWidget(dwell_row)
         current_body.addSpacing(10)
         self._resource_reason = label(
@@ -2804,10 +2820,14 @@ class ControlPage(QWidget):
             self._status.setToolTip(f"Session {session_id}")
 
         blacklist = self._value(payload, "blacklist")
+        self._latest_blacklist_live_view = blacklist
         if blacklist is not None:
             name = str(self._value(blacklist, "resource_label", "") or "").strip()
             title = str(self._value(blacklist, "resource_title", "") or "").strip()
-            self._resource_label.setText(f"{name} \u2014 {title}" if title else (name or "\u2014"))
+            self._resource_label.setText(name or "\u2014")
+            self._resource_title.setText(title)
+            self._resource_label.setToolTip(name)
+            self._resource_title.setToolTip(title)
 
             disposition = self._enum_text(self._value(blacklist, "disposition"), "")
             state = self._enum_text(self._value(blacklist, "state"), "INACTIVE")
@@ -2820,20 +2840,7 @@ class ControlPage(QWidget):
                 reason or "No managed resource is in the foreground."
             )
 
-            elapsed = self._value(blacklist, "dwell_elapsed_seconds", 0.0)
-            target = self._value(blacklist, "dwell_target_seconds", 0.0)
-            fraction = 0.0
-            try:
-                target_value = float(target or 0.0)
-                if target_value > 0:
-                    fraction = min(1.0, max(0.0, float(elapsed or 0.0) / target_value))
-            except (TypeError, ValueError):
-                fraction = 0.0
-            self._dwell_track.set_progress(
-                fraction, "red" if fraction >= 0.85 else "rose" if fraction >= 0.5 else "cyan"
-            )
-            self._dwell_value.setText(self._format_seconds(elapsed))
-            self._ring.set_progress(fraction)
+            self._render_current_authority_interval()
 
         mirl = self._value(payload, "mirl")
         if mirl is not None:
@@ -2868,6 +2875,7 @@ class ControlPage(QWidget):
         """Render exactly the latest SINE live-view facts."""
 
         if payload is None:
+            self._latest_sine_live_view = None
             self._sine_timer.setText("--:--")
             for label in (
                 self._sine_stage,
@@ -2881,7 +2889,10 @@ class ControlPage(QWidget):
                 label.setText("—")
             self._last_sine_console_signature = None
             self._highlight_sine_stage(None)
+            self._render_current_authority_interval()
             return
+
+        self._latest_sine_live_view = payload
 
         stage = self._enum_text(self._value(payload, "stage"), "NONE")
         phase = self._enum_text(self._value(payload, "phase"), "IDLE")
@@ -2906,6 +2917,7 @@ class ControlPage(QWidget):
         )
         self._sine_popup.setText(popup)
         self._sine_fact.setText(last_fact)
+        self._render_current_authority_interval()
 
         # A one-second console cadence makes VS Code's terminal useful without
         # flooding it at the controller's 250 ms telemetry polling rate.
@@ -2935,6 +2947,79 @@ class ControlPage(QWidget):
                 flush=True,
             )
 
+    def _render_current_authority_interval(self) -> None:
+        """Project the current owner without inventing any timing value."""
+
+        sine = self._latest_sine_live_view
+        if sine is not None:
+            stage = self._value(sine, "stage")
+            try:
+                stage_number = int(getattr(stage, "value", stage))
+            except (TypeError, ValueError):
+                stage_number = 0
+            phase = self._enum_text(self._value(sine, "phase"), "IDLE")
+            protected = bool(self._value(sine, "protected_red_active", False))
+            if protected or phase == "PROTECTED RED":
+                self._dwell_track.set_progress(1.0, "red")
+                self._dwell_value.setText("RETURN REQUIRED")
+                self._ring.set_progress(1.0)
+                return
+
+            target_field = {
+                1: "stage_2_delay_seconds_applied",
+                2: "stage_3_delay_seconds_applied",
+            }.get(stage_number)
+            remaining_raw = self._value(sine, "next_deadline_seconds")
+            target_raw = self._value(sine, target_field) if target_field else None
+            try:
+                target = float(target_raw)
+                remaining = max(0.0, float(remaining_raw))
+            except (TypeError, ValueError, OverflowError):
+                target = 0.0
+                remaining = 0.0
+            if target > 0.0 and remaining_raw is not None:
+                elapsed = min(target, max(0.0, target - remaining))
+                fraction = min(1.0, max(0.0, elapsed / target))
+                self._dwell_track.set_progress(
+                    fraction,
+                    "red"
+                    if fraction >= 0.85
+                    else "rose"
+                    if fraction >= 0.5
+                    else "cyan",
+                )
+                self._dwell_value.setText(
+                    f"{self._format_seconds(elapsed)} / "
+                    f"{self._format_seconds(target)}"
+                )
+                self._ring.set_progress(fraction)
+                return
+
+        blacklist = self._latest_blacklist_live_view
+        elapsed = self._value(blacklist, "dwell_elapsed_seconds", 0.0)
+        target = self._value(blacklist, "dwell_target_seconds", 0.0)
+        fraction = 0.0
+        try:
+            target_value = float(target or 0.0)
+            if target_value > 0.0:
+                fraction = min(
+                    1.0,
+                    max(0.0, float(elapsed or 0.0) / target_value),
+                )
+        except (TypeError, ValueError, OverflowError):
+            target_value = 0.0
+            fraction = 0.0
+        self._dwell_track.set_progress(
+            fraction,
+            "red" if fraction >= 0.85 else "rose" if fraction >= 0.5 else "cyan",
+        )
+        self._dwell_value.setText(
+            f"{self._format_seconds(elapsed)} / {self._format_seconds(target_value)}"
+            if target_value > 0.0
+            else self._format_seconds(elapsed)
+        )
+        self._ring.set_progress(fraction)
+
     def _highlight_sine_stage(self, stage: object) -> None:
         """Mark the chip SINE reports as current; never infer one locally."""
 
@@ -2959,8 +3044,24 @@ class ControlStationWindow(QMainWindow):
         self._shutdown_is_authorized = False
 
         self.setObjectName("myelinControlStation")
+        # The Control Station is an ordinary Windows application window.  The
+        # loading screen and SINE surfaces are intentionally frameless, but
+        # that presentation contract must never leak onto this host window.
+        # Keep the native caption and its minimize/maximize/close controls
+        # explicit so a stale Qt geometry/state cannot strand the user in a
+        # borderless surface.
+        native_flags = self.windowFlags()
+        native_flags &= ~Qt.WindowType.FramelessWindowHint
+        native_flags |= (
+            Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        self.setWindowFlags(native_flags)
         self.setWindowTitle(APP_NAME)
-        self.setWindowIcon(resource_icon("icons/Myelin.ico"))
+        self.setWindowIcon(resource_icon("icons/Myelin_Loading_Screen.ico"))
         self.setMinimumSize(MINIMUM_WINDOW_SIZE)
         self.resize(DEFAULT_WINDOW_SIZE)
 
@@ -3174,6 +3275,9 @@ class ControlStationWindow(QMainWindow):
         title = str(getattr(event, "title", "") or "")
         message = getattr(event, "message", "")
         timestamp = str(getattr(event, "time", "") or "")
+        badge = str(getattr(event, "badge", "") or "").strip()
+        feed_text = str(getattr(event, "feed_text", "") or "").strip()
+        tone = str(getattr(event, "tone", "") or "").strip()
 
         local_time = self._activity_time(timestamp)
 
@@ -3186,16 +3290,30 @@ class ControlStationWindow(QMainWindow):
             return
 
         if kind == "activity":
+            badge = badge or "ACTIVITY"
             headline = self._activity_title(app, title)
             print(
-                f"[MYELIN][ACTIVITY] [{local_time}] app->{app or 'Unknown'} "
+                f"[MYELIN][{badge}] [{local_time}] app->{app or 'Unknown'} "
                 f"[{headline}]",
                 flush=True,
             )
+
             self.pages.control.append_telemetry(
                 time_text=local_time,
-                text=f"{(app or 'UNKNOWN').upper()} \u2014 {headline}",
-                tag=str(getattr(event, "badge", "") or "DWELL"),
+                text=feed_text or f"{(app or 'UNKNOWN').upper()} \u2014 {headline}",
+                tag=badge,
+                tone=tone,
+            )
+            return
+
+        if badge:
+            text = feed_text or str(message or "Telemetry event")
+            print(f"[{local_time}] [{badge}] {text}", flush=True)
+            self.pages.control.append_telemetry(
+                time_text=local_time,
+                text=text,
+                tag=badge,
+                tone=tone,
             )
             return
 
@@ -3442,7 +3560,7 @@ def _configure_application(app: QApplication) -> None:
     """Apply process-wide Qt settings before any main window is created."""
 
     app.setApplicationName("MYELIN Control Station")
-    app.setWindowIcon(resource_icon("icons/Myelin.ico"))
+    app.setWindowIcon(resource_icon("icons/Myelin_Loading_Screen.ico"))
     app.setQuitOnLastWindowClosed(False)
     app.setFont(make_font(13, 400))
     app.setStyleSheet(build_application_stylesheet())

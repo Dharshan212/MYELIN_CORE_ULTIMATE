@@ -152,6 +152,8 @@ class BrowserAuthority(Protocol):
 class ResourceIntentAuthority(Protocol):
     def start_session(self, *, profile_type: str) -> None: ...
 
+    def set_stage_one_target_seconds(self, target_seconds: float) -> bool: ...
+
     def observe(
         self,
         *,
@@ -161,12 +163,44 @@ class ResourceIntentAuthority(Protocol):
 
     def live_view(self) -> object: ...
 
+    def set_sine_episode_active(self, active: bool) -> None: ...
+
+    def drain_facts(self) -> tuple[object, ...]: ...
+
+    def record_study_confirmation_popup_shown(
+        self, *, request_id: str, shown_monotonic_ns: int, popup_hwnd: int
+    ) -> bool: ...
+
+    def record_study_confirmation_popup_closed(
+        self, *, request_id: str, occurred_monotonic_ns: int, reason: str
+    ) -> bool: ...
+
+    def record_study_confirmation_response(
+        self,
+        *,
+        request_id: str,
+        response: str,
+        occurred_monotonic_ns: int,
+        expected_study_context_token: str,
+        expected_resource_key: str,
+    ) -> bool: ...
+
+    def record_study_material_allowance(
+        self,
+        *,
+        study_context_token: str,
+        resource_key: str,
+        granted_monotonic_ns: int,
+    ) -> object: ...
+
     def shutdown(self) -> None: ...
 
 
 @runtime_checkable
 class BlacklistAuthority(Protocol):
     def start_session(self, *, personalization_factor: float = 1.0) -> None: ...
+
+    def stage_one_target_seconds(self) -> float: ...
 
     def observe(self, context: MonitorContext) -> object: ...
 
@@ -239,6 +273,22 @@ class SineAuthority(Protocol):
         *,
         candidate_uid: str,
         verified_monotonic_ns: int,
+        evidence_source: str,
+    ) -> bool: ...
+
+    def withhold_presentation_for_verified_return_entry(
+        self,
+        *,
+        candidate_uid: str,
+        verified_monotonic_ns: int,
+        evidence_source: str,
+    ) -> bool: ...
+
+    def resume_presentation_after_recovery_relapse(
+        self,
+        *,
+        candidate_uid: str,
+        occurred_monotonic_ns: int,
         evidence_source: str,
     ) -> bool: ...
 
@@ -766,6 +816,18 @@ def _duration_human(seconds: object) -> str:
     return f"{minutes:02d}m {secs:02d}s"
 
 
+def _authoritative_seconds(seconds: object) -> str:
+    """Format an authority-supplied interval without inventing a fallback."""
+
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError, OverflowError):
+        return "authoritative interval unavailable"
+    if not math.isfinite(value) or value < 0.0:
+        return "authoritative interval unavailable"
+    return f"{value:g} s"
+
+
 def _short_episode_id(value: object) -> str:
     episode = str(value or "").strip()
     if not episode:
@@ -851,13 +913,12 @@ class WindowsMonitorCoordinator:
         #: Expected (Study block_id, generation) carried by a parked GUI break
         #: request, re-checked at admission.  None for identity-free commands.
         self._pending_break_study_identity: tuple[str, int] | None = None
-        # request_id -> (ResourceIntent intervention request, popup visible seconds)
-        self._study_interventions: dict[str, tuple[object, float]] = {}
         self._last_foreground_identity: tuple[object, ...] | None = None
         self._last_red_state: bool | None = None
         self._last_blacklist_console_signature: tuple[object, ...] | None = None
         self._last_browser_diagnostic_signature: tuple[object, ...] | None = None
         self._last_activity_classification_signature: tuple[object, ...] | None = None
+        self._pending_dwell_telemetry: dict[str, object] | None = None
         self._messaging_dwell_key: str = ""
         self._messaging_dwell_started_ns: int = -1
         self._messaging_dwell_last_ns: int = -1
@@ -983,30 +1044,23 @@ class WindowsMonitorCoordinator:
         self._observed_lambda_estimates.clear()
         self._learned_candidate_uids.clear()
 
-        # MBRM organ boundary: MIRL/storage -> MBRM -> SineSessionTiming ->
-        # sine.start_session(). ``learned_lambda`` is already the previous
-        # ELIGIBLE session's stored value only (PERSISTENCE/storage.py never
-        # averages). Session 1 (no learned lambda yet) stays the exact static
-        # SINE baseline, F = 1.0, matching the locked learning-phase design.
+        # MBRM / Ebbinghaus policy boundary. ``learned_lambda`` remains the
+        # previous eligible session's factual learned recovery-rate parameter.
+        # It is retained for Ebbinghaus/MBRM learning and telemetry.
         #
-        # CORRECTION (Chief audit): F must be derived from the previous
-        # session's ACTUAL verified MIRL return latency
-        # (``learned_return_latency_seconds``), never reconstructed from
-        # ``learned_lambda``. Lambda was derived per-episode with a
-        # category-specific D0 (short_form_video/social_feed/media_hub all
-        # differ -- see CORE_ENGINE.trigger.MODEL_MAGNITUDE_MULTIPLIERS), so
-        # inverting it back to a return latency with a different, fixed D0
-        # silently made F depend on which distraction category triggered the
-        # episode instead of purely on how long the user took to return.
-        # Tr is carried as its own durable fact end to end (MIRL ->
-        # ``_commit_profile_learning_after_session_close`` ->
-        # PERSISTENCE.storage.ProfileLearningState -> here) specifically to
-        # avoid that reconstruction.
+        # No implementation authority may invent a reference return time, a
+        # reference lambda, or fixed F bounds. Unapproved calibration values
+        # were removed. Therefore a learned
+        # lambda is NOT enough by itself to authorize personalized runtime
+        # timing. Until policy supplies an explicitly authorized reference,
+        # SINE must fail closed to the exact static baseline (F = 1.0).
+        #
+        # The factor mathematics remains available in
+        # CORE_ENGINE.trigger.mbrm_session_personalization as
+        # F = lambda_user / lambda_ref. This monitor deliberately does not call
+        # it without an authorized lambda_ref.
         session_timing = None
         if learned_lambda is not None:
-            from CORE_ENGINE.trigger import mbrm_session_personalization
-            from SINE.sine import EBBINGHAUS_TIMING_SOURCE, SineSessionTiming
-
             source_session_id = _field(learning_state, "last_learning_session_id", None)
             if (
                 type(source_session_id) is not int
@@ -1031,31 +1085,21 @@ class WindowsMonitorCoordinator:
                 raise RuntimeError(
                     "stored profile return latency is not finite and positive"
                 )
-            mbrm = mbrm_session_personalization(
-                previous_return_latency_minutes=learned_return_latency_seconds / 60.0
-            )
-            session_timing = SineSessionTiming(
-                timing_source=EBBINGHAUS_TIMING_SOURCE,
-                personalization_factor=mbrm.personalization_factor,
-                source_session_id=source_session_id,
-                target_session_id=self.session_id,
-                previous_return_latency_seconds=learned_return_latency_seconds,
-                ebbinghaus_lambda_per_minute=learned_lambda,
-            )
-        self._session_personalization_factor = (
-            session_timing.personalization_factor if session_timing is not None else 1.0
-        )
+
+        self._session_personalization_factor = 1.0
 
         # Initialize downstream authorities only after the session row and the
         # profile-learning snapshot are known.  Trigger freezes this exact value
         # for the whole session; later recovery cannot mutate it in-place.
-        # Blacklist receives the same frozen factor so the first SINE timing
-        # adapts with stages two and three -- see T_i(n) = T_i,base x clamp(F).
+        # With no policy-authorized reference, the frozen factor is exactly 1.0
+        # for Blacklist and SINE. Learned Ebbinghaus state remains available but
+        # cannot change timing until an authorized reference exists.
         self.services.browser.start_session()
         self.services.resource_intent.start_session(profile_type=self.profile_type)
         self.services.blacklist.start_session(
             personalization_factor=self._session_personalization_factor,
         )
+        self._bind_stage_one_target()
         self.services.trigger.start_session(
             session_id=self.session_id,
             profile_type=self.profile_type,
@@ -1074,7 +1118,7 @@ class WindowsMonitorCoordinator:
             self.telemetry_queue,
             "profile_learning_loaded",
             message=(
-                "Profile learning loaded for this session"
+                "Profile learning loaded; Ebbinghaus lambda retained, but SINE personalization is withheld because no policy-authorized reference exists"
                 if learned_lambda is not None
                 else (
                     "Stored profile learning was produced by an incompatible Tr "
@@ -1094,6 +1138,18 @@ class WindowsMonitorCoordinator:
             personalization_factor=self._session_personalization_factor,
         )
         self._publish_startup_banner(learning_state, learned_lambda)
+
+    def _bind_stage_one_target(self) -> float:
+        """Give Resource Intent Blacklist's exact frozen Stage-1 target."""
+
+        target_seconds = self.services.blacklist.stage_one_target_seconds()
+        if not self.services.resource_intent.set_stage_one_target_seconds(
+            target_seconds
+        ):
+            raise RuntimeError(
+                "Resource Intent refused Blacklist's frozen Stage-1 target"
+            )
+        return target_seconds
 
     def _console_banner(self, line: object) -> None:
         _telemetry(self.telemetry_queue, "console_banner", message=line)
@@ -1195,6 +1251,11 @@ class WindowsMonitorCoordinator:
         self.services.resource_intent.set_protected_red(
             bool(self.services.sine.protected_red_active())
         )
+        set_sine_active = getattr(
+            self.services.resource_intent, "set_sine_episode_active", None
+        )
+        if callable(set_sine_active):
+            set_sine_active(self._sine_owns_intervention())
         self.services.resource_intent.set_cosine_active(cosine_active)
         self.services.resource_intent.set_cosine_resource_owned(
             cosine_platform is not None
@@ -1215,6 +1276,7 @@ class WindowsMonitorCoordinator:
         from COSINE.cosine import CosineObservation
 
         now_ns = context.foreground.observed_monotonic_ns
+        self._drain_resource_intent_facts(context.foreground)
         verdict = _field(context.resource_intent, "verdict")
         focus_confirmed = bool(_field(verdict, "study_idle_allowed", False))
         sine_view = self.services.sine.live_view()
@@ -1240,6 +1302,7 @@ class WindowsMonitorCoordinator:
 
         self.services.sine.observe(context)
         blacklist_result = self.services.blacklist.observe(context)
+        self._prepare_dwell_telemetry(blacklist_result)
 
         # A parked break request is decided here, on the same observation the
         # other organs are consuming, so admission never performs its own
@@ -1254,8 +1317,15 @@ class WindowsMonitorCoordinator:
         self._observe_cosecant_return(context)
 
         # One unresolved candidate at a time. A RUNNING database transaction
-        # cannot be replaced by a later foreground observation.
-        if self._pending_trigger is None:
+        # cannot be replaced by a later foreground observation. Once SINE has
+        # accepted a durable candidate, its live episode owns intervention
+        # until an authoritative terminal transition releases it; popup
+        # visibility is presentation state and must not found another SINE 1.
+        if (
+            self._pending_trigger is None
+            and not self._sine_owns_intervention()
+            and self._study_trigger_admission_open(context)
+        ):
             candidate = self.services.trigger.evaluate(
                 context=context,
                 blacklist=blacklist_result,
@@ -1265,6 +1335,33 @@ class WindowsMonitorCoordinator:
 
         for fact in self.services.sine.advance(now_monotonic_ns=now_ns):
             self._route_sine_fact(fact, context.foreground)
+
+    def _study_trigger_admission_open(self, context: MonitorContext) -> bool:
+        """Do not let Blacklist backdate an active Study uncertainty period."""
+
+        from CORE_ENGINE.resource_intent import ResourceIntent, SineContribution
+
+        verdict = _field(context.resource_intent, "verdict")
+        if not str(_field(verdict, "study_context_token", "") or ""):
+            return True
+        return bool(
+            _field(verdict, "classification") is ResourceIntent.DISTRACTION
+            and _field(verdict, "sine_contribution") is SineContribution.READY
+        )
+
+    def _sine_owns_intervention(self) -> bool:
+        """Return whether one live SINE episode blocks a new founding trigger."""
+
+        from SINE.sine import SinePhase
+
+        live_view = self.services.sine.live_view()
+        episode_uid = str(_field(live_view, "episode_uid", "") or "").strip()
+        phase = _field(live_view, "phase")
+        return bool(episode_uid) and phase in {
+            SinePhase.WAITING_FOR_DISPLAY,
+            SinePhase.ACTIVE,
+            SinePhase.PROTECTED_RED,
+        }
 
     def _route_cosine_effect(
         self,
@@ -1533,6 +1630,9 @@ class WindowsMonitorCoordinator:
                 self.telemetry_queue,
                 "trigger",
                 message="Trigger durably admitted; SINE handoff accepted",
+                badge="TRIGGER",
+                feed_text="SINE 1 — triggered",
+                tone="red",
                 candidate_uid=pending.candidate_uid,
                 operational_event_id=event_id,
             )
@@ -1567,11 +1667,61 @@ class WindowsMonitorCoordinator:
         if not self.services.storage.append_mirl_events(events):
             raise RuntimeError("MIRL event batch was not durably accepted")
         for event in events:
+            self._route_mirl_sine_presentation(event, observation)
             self._publish_domain_fact("mirl", event, observation)
 
         # Phase 5 packages recovery only after RETURN_VERIFIED + closure.  Learn
         # from that package only after the matching MIRL event batch is durable.
         self._collect_verified_recovery_learning(observation)
+
+    def _route_mirl_sine_presentation(
+        self,
+        event: object,
+        observation: ForegroundObservation | None = None,
+    ) -> None:
+        """Coordinate presentation from durable MIRL entry/relapse facts only."""
+
+        kind = str(_field(event, "kind", "") or "").strip().upper()
+        candidate_uid = str(_field(event, "candidate_uid", "") or "").strip()
+        occurred_ns = int(_field(event, "occurred_monotonic_ns", 0) or 0)
+        if not candidate_uid or occurred_ns <= 0:
+            return
+
+        accepted: bool | None = None
+        action = ""
+        if kind == "MIRL_RETURN_VERIFIED":
+            action = "withheld"
+            accepted = bool(
+                self.services.sine.withhold_presentation_for_verified_return_entry(
+                    candidate_uid=candidate_uid,
+                    verified_monotonic_ns=occurred_ns,
+                    evidence_source="mirl_return_verified",
+                )
+            )
+        elif kind == "MIRL_RELAPSE_DETECTED":
+            action = "resumed"
+            accepted = bool(
+                self.services.sine.resume_presentation_after_recovery_relapse(
+                    candidate_uid=candidate_uid,
+                    occurred_monotonic_ns=occurred_ns,
+                    evidence_source="mirl_relapse_detected",
+                )
+            )
+
+        if accepted is not None:
+            _telemetry(
+                self.telemetry_queue,
+                "sine_recovery_presentation",
+                observation=observation,
+                message=(
+                    f"SINE presentation {action} from durable MIRL fact"
+                    if accepted
+                    else f"SINE declined MIRL presentation action: {action}"
+                ),
+                mirl_event_kind=kind,
+                candidate_uid=candidate_uid,
+                accepted=accepted,
+            )
 
     def _collect_verified_recovery_learning(
         self,
@@ -1745,9 +1895,10 @@ class WindowsMonitorCoordinator:
     def _commit_profile_learning_after_session_close(self) -> None:
         """Commit one session-average lambda and return latency for the NEXT session only.
 
-        The return-latency mean is MBRM's adaptation authority
-        (``F = Tr_ref / Tr_previous``); the lambda mean is stored alongside it
-        purely as an audit/telemetry value. Both are the mean of this exact
+        Return-latency and learned-lambda means are stored together as factual
+        MBRM/Ebbinghaus evidence for the next session. Runtime personalization
+        remains unauthorized until policy supplies a valid reference. Both are
+        the mean of this exact
         session's evidence -- neither blends across sessions (that replace
         happens in ``PERSISTENCE.storage.update_profile_learning_session``).
         """
@@ -1830,50 +1981,69 @@ class WindowsMonitorCoordinator:
             f"| history={valid_sessions} sessions/{valid_episodes} episodes"
         )
 
+    def _drain_resource_intent_facts(
+        self,
+        observation: ForegroundObservation | None,
+    ) -> None:
+        authority = getattr(self.services, "resource_intent", None)
+        drain = getattr(authority, "drain_facts", None)
+        if not callable(drain):
+            return
+        for fact in tuple(drain() or ()):
+            self._publish_domain_fact("resource_intent", fact, observation)
+
     def _route_sine_fact(
         self,
         fact: object,
         observation: ForegroundObservation | None,
-    ) -> None:
+    ) -> bool:
         kind = _fact_kind(fact).upper()
         occurred_ns = int(_field(fact, "occurred_monotonic_ns", 0) or 0)
+        action_result_recorded = True
 
         if not self.services.storage.append_sine_facts((fact,)):
             raise RuntimeError(f"SINE fact was not durably accepted: {kind}")
 
-        # Capture Study Material ownership before the SINE popup can replace
-        # the foreground window. Resource Intent remains the only authority
-        # that can grant the allowance.
-        if kind == "SINE_POPUP_REQUESTED":
-            popup = _field(fact, "popup")
-            stage = int(_field(fact, "stage", 0) or 0)
-            request_id = str(_field(fact, "popup_request_id", "") or "")
-            presentation = _field(popup, "presentation")
-            if request_id and bool(_field(presentation, "study_mode", False)):
-                selection = self.services.resource_intent.capture_study_intervention(
-                    stage_identity=stage,
-                    now_monotonic_ns=max(1, occurred_ns),
-                    trigger_reason="SINE",
-                    source_event_id=_field(fact, "operational_event_id"),
-                )
-                request = _field(selection, "request")
-                if request is not None:
-                    self._study_interventions[request_id] = (
-                        request,
-                        max(1.0, float(_field(popup, "visible_seconds", 1.0) or 1.0)),
-                    )
-
         if kind == "SINE_STUDY_MATERIAL_REQUESTED":
             request_id = str(_field(fact, "popup_request_id", "") or "")
-            intervention = self._study_interventions.get(request_id)
-            request = intervention[0] if intervention is not None else None
-            if request is None:
+            declared_context_token = str(
+                _field(fact, "study_context_token", "") or ""
+            )
+            declared_resource_key = str(_field(fact, "resource_key", "") or "")
+            from COSECANT_STUDY_MODE.study import StudyState
+            from CORE_ENGINE.resource_intent import study_context_token
+
+            study = self.services.study.snapshot()
+            sine = self.services.sine.live_view()
+            current_context_token = study_context_token(
+                str(_field(study, "block_id", "") or ""),
+                int(_field(study, "generation", 0) or 0),
+            )
+            popup_is_current = bool(
+                request_id
+                and request_id == str(_field(sine, "popup_request_id", "") or "")
+                and str(_field(fact, "episode_uid", "") or "")
+                == str(_field(sine, "episode_uid", "") or "")
+                and str(_field(sine, "last_response", "") or "")
+                == "this_is_study_material"
+            )
+            if not popup_is_current:
                 granted = False
-                reason = "study_material_request_not_current"
+                reason = "denied_popup_not_current"
+            elif _field(study, "state") is not StudyState.ACTIVE:
+                granted = False
+                reason = "denied_no_active_block"
+            elif not declared_resource_key:
+                granted = False
+                reason = "denied_missing_exact_resource"
+            elif declared_context_token != current_context_token:
+                granted = False
+                reason = "denied_context_changed"
             else:
-                result = self.services.resource_intent.grant_study_material(
-                    request,
-                    now_monotonic_ns=max(1, occurred_ns),
+                result = self.services.resource_intent.record_study_material_allowance(
+                    study_context_token=declared_context_token,
+                    resource_key=declared_resource_key,
+                    granted_monotonic_ns=max(1, occurred_ns),
                 )
                 granted = bool(_field(result, "granted", False))
                 outcome = _field(result, "outcome")
@@ -1897,6 +2067,7 @@ class WindowsMonitorCoordinator:
                 reason=reason,
             )
             if not recorded:
+                action_result_recorded = False
                 _telemetry(
                     self.telemetry_queue,
                     "engine_command_rejected",
@@ -1921,6 +2092,7 @@ class WindowsMonitorCoordinator:
                 now_monotonic_ns=max(1, occurred_ns)
             ):
                 self._route_sine_fact(generated, observation)
+        return action_result_recorded
 
     def _publish_domain_fact(
         self,
@@ -1928,9 +2100,16 @@ class WindowsMonitorCoordinator:
         fact: object,
         observation: ForegroundObservation | None,
     ) -> None:
-        kind = "sine_fact" if domain == "sine" else (
-            "cosecant_fact" if domain == "cosecant" else _fact_kind(fact).lower() or domain
+        kind = (
+            "sine_fact"
+            if domain == "sine"
+            else "cosecant_fact"
+            if domain == "cosecant"
+            else "resource_intent_fact"
+            if domain == "resource_intent"
+            else _fact_kind(fact).lower() or domain
         )
+        semantic_fields = self._semantic_domain_telemetry(domain, fact)
         _telemetry(
             self.telemetry_queue,
             kind,
@@ -1938,8 +2117,127 @@ class WindowsMonitorCoordinator:
             message=_field(fact, "message", _field(fact, "detail", domain)),
             domain=domain,
             fact=fact,
+            **semantic_fields,
         )
         self._publish_domain_console_fact(domain, fact, observation)
+
+    def _semantic_domain_telemetry(
+        self,
+        domain: str,
+        fact: object,
+    ) -> dict[str, object]:
+        """Map authoritative fact kinds to presentation-only feed semantics."""
+
+        kind = _fact_kind(fact).upper()
+        if domain == "resource_intent":
+            if kind == "STUDY_UNCERTAINTY_STARTED":
+                return {
+                    "badge": "UNCERTAIN",
+                    "feed_text": "50% UNCERTAIN — clarification clock started",
+                    "tone": "amber",
+                }
+            if kind == "STUDY_CONFIRMATION_POPUP_DISPLAYED":
+                prompt = int(_field(fact, "prompt_number", 0) or 0)
+                return {
+                    "badge": "STUDY CONFIRM",
+                    "feed_text": f"5-minute clarification displayed — prompt {prompt}",
+                    "tone": "amber",
+                }
+            if kind == "USER_CONFIRMED_STUDY":
+                return {
+                    "badge": "USER CONFIRM",
+                    "feed_text": "THIS IS STUDY MATERIAL — SINE withheld",
+                    "tone": "green",
+                }
+            if kind == "USER_CONFIRMED_OFF_TASK":
+                return {
+                    "badge": "USER CONFIRM",
+                    "feed_text": "I'M COMING BACK — fresh SINE watch started",
+                    "tone": "red",
+                }
+
+        if domain == "sine":
+            if kind == "SINE_RETURN_INTENT_RECORDED":
+                return {
+                    "badge": "MONITOR",
+                    "feed_text": "USER PRESSED — I'M BACK",
+                    "tone": "cyan",
+                }
+            if kind in {"SINE_STAGE_2_SCHEDULED", "SINE_STAGE_3_SCHEDULED"}:
+                stage = 2 if kind == "SINE_STAGE_2_SCHEDULED" else 3
+                live = self.services.sine.live_view()
+                interval = _field(
+                    live,
+                    "stage_2_delay_seconds_applied"
+                    if stage == 2
+                    else "stage_3_delay_seconds_applied",
+                    None,
+                )
+                return {
+                    "badge": "SINE",
+                    "feed_text": (
+                        f"SINE {stage} — stage scheduled for "
+                        f"{_authoritative_seconds(interval)}"
+                    ),
+                    "tone": "amber",
+                }
+
+        if domain == "mirl":
+            if kind == "MIRL_RETURN_VERIFICATION_STARTED":
+                return {
+                    "badge": "RETURN INTENT",
+                    "feed_text": "RETURN UNVERIFIED — verification started",
+                    "tone": "amber",
+                }
+            if kind == "MIRL_RETURN_VERIFIED":
+                return {
+                    "badge": "RETURNED",
+                    "feed_text": "USER RETURNED — WELCOME BACK TO FOCUS",
+                    "tone": "green",
+                }
+            if kind == "MIRL_CLOSURE_CONFIRMATION_STARTED":
+                return {
+                    "badge": "MIRL",
+                    "feed_text": (
+                        "RETURN CONFIRMED — CLOSURE INITIATED FOR "
+                        f"{_authoritative_seconds(_field(fact, 'target_seconds', None))}"
+                    ),
+                    "tone": "cyan",
+                }
+            if kind == "MIRL_EPISODE_CLOSED":
+                return {
+                    "badge": "MIRL",
+                    "feed_text": "EPISODE CLOSED",
+                    "tone": "green",
+                }
+        return {}
+
+    def _prepare_dwell_telemetry(self, snapshot: object) -> None:
+        """Prepare one bounded DWELL row when Blacklist starts a fresh visit."""
+
+        self._pending_dwell_telemetry = None
+        if not bool(_field(snapshot, "restarted", False)):
+            return
+        if bool(_field(snapshot, "study_context_active", False)):
+            return
+        verdict = _field(snapshot, "verdict")
+        if _enum_text(_field(verdict, "disposition", "")).lower() not in {
+            "accused",
+            "unknown",
+        }:
+            return
+        label = str(
+            _field(verdict, "display_label", "")
+            or _field(verdict, "platform_key", "")
+            or "Social resource"
+        ).strip()
+        self._pending_dwell_telemetry = {
+            "app_override": label,
+            "message": "Fresh actionable resource dwell began",
+            "badge": "DWELL",
+            "feed_text": f"{label.upper()} — person is dwelling",
+            "tone": "violet",
+        }
 
     def _publish_domain_console_fact(
         self,
@@ -2328,12 +2626,25 @@ class WindowsMonitorCoordinator:
         )
         if identity != self._last_foreground_identity:
             self._last_foreground_identity = identity
+            badge, tone = self._activity_telemetry_semantics(context)
             _telemetry(
                 self.telemetry_queue,
                 "activity",
                 observation=foreground,
                 app_override=display_app,
                 message="Foreground activity observed",
+                badge=badge,
+                tone=tone,
+            )
+
+        pending_dwell = self._pending_dwell_telemetry
+        self._pending_dwell_telemetry = None
+        if pending_dwell is not None:
+            _telemetry(
+                self.telemetry_queue,
+                "dwell",
+                observation=foreground,
+                **pending_dwell,
             )
 
         _telemetry(
@@ -2399,6 +2710,46 @@ class WindowsMonitorCoordinator:
         )
         self._publish_console_live_status(context)
 
+    def _activity_telemetry_semantics(
+        self,
+        context: MonitorContext,
+    ) -> tuple[str, str]:
+        """Return the badge/tone from already-authoritative current facts."""
+
+        from CORE_ENGINE.resource_intent import ResourceIntent, ResourceSurface
+
+        resource_view = self.services.resource_intent.live_view()
+        if (
+            resource_view is not None
+            and _field(resource_view, "classification", None)
+            is ResourceIntent.STUDY_ALIGNED
+        ):
+            return "STUDY", "green"
+
+        cosine = self.services.cosine.snapshot(
+            now_ns=context.foreground.observed_monotonic_ns
+        )
+        cosine_phase = _enum_text(_field(cosine, "phase", "")).upper()
+        if cosine_phase not in {"", "IDLE", "CLOSED", "SHUTDOWN"}:
+            return "OTT", "cyan"
+
+        if (
+            resource_view is not None
+            and _field(resource_view, "resource_surface", None)
+            is ResourceSurface.MESSAGING
+        ):
+            return "MESSAGING", "cyan"
+
+        blacklist = self.services.blacklist.live_view()
+        if (
+            blacklist is not None
+            and _enum_text(_field(blacklist, "disposition", "")).lower()
+            in {"accused", "unknown"}
+        ):
+            return "SOCIAL", "amber"
+
+        return "ACTIVITY", "cyan"
+
     def _drain_commands(self) -> None:
         for _ in range(MAX_COMMANDS_PER_CYCLE):
             try:
@@ -2428,7 +2779,12 @@ class WindowsMonitorCoordinator:
                 self._answer_command(response_queue, result)
                 continue
             if kind.startswith("sine_"):
-                self._handle_sine_command(kind, payload)
+                accepted = self._handle_sine_command(kind, payload)
+                self._answer_command(response_queue, accepted)
+                continue
+            if kind.startswith("study_confirmation_"):
+                accepted = self._handle_study_confirmation_command(kind, payload)
+                self._answer_command(response_queue, accepted)
                 continue
             if kind == "study_prepare":
                 if not self._study_command_identity_admits(payload, "PREPARE"):
@@ -2496,21 +2852,55 @@ class WindowsMonitorCoordinator:
         except (AttributeError, queue.Full):
             return
 
-    def _handle_sine_command(self, kind: str, payload: object) -> None:
+    def _handle_study_confirmation_command(self, kind: str, payload: object) -> bool:
         request_id = str(_field(payload, "request_id", "") or "")
         occurred_ns = int(_field(payload, "occurred_monotonic_ns", 0) or 0)
         if not request_id or occurred_ns <= 0:
-            return
+            return False
+        authority = self.services.resource_intent
+        if kind == "study_confirmation_popup_shown":
+            accepted = authority.record_study_confirmation_popup_shown(
+                request_id=request_id,
+                shown_monotonic_ns=occurred_ns,
+                popup_hwnd=int(_field(payload, "popup_hwnd", 0) or 0),
+            )
+        elif kind == "study_confirmation_popup_closed":
+            accepted = authority.record_study_confirmation_popup_closed(
+                request_id=request_id,
+                occurred_monotonic_ns=occurred_ns,
+                reason=str(_field(payload, "reason", "presentation_closed") or "presentation_closed"),
+            )
+        elif kind == "study_confirmation_user_action":
+            accepted = authority.record_study_confirmation_response(
+                request_id=request_id,
+                response=str(_field(payload, "response", "") or ""),
+                occurred_monotonic_ns=occurred_ns,
+                expected_study_context_token=str(
+                    _field(payload, "expected_study_context_token", "") or ""
+                ),
+                expected_resource_key=str(
+                    _field(payload, "expected_resource_key", "") or ""
+                ),
+            )
+        else:
+            accepted = False
+        if not accepted:
+            _telemetry(
+                self.telemetry_queue,
+                "engine_command_rejected",
+                message=f"Study confirmation callback rejected: {kind}",
+                request_id=request_id,
+            )
+        self._drain_resource_intent_facts(None)
+        return bool(accepted)
+
+    def _handle_sine_command(self, kind: str, payload: object) -> bool:
+        request_id = str(_field(payload, "request_id", "") or "")
+        occurred_ns = int(_field(payload, "occurred_monotonic_ns", 0) or 0)
+        if not request_id or occurred_ns <= 0:
+            return False
         accepted = False
         if kind == "sine_popup_shown":
-            intervention = self._study_interventions.get(request_id)
-            if intervention is not None:
-                study_request, visible_seconds = intervention
-                self.services.resource_intent.activate_study_intervention(
-                    study_request,
-                    now_monotonic_ns=occurred_ns,
-                    visible_seconds=visible_seconds,
-                )
             accepted = self.services.sine.popup_shown(
                 request_id=request_id,
                 shown_monotonic_ns=occurred_ns,
@@ -2524,11 +2914,6 @@ class WindowsMonitorCoordinator:
                 ):
                     self._route_cosine_effect(effect)
         elif kind == "sine_popup_failed":
-            intervention = self._study_interventions.pop(request_id, None)
-            if intervention is not None:
-                self.services.resource_intent.close_study_intervention(
-                    intervention[0], now_monotonic_ns=occurred_ns
-                )
             accepted = self.services.sine.popup_failed(
                 request_id=request_id,
                 reason=str(_field(payload, "reason", "display_failed")),
@@ -2541,12 +2926,6 @@ class WindowsMonitorCoordinator:
                 occurred_monotonic_ns=occurred_ns,
             )
         elif kind == "sine_popup_closed":
-            intervention = self._study_interventions.pop(request_id, None)
-            if intervention is not None:
-                self.services.resource_intent.close_study_intervention(
-                    intervention[0],
-                    now_monotonic_ns=occurred_ns,
-                )
             accepted = self.services.sine.popup_closed(
                 request_id=request_id,
                 reason=str(_field(payload, "reason", "authority_close")),
@@ -2559,8 +2938,12 @@ class WindowsMonitorCoordinator:
                 message=f"SINE callback rejected: {kind}",
                 request_id=request_id,
             )
+        action_result_recorded = True
         for fact in self.services.sine.advance(now_monotonic_ns=occurred_ns):
-            self._route_sine_fact(fact, None)
+            action_result_recorded = (
+                self._route_sine_fact(fact, None) and action_result_recorded
+            )
+        return accepted and action_result_recorded
 
     # ------------------------------------------------------------------
     # C11-A command-identity boundary
@@ -3291,6 +3674,7 @@ class WindowsMonitorCoordinator:
             message="Core Engine cleanup completed",
             session_id=self.session_id,
         )
+
         return True
 
     def _settle_pending_trigger_for_shutdown(

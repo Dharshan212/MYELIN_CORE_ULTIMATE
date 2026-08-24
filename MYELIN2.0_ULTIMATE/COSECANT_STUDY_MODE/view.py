@@ -11,11 +11,14 @@ being hidden inside style code.
 
 from __future__ import annotations
 
+import ctypes
+import sys
 import threading
+import time
 from dataclasses import dataclass, replace as dataclasses_replace
 from typing import Final
 
-from PyQt6.QtCore import QDate, QObject, Qt, QTime, QTimer, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QPoint, QDate, QObject, Qt, QTime, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QCloseEvent, QKeyEvent
 from PyQt6.QtWidgets import (
     QApplication,
@@ -41,7 +44,43 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from CORE_ENGINE.resource_intent import ResourceIntentLiveView
+from CORE_ENGINE.resource_intent import (
+    ResourceIntentFact,
+    ResourceIntentLiveView,
+    StudyConfirmationPopupRequest,
+    StudyConfirmationResponse,
+)
+
+
+def _work_area_for_source_hwnd(source_hwnd: int):
+    """Resolve only the request's factual source HWND to a Qt work area."""
+
+    app = QApplication.instance()
+    if app is None or sys.platform != "win32" or int(source_hwnd) <= 0:
+        return None
+
+    class _Rect(ctypes.Structure):
+        _fields_ = [
+            ("left", ctypes.c_long),
+            ("top", ctypes.c_long),
+            ("right", ctypes.c_long),
+            ("bottom", ctypes.c_long),
+        ]
+
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = int(source_hwnd)
+        rect = _Rect()
+        if not user32.IsWindow(hwnd) or not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+        point = QPoint(
+            (int(rect.left) + int(rect.right)) // 2,
+            (int(rect.top) + int(rect.bottom)) // 2,
+        )
+        screen = QApplication.screenAt(point)
+        return screen.availableGeometry() if screen is not None else None
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
 from COSECANT_STUDY_MODE.cosecant import (
     CosecantSnapshot,
     CosecantState,
@@ -572,6 +611,8 @@ class ResourceIntentTelemetryPanel(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("resourceIntentTelemetryCard")
+        self._latest_resource_intent: ResourceIntentLiveView | None = None
+        self._latest_sine_live_view: object | None = None
         layout = QGridLayout(self)
         layout.setContentsMargins(24, 22, 24, 22)
         layout.setHorizontalSpacing(18)
@@ -606,6 +647,7 @@ class ResourceIntentTelemetryPanel(QFrame):
             self._values[key] = value
 
     def render(self, live: ResourceIntentLiveView | None) -> None:
+        self._latest_resource_intent = live
         if live is None:
             for value in self._values.values():
                 value.setText("—")
@@ -617,15 +659,62 @@ class ResourceIntentTelemetryPanel(QFrame):
         self._values["evidence"].setText(
             "CERTIFIED" if live.browser_evidence_certified else "UNAVAILABLE"
         )
-        self._values["dwell"].setText(
-            f"{_duration(live.dwell_elapsed_seconds)} / "
-            f"{_duration(live.dwell_target_seconds)}"
-        )
+        self._render_authoritative_dwell()
         self._values["sine"].setText(live.sine_contribution.value.upper())
         self._values["idle"].setText(
             "ALLOWED" if live.study_idle_allowed else "OFF"
         )
         self._values["reason"].setText(live.no_nudge_reason_code or "—")
+
+    def render_sine(self, live: object | None) -> None:
+        """Repaint dwell from SINE's read-only timing projection when active."""
+
+        self._latest_sine_live_view = live
+        self._render_authoritative_dwell()
+
+    def _render_authoritative_dwell(self) -> None:
+        resource = self._latest_resource_intent
+        if resource is None:
+            self._values["dwell"].setText("—")
+            return
+
+        sine = self._latest_sine_live_view
+        if sine is not None:
+            stage = getattr(sine, "stage", 0)
+            try:
+                stage_number = int(getattr(stage, "value", stage))
+            except (TypeError, ValueError):
+                stage_number = 0
+            phase = getattr(sine, "phase", "")
+            phase_value = str(getattr(phase, "value", phase) or "").casefold()
+            protected = bool(getattr(sine, "protected_red_active", False))
+            if protected or phase_value == "protected_red":
+                self._values["dwell"].setText("RETURN REQUIRED")
+                return
+
+            target_field = {
+                1: "stage_2_delay_seconds_applied",
+                2: "stage_3_delay_seconds_applied",
+            }.get(stage_number)
+            remaining_raw = getattr(sine, "next_deadline_seconds", None)
+            target_raw = getattr(sine, target_field, None) if target_field else None
+            try:
+                target = float(target_raw)
+                remaining = max(0.0, float(remaining_raw))
+            except (TypeError, ValueError, OverflowError):
+                target = 0.0
+                remaining = 0.0
+            if target > 0.0 and remaining_raw is not None:
+                elapsed = min(target, max(0.0, target - remaining))
+                self._values["dwell"].setText(
+                    f"{_duration(elapsed)} / {_duration(target)}"
+                )
+                return
+
+        self._values["dwell"].setText(
+            f"{_duration(resource.dwell_elapsed_seconds)} / "
+            f"{_duration(resource.dwell_target_seconds)}"
+        )
 
 
 def _cosecant_supersedes(
@@ -679,6 +768,251 @@ def _study_supersedes(
     return int(incoming.published_monotonic_ns) >= int(
         current.published_monotonic_ns
     )
+
+
+class StudyConfirmationPopup(QDialog):
+    """Case-1 clarification surface; never a SINE or COSECANT popup."""
+
+    popup_shown = pyqtSignal(str, object, object)
+    user_action = pyqtSignal(str, str, object, str, str)
+    popup_closed = pyqtSignal(str, str, object)
+
+    def __init__(self, owner: QWidget | None = None) -> None:
+        super().__init__(owner)
+        self.setObjectName("studyConfirmationPopup")
+        self.setWindowTitle("MYELIN — STUDY CONFIRMATION")
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self.setModal(False)
+        self.setMinimumWidth(560)
+        self._request: StudyConfirmationPopupRequest | None = None
+        self._shown_request_id = ""
+        self._authority_closing = False
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(34, 30, 34, 28)
+        root.setSpacing(14)
+        badge = QLabel("STUDY MODE · 50% UNCERTAIN", self)
+        badge.setObjectName("studyConfirmationBadge")
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(badge)
+        title = QLabel("IS THIS PART OF YOUR CURRENT STUDY?", self)
+        title.setObjectName("studyConfirmationTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(title)
+        self.resource_label = QLabel("", self)
+        self.resource_label.setObjectName("studyConfirmationResource")
+        self.resource_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.resource_label.setWordWrap(True)
+        root.addWidget(self.resource_label)
+        self.status_label = QLabel("MYELIN needs your clarification.", self)
+        self.status_label.setObjectName("studyConfirmationStatus")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_label.setWordWrap(True)
+        root.addWidget(self.status_label)
+
+        actions = QHBoxLayout()
+        self.study_button = QPushButton("THIS IS STUDY MATERIAL", self)
+        self.study_button.setObjectName("studyConfirmationStudyButton")
+        self.off_task_button = QPushButton("I'M COMING BACK", self)
+        self.off_task_button.setObjectName("studyConfirmationOffTaskButton")
+        self.study_button.clicked.connect(
+            lambda: self._emit_action(
+                StudyConfirmationResponse.THIS_IS_STUDY_MATERIAL
+            )
+        )
+        self.off_task_button.clicked.connect(
+            lambda: self._emit_action(StudyConfirmationResponse.IM_COMING_BACK)
+        )
+        actions.addWidget(self.study_button)
+        actions.addWidget(self.off_task_button)
+        root.addLayout(actions)
+
+    @property
+    def request(self) -> StudyConfirmationPopupRequest | None:
+        return self._request
+
+    def present_request(self, request: StudyConfirmationPopupRequest) -> None:
+        if not isinstance(request, StudyConfirmationPopupRequest):
+            raise TypeError("Study clarification requires an exact popup request")
+        self._request = request
+        self._authority_closing = False
+        self.resource_label.setText(
+            request.display_title or "Current resource awaiting clarification"
+        )
+        self.status_label.setText(
+            f"Clarification {request.prompt_number} · measured 50% UNCERTAIN"
+        )
+        self.study_button.setEnabled(True)
+        self.off_task_button.setEnabled(True)
+        self.adjustSize()
+        self._place_for_source_hwnd(request.source_hwnd)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        QTimer.singleShot(0, self._report_shown)
+
+    def _place_for_source_hwnd(self, source_hwnd: int) -> None:
+        area = _work_area_for_source_hwnd(source_hwnd)
+        if area is None:
+            owner = self.parentWidget()
+            screen = owner.screen() if owner is not None else None
+            app = QApplication.instance()
+            if screen is None and app is not None:
+                screen = app.primaryScreen()
+            if screen is None:
+                return
+            area = screen.availableGeometry()
+        x = area.x() + max(12, (area.width() - self.width()) // 2)
+        y = area.y() + max(12, (area.height() - self.height()) // 2)
+        self.move(x, y)
+
+    def apply_fact(self, fact: ResourceIntentFact) -> None:
+        if not isinstance(fact, ResourceIntentFact):
+            return
+        if fact.kind == "STUDY_CONFIRMATION_POPUP_CLOSE_REQUESTED":
+            self.close_from_authority(fact.popup_request_id)
+
+    def show_action_rejection(self, request_id: str, message: str) -> bool:
+        if self._request is None or self._request.request_id != str(request_id or ""):
+            return False
+        self.status_label.setText(str(message))
+        self.study_button.setEnabled(True)
+        self.off_task_button.setEnabled(True)
+        self.show()
+        return True
+
+    def close_from_authority(self, request_id: str) -> bool:
+        if self._request is None or self._request.request_id != str(request_id or ""):
+            return False
+        self._authority_closing = True
+        self.hide()
+        self._request = None
+        return True
+
+    def reset_presentation_epoch(self) -> None:
+        self._authority_closing = True
+        self.hide()
+        self._request = None
+        self._shown_request_id = ""
+
+    def _emit_action(self, response: StudyConfirmationResponse) -> None:
+        request = self._request
+        if request is None:
+            return
+        self.study_button.setEnabled(False)
+        self.off_task_button.setEnabled(False)
+        self.status_label.setText("CLARIFICATION SENT · WAITING FOR ACCEPTANCE")
+        self.user_action.emit(
+            request.request_id,
+            response.value,
+            time.monotonic_ns(),
+            request.study_context_token,
+            request.resource_key,
+        )
+
+    def _report_shown(self) -> None:
+        request = self._request
+        if (
+            request is None
+            or not self.isVisible()
+            or self._shown_request_id == request.request_id
+        ):
+            return
+        self._shown_request_id = request.request_id
+        self.popup_shown.emit(
+            request.request_id,
+            time.monotonic_ns(),
+            int(self.winId()),
+        )
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        request = self._request
+        if self._authority_closing or request is None:
+            event.accept()
+            return
+        self.popup_closed.emit(
+            request.request_id,
+            "user_dismissed",
+            time.monotonic_ns(),
+        )
+        self._request = None
+        event.accept()
+
+
+class StudyConfirmationPresenter(QObject):
+    """Qt-main-thread transport for the independent Study clarification popup."""
+
+    popup_shown = pyqtSignal(str, object, object)
+    user_action = pyqtSignal(str, str, object, str, str)
+    popup_closed = pyqtSignal(str, str, object)
+    _request_queued = pyqtSignal(object)
+    _fact_queued = pyqtSignal(object)
+    _reset_queued = pyqtSignal()
+    _close_queued = pyqtSignal(str)
+
+    def __init__(
+        self,
+        *,
+        owner: QWidget | None = None,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._popup = StudyConfirmationPopup(owner)
+        self._popup.popup_shown.connect(self.popup_shown.emit)
+        self._popup.user_action.connect(self.user_action.emit)
+        self._popup.popup_closed.connect(self.popup_closed.emit)
+        self._request_queued.connect(
+            self._present,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._fact_queued.connect(
+            self._apply_fact,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._reset_queued.connect(
+            self._reset,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._close_queued.connect(
+            self._close,
+            Qt.ConnectionType.QueuedConnection,
+        )
+
+    def apply_fact(self, fact: object) -> None:
+        if not isinstance(fact, ResourceIntentFact):
+            return
+        if fact.kind == "STUDY_CONFIRMATION_POPUP_REQUESTED" and fact.popup is not None:
+            self._request_queued.emit(fact.popup)
+        else:
+            self._fact_queued.emit(fact)
+
+    def show_action_rejection(self, request_id: str, message: str) -> bool:
+        return self._popup.show_action_rejection(request_id, message)
+
+    def reset_presentation_epoch(self) -> None:
+        self._reset_queued.emit()
+
+    def close_all(self, reason: str = "controller_shutdown") -> None:
+        self._close_queued.emit(str(reason))
+
+    @pyqtSlot(object)
+    def _present(self, request: object) -> None:
+        if isinstance(request, StudyConfirmationPopupRequest):
+            self._popup.present_request(request)
+
+    @pyqtSlot(object)
+    def _apply_fact(self, fact: object) -> None:
+        if isinstance(fact, ResourceIntentFact):
+            self._popup.apply_fact(fact)
+
+    @pyqtSlot()
+    def _reset(self) -> None:
+        self._popup.reset_presentation_epoch()
+
+    @pyqtSlot(str)
+    def _close(self, reason: str) -> None:
+        del reason
+        self._popup.reset_presentation_epoch()
 
 
 class ContinuityPopup(QDialog):
@@ -2336,6 +2670,9 @@ class StudyView(QWidget):
         )
         if resource_signal is not None:
             resource_signal.connect(self.set_resource_intent)
+        sine_signal = getattr(self._engine, "sine_watch_status_changed", None)
+        if sine_signal is not None:
+            sine_signal.connect(self.resource_intent.render_sine)
 
     def _connect_dispatcher(self) -> None:
         with _DISPATCHER_LOCK:
@@ -2375,6 +2712,7 @@ class StudyView(QWidget):
         """
 
         self._state = StudyViewState(None, None, None)
+        self.resource_intent.render_sine(None)
         self._render()
         reset_continuity_presentation()
 
@@ -2548,6 +2886,8 @@ def _clock_text(value: str | None) -> str:
 __all__ = [
     "ContinuityPopup",
     "ResourceIntentTelemetryPanel",
+    "StudyConfirmationPopup",
+    "StudyConfirmationPresenter",
     "StudyTelemetryPanel",
     "StudyTimerCard",
     "StudyView",

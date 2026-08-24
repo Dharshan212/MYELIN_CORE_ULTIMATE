@@ -850,7 +850,10 @@ class SettingsController(QObject):
 
         try:
             geometry = window.saveGeometry()
-            maximized = window.isMaximized()
+            # Full-screen is not a supported Control Station preference.  It
+            # has no native caption controls and must never be converted into
+            # the approved maximized state during persistence.
+            maximized = window.isMaximized() and not window.isFullScreen()
         except (AttributeError, RuntimeError):
             return False
         return self.apply_updates(
@@ -861,11 +864,25 @@ class SettingsController(QObject):
         )
 
     def restore_window(self, window: QWidget) -> None:
-        """Restore placement, then guarantee visibility on a current screen."""
+        """Restore safe placement with an ordinary or maximized native frame."""
 
         preferences = self.snapshot()
         if preferences.window_geometry:
             window.restoreGeometry(preferences.window_geometry)
+
+        # Qt's geometry blob can carry a window-state bit in addition to the
+        # rectangle.  An old/full-screen blob therefore used to override the
+        # separate validated preference and remove the Windows caption.  Only
+        # normal and maximized are supported for the main Control Station.
+        restored_state = window.windowState()
+        safe_state = restored_state & ~Qt.WindowState.WindowFullScreen
+        if preferences.window_maximized:
+            safe_state |= Qt.WindowState.WindowMaximized
+        else:
+            safe_state &= ~Qt.WindowState.WindowMaximized
+        if safe_state != restored_state:
+            window.setWindowState(safe_state)
+
         if preferences.window_maximized:
             window.showMaximized()
             return

@@ -1,0 +1,178 @@
+MYELIN 2.0 - C9-A RUNTIME GAP SUMMARY
+REGENERATED FROM THE AUTHORITATIVE CSV - 1600 intervals, 5 conditions
+P=1.5s (DEFAULT_POLL_SECONDS)  G=1.5s (maximum_presence_gap_seconds)  C=3.0s (return_confirmation_seconds)
+
+PERCENTILE METHOD: nearest-rank on the sorted sample: p_k = sorted[ceil(k/100 * n) - 1], 1-indexed, no interpolation. For n < 100 the p99 rank collapses onto the maximum, which is exactly why a >=300 sample is required.
+
+CONDITION A_desktop_baseline
+  rows: 320
+  observation_gap_seconds  dO = O(i) - O(i-1)
+  n=320  min=1.3798  mean=1.5000  median=1.5002  p95=1.5111  p99=1.5135  max=1.6232
+  pre_advance_latency_seconds  L = A(i) - O(i)
+  n=320  min=0.0005  mean=0.0073  median=0.0012  p95=0.0539  p99=0.0842  max=0.3827
+  effective_gap_seconds  E = A(i) - O(i-1)   <-- THE C9 QUANTITY
+  n=320  min=1.3826  mean=1.5074  median=1.5031  p95=1.5573  p99=1.5951  max=1.8799
+  E exceedance counts:
+    E > 1.5  :   191  ( 59.69%)
+    E > 1.8  :     1  (  0.31%)
+    E > 2.0  :     0  (  0.00%)
+    E > 2.2  :     0  (  0.00%)
+    E > 2.4  :     0  (  0.00%)
+    E > 2.6  :     0  (  0.00%)
+    E > 2.8  :     0  (  0.00%)
+    E >=3.0  :     0  (  0.00%)
+  advance source: internal=0  call-entry=320
+  measured call-entry under-estimate: NOT AVAILABLE in this condition (COSECANT.advance() returns before reading its clock when no break is active), so E here is a LOWER BOUND by that unmeasured amount.
+  identity check E == dO + L: violations=0 worst_delta=0.000001000s
+  BY browser_status:
+    not_supported_browser  n=295
+      L  median=0.0011  p95=0.0039  p99=0.0063  max=0.3827
+      E  median=1.5019  p95=1.5134  p99=1.5740  max=1.8799
+    ok  n=25   [n<100: p99 == max, not a true percentile]
+      L  median=0.0562  p95=0.0902  p99=0.0913  max=0.0913
+      E  median=1.5584  p95=1.5951  p99=1.5966  max=1.5966
+  STABLE vs TRANSITION: NOT DERIVABLE -- this run predates the opaque resource_stable_key column.
+
+CONDITION B_browser_normal
+  rows: 320
+  observation_gap_seconds  dO = O(i) - O(i-1)
+  n=320  min=1.4154  mean=1.5000  median=1.5003  p95=1.5114  p99=1.5147  max=1.5861
+  pre_advance_latency_seconds  L = A(i) - O(i)
+  n=320  min=0.0006  mean=0.0936  median=0.0801  p95=0.1545  p99=0.3472  max=1.3252
+  effective_gap_seconds  E = A(i) - O(i-1)   <-- THE C9 QUANTITY
+  n=320  min=1.4948  mean=1.5937  median=1.5794  p95=1.6584  p99=1.8509  max=2.8283
+  E exceedance counts:
+    E > 1.5  :   313  ( 97.81%)
+    E > 1.8  :     5  (  1.56%)
+    E > 2.0  :     3  (  0.94%)
+    E > 2.2  :     2  (  0.62%)
+    E > 2.4  :     2  (  0.62%)
+    E > 2.6  :     2  (  0.62%)
+    E > 2.8  :     1  (  0.31%)
+    E >=3.0  :     0  (  0.00%)
+  advance source: internal=0  call-entry=320
+  measured call-entry under-estimate: NOT AVAILABLE in this condition (COSECANT.advance() returns before reading its clock when no break is active), so E here is a LOWER BOUND by that unmeasured amount.
+  identity check E == dO + L: violations=0 worst_delta=0.000001000s
+  BY browser_status:
+    ok  n=295
+      L  median=0.0824  p95=0.1544  p99=0.3279  max=0.5730
+      E  median=1.5817  p95=1.6570  p99=1.8386  max=2.0824
+    not_supported_browser  n=13   [n<100: p99 == max, not a true percentile]
+      L  median=0.0012  p95=0.0067  p99=0.0067  max=0.0067
+      E  median=1.5000  p95=1.5129  p99=1.5129  max=1.5129
+    address_value_invalid  n=10   [n<100: p99 == max, not a true percentile]
+      L  median=0.0557  p95=1.1762  p99=1.1762  max=1.1762
+      E  median=1.5563  p95=2.6767  p99=2.6767  max=2.6767
+    window_not_found  n=1   [n<100: p99 == max, not a true percentile]
+      L  median=1.3252  p95=1.3252  p99=1.3252  max=1.3252
+      E  median=2.8283  p95=2.8283  p99=2.8283  max=2.8283
+    address_bar_not_found  n=1   [n<100: p99 == max, not a true percentile]
+      L  median=0.0370  p95=0.0370  p99=0.0370  max=0.0370
+      E  median=1.5386  p95=1.5386  p99=1.5386  max=1.5386
+  STABLE vs TRANSITION: NOT DERIVABLE -- this run predates the opaque resource_stable_key column.
+
+CONDITION C_study_active_browser
+  rows: 320
+  observation_gap_seconds  dO = O(i) - O(i-1)
+  n=320  min=1.4144  mean=1.5000  median=1.5007  p95=1.5105  p99=1.5176  max=1.5970
+  pre_advance_latency_seconds  L = A(i) - O(i)
+  n=320  min=0.0442  mean=0.0771  median=0.0700  p95=0.1030  p99=0.2673  max=0.4667
+  effective_gap_seconds  E = A(i) - O(i-1)   <-- THE C9 QUANTITY
+  n=320  min=1.5324  mean=1.5771  median=1.5709  p95=1.6043  p99=1.7764  max=1.9594
+  E exceedance counts:
+    E > 1.5  :   320  (100.00%)
+    E > 1.8  :     3  (  0.94%)
+    E > 2.0  :     0  (  0.00%)
+    E > 2.2  :     0  (  0.00%)
+    E > 2.4  :     0  (  0.00%)
+    E > 2.6  :     0  (  0.00%)
+    E > 2.8  :     0  (  0.00%)
+    E >=3.0  :     0  (  0.00%)
+  advance source: internal=0  call-entry=320
+  measured call-entry under-estimate: NOT AVAILABLE in this condition (COSECANT.advance() returns before reading its clock when no break is active), so E here is a LOWER BOUND by that unmeasured amount.
+  identity check E == dO + L: violations=0 worst_delta=0.000001000s
+  BY browser_status:
+    ok  n=319
+      L  median=0.0698  p95=0.1030  p99=0.2365  max=0.4667
+      E  median=1.5709  p95=1.6043  p99=1.7417  max=1.9594
+    address_value_invalid  n=1   [n<100: p99 == max, not a true percentile]
+      L  median=0.3738  p95=0.3738  p99=0.3738  max=0.3738
+      E  median=1.8729  p95=1.8729  p99=1.8729  max=1.8729
+  STABLE vs TRANSITION: NOT DERIVABLE -- this run predates the opaque resource_stable_key column.
+
+CONDITION D_switching
+  rows: 320
+  observation_gap_seconds  dO = O(i) - O(i-1)
+  n=320  min=1.4831  mean=1.5000  median=1.5008  p95=1.5104  p99=1.5143  max=1.5151
+  pre_advance_latency_seconds  L = A(i) - O(i)
+  n=320  min=0.0005  mean=0.0737  median=0.0642  p95=0.1321  p99=0.1784  max=1.1542
+  effective_gap_seconds  E = A(i) - O(i-1)   <-- THE C9 QUANTITY
+  n=320  min=1.4906  mean=1.5737  median=1.5656  p95=1.6328  p99=1.6825  max=2.6531
+  E exceedance counts:
+    E > 1.5  :   311  ( 97.19%)
+    E > 1.8  :     2  (  0.62%)
+    E > 2.0  :     1  (  0.31%)
+    E > 2.2  :     1  (  0.31%)
+    E > 2.4  :     1  (  0.31%)
+    E > 2.6  :     1  (  0.31%)
+    E > 2.8  :     0  (  0.00%)
+    E >=3.0  :     0  (  0.00%)
+  advance source: internal=0  call-entry=320
+  measured call-entry under-estimate: NOT AVAILABLE in this condition (COSECANT.advance() returns before reading its clock when no break is active), so E here is a LOWER BOUND by that unmeasured amount.
+  identity check E == dO + L: violations=0 worst_delta=0.000001000s
+  BY browser_status:
+    ok  n=300
+      L  median=0.0663  p95=0.1329  p99=0.1784  max=1.1542
+      E  median=1.5667  p95=1.6335  p99=1.6825  max=2.6531
+    not_supported_browser  n=20   [n<100: p99 == max, not a true percentile]
+      L  median=0.0012  p95=0.0035  p99=0.0061  max=0.0061
+      E  median=1.5025  p95=1.5136  p99=1.5152  max=1.5152
+  STABLE vs TRANSITION (by opaque resource identity):
+    STABLE  n=313  non-ok reads=19 (6.1%)
+      L  median=0.0642  p95=0.1295  p99=0.1771  max=0.4444
+      E  median=1.5655  p95=1.6303  p99=1.6746  max=1.9441
+    TRANSITION  n=6  non-ok reads=0 (0.0%)   [n<100: p99 == max]
+      L  median=0.0870  p95=1.1542  p99=1.1542  max=1.1542
+      E  median=1.5859  p95=2.6531  p99=2.6531  max=2.6531
+
+CONDITION E_cosecant_break
+  rows: 320
+  observation_gap_seconds  dO = O(i) - O(i-1)
+  n=320  min=1.2406  mean=1.5020  median=1.5007  p95=1.5093  p99=1.5141  max=2.4169
+  pre_advance_latency_seconds  L = A(i) - O(i)
+  n=320  min=0.0012  mean=0.0750  median=0.0691  p95=0.1340  p99=0.1844  max=0.2148
+  effective_gap_seconds  E = A(i) - O(i-1)   <-- THE C9 QUANTITY
+  n=320  min=1.3625  mean=1.5771  median=1.5680  p95=1.6344  p99=1.6986  max=2.5383
+  E exceedance counts:
+    E > 1.5  :   317  ( 99.06%)
+    E > 1.8  :     1  (  0.31%)
+    E > 2.0  :     1  (  0.31%)
+    E > 2.2  :     1  (  0.31%)
+    E > 2.4  :     1  (  0.31%)
+    E > 2.6  :     0  (  0.00%)
+    E > 2.8  :     0  (  0.00%)
+    E >=3.0  :     0  (  0.00%)
+  advance source: internal=319  call-entry=1
+  measured call-entry under-estimate (internal - call), seconds:
+  n=319  min=0.0000  mean=0.0000  median=0.0000  p95=0.0000  p99=0.0000  max=0.0010
+  identity check E == dO + L: violations=0 worst_delta=0.000001000s
+  BY browser_status:
+    ok  n=308
+      L  median=0.0692  p95=0.1319  p99=0.1658  max=0.1964
+      E  median=1.5686  p95=1.6336  p99=1.6873  max=2.5383
+    address_value_invalid  n=5   [n<100: p99 == max, not a true percentile]
+      L  median=0.0668  p95=0.1808  p99=0.1808  max=0.1808
+      E  median=1.5681  p95=1.6801  p99=1.6801  max=1.6801
+    not_supported_browser  n=5   [n<100: p99 == max, not a true percentile]
+      L  median=0.0018  p95=0.0074  p99=0.0074  max=0.0074
+      E  median=1.5045  p95=1.5095  p99=1.5095  max=1.5095
+    address_bar_not_found  n=2   [n<100: p99 == max, not a true percentile]
+      L  median=0.1188  p95=0.2148  p99=0.2148  max=0.2148
+      E  median=1.6179  p95=1.7144  p99=1.7144  max=1.7144
+  STABLE vs TRANSITION (by opaque resource identity):
+    STABLE  n=307  non-ok reads=9 (2.9%)
+      L  median=0.0691  p95=0.1304  p99=0.1658  max=0.1964
+      E  median=1.5680  p95=1.6287  p99=1.6738  max=1.7012
+    TRANSITION  n=12  non-ok reads=3 (25.0%)   [n<100: p99 == max]
+      L  median=0.0606  p95=0.2148  p99=0.2148  max=0.2148
+      E  median=1.5624  p95=1.7144  p99=1.7144  max=1.7144

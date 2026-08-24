@@ -68,6 +68,7 @@ TERMINAL_KINDS: Final = frozenset(
         "trigger_processing_failed",
         "emergency_completed",
         "sine_fact",
+        "resource_intent_fact",
         "cosine_effect",
         "cosecant_fact",
     }
@@ -102,6 +103,9 @@ class TelemetryEvent:
     app: str
     title: str
     message: str
+    badge: str = ""
+    feed_text: str = ""
+    tone: str = ""
 
 
 @dataclass(frozen=True)
@@ -260,6 +264,7 @@ class ControlStationController(QObject):
         self._elapsed_timer.timeout.connect(self._update_elapsed_time)
 
         self._sine_presenter = None
+        self._study_confirmation_presenter = None
         self._popup_dispatchers_installed = False
 
     @property
@@ -305,7 +310,10 @@ class ControlStationController(QObject):
 
         if self._popup_dispatchers_installed:
             return
-        from COSECANT_STUDY_MODE.view import install_popup_dispatcher as install_study
+        from COSECANT_STUDY_MODE.view import (
+            StudyConfirmationPresenter,
+            install_popup_dispatcher as install_study,
+        )
         from COSINE.popup import install_cosine_dispatcher
         from SINE.popup import SinePopupPresenter
 
@@ -322,17 +330,34 @@ class ControlStationController(QObject):
                 "sine_popup_failed", request_id, occurred_ns, reason=reason
             )
         )
-        presenter.user_action.connect(
-            lambda request_id, response, occurred_ns: self._send_sine_callback(
-                "sine_user_action", request_id, occurred_ns, response=response
-            )
-        )
+        presenter.user_action.connect(self._submit_sine_user_action)
         presenter.popup_closed.connect(
             lambda request_id, reason, occurred_ns: self._send_sine_callback(
                 "sine_popup_closed", request_id, occurred_ns, reason=reason
             )
         )
         self._sine_presenter = presenter
+        study_confirmation = StudyConfirmationPresenter(owner=owner, parent=self)
+        study_confirmation.popup_shown.connect(
+            lambda request_id, occurred_ns, hwnd: self._send_study_confirmation_callback(
+                "study_confirmation_popup_shown",
+                request_id,
+                occurred_ns,
+                popup_hwnd=hwnd,
+            )
+        )
+        study_confirmation.user_action.connect(
+            self._submit_study_confirmation_action
+        )
+        study_confirmation.popup_closed.connect(
+            lambda request_id, reason, occurred_ns: self._send_study_confirmation_callback(
+                "study_confirmation_popup_closed",
+                request_id,
+                occurred_ns,
+                reason=reason,
+            )
+        )
+        self._study_confirmation_presenter = study_confirmation
         self._popup_dispatchers_installed = True
 
     def _enqueue_command(self, kind: str, payload: object | None = None, response_queue=None) -> bool:
@@ -351,6 +376,99 @@ class ControlStationController(QObject):
             **fields,
         }
         return self._enqueue_command(kind, payload)
+
+    def _submit_sine_user_action(
+        self,
+        request_id: str,
+        response: str,
+        occurred_ns: int,
+    ) -> bool:
+        """Send one popup action and surface transport rejection to that popup."""
+
+        acknowledgement: queue.Queue = queue.Queue(maxsize=1)
+        payload = {
+            "request_id": str(request_id),
+            "occurred_monotonic_ns": int(occurred_ns),
+            "response": str(response),
+        }
+        if not self._enqueue_command("sine_user_action", payload, acknowledgement):
+            self._show_sine_action_rejection(
+                request_id,
+                "ACTION NOT SENT · ENGINE BUSY · TRY AGAIN",
+            )
+            return False
+        try:
+            accepted = bool(acknowledgement.get(timeout=1.5))
+        except queue.Empty:
+            self._show_sine_action_rejection(
+                request_id,
+                "ACCEPTANCE NOT CONFIRMED · TRY AGAIN",
+            )
+            return False
+        if not accepted:
+            self._show_sine_action_rejection(
+                request_id,
+                "ACTION NOT ACCEPTED · TRY AGAIN",
+            )
+        return accepted
+
+    def _show_sine_action_rejection(self, request_id: str, message: str) -> None:
+        presenter = self._sine_presenter
+        if presenter is not None:
+            presenter.show_action_rejection(str(request_id), str(message))
+
+    def _send_study_confirmation_callback(
+        self,
+        kind: str,
+        request_id: str,
+        occurred_ns: int,
+        **fields,
+    ) -> bool:
+        return self._enqueue_command(
+            kind,
+            {
+                "request_id": str(request_id),
+                "occurred_monotonic_ns": int(occurred_ns),
+                **fields,
+            },
+        )
+
+    def _submit_study_confirmation_action(
+        self,
+        request_id: str,
+        response: str,
+        occurred_ns: int,
+        expected_study_context_token: str,
+        expected_resource_key: str,
+    ) -> bool:
+        """Transport one exact Case-1 clarification action with acknowledgement."""
+
+        acknowledgement: queue.Queue = queue.Queue(maxsize=1)
+        payload = {
+            "request_id": str(request_id),
+            "response": str(response),
+            "occurred_monotonic_ns": int(occurred_ns),
+            "expected_study_context_token": str(expected_study_context_token),
+            "expected_resource_key": str(expected_resource_key),
+        }
+        accepted = self._enqueue_command(
+            "study_confirmation_user_action",
+            payload,
+            acknowledgement,
+        )
+        if accepted:
+            try:
+                accepted = bool(acknowledgement.get(timeout=1.5))
+            except queue.Empty:
+                accepted = False
+        if not accepted:
+            presenter = self._study_confirmation_presenter
+            if presenter is not None:
+                presenter.show_action_rejection(
+                    str(request_id),
+                    "CLARIFICATION NOT ACCEPTED · CHECK THE CURRENT RESOURCE",
+                )
+        return bool(accepted)
 
     def submit_cosine_command(self, command):
         """Synchronously obtain the exact backend CommandResult for a popup.
@@ -580,6 +698,8 @@ class ControlStationController(QObject):
         self.sine_watch_status_changed.emit(None)
         self.mine_watch_status_changed.emit(None)
         self.mirl_health_status_changed.emit(None)
+        if self._study_confirmation_presenter is not None:
+            self._study_confirmation_presenter.reset_presentation_epoch()
         # C11-A-L5.  The Study surface keeps a generation-ordering baseline so a
         # stale snapshot cannot repaint over a newer one.  A new session builds
         # fresh Study and COSECANT authorities whose generations legitimately
@@ -747,6 +867,9 @@ class ControlStationController(QObject):
                 app=str(raw.get("app", "")),
                 title=str(raw.get("title", "")),
                 message=str(raw.get("message", "")),
+                badge=str(raw.get("badge", "")),
+                feed_text=str(raw.get("feed_text", "")),
+                tone=str(raw.get("tone", "")),
             )
             self.telemetry_received.emit(event)
 
@@ -774,7 +897,21 @@ class ControlStationController(QObject):
             presenter = self._sine_presenter
             if presenter is not None:
                 presenter.apply_fact(raw.get("fact"))
-            return True
+            # Every SINE fact still reaches the popup presenter, but Phase 2
+            # semantic facts also belong in the append-only Live Telemetry
+            # feed.  Monitor is the meaning authority: a non-empty badge says
+            # it prepared this exact fact for user-visible transport.  Do not
+            # swallow that prepared row at the presentation bridge.
+            return not bool(str(raw.get("badge", "") or "").strip())
+
+        if kind == "resource_intent_fact":
+            presenter = self._study_confirmation_presenter
+            if presenter is not None:
+                presenter.apply_fact(raw.get("fact"))
+            # Monitor alone decides which Resource Intent facts are semantic
+            # history. Presentation consumes every fact, while prepared badge
+            # rows continue unchanged to Live Telemetry.
+            return not bool(str(raw.get("badge", "") or "").strip())
 
         if kind == "cosine_effect":
             effect = raw.get("effect")
@@ -859,6 +996,11 @@ class ControlStationController(QObject):
         if self._sine_presenter is not None:
             try:
                 self._sine_presenter.emergency_close_all("controller_shutdown")
+            except Exception:
+                pass
+        if self._study_confirmation_presenter is not None:
+            try:
+                self._study_confirmation_presenter.close_all("controller_shutdown")
             except Exception:
                 pass
         try:

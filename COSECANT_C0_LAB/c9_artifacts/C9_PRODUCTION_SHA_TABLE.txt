@@ -1,0 +1,33 @@
+================================================================================
+MYELIN 2.0 - C9-A PRODUCTION SHA TABLE
+VERIFIED AFTER ALL MEASUREMENT - PRODUCTION DIFF MUST BE ZERO
+DATE: 22 August 2026
+================================================================================
+
+CORE_ENGINE/monitor.py
+    9dcc8db19911aee9dc460f1ecebb959391920e7c30a7e2fb439066e48401a02f
+COSECANT_STUDY_MODE/cosecant.py
+    115bdb1cadd4a74657afea5a0ad2ceab89a034f1674f38c0bd1329cc2860b4e8
+CORE_ENGINE/resource_intent.py
+    ecbb9990e8c5056995c2b0eb66aaeb7ddda1c5cf6ed5883f5c17b48c94df2244
+CORE_ENGINE/browser.py
+    32869a749719e48dd3000ada1c05d9206207d519d73012f432b0ef68b27b0711
+CORE_ENGINE/trigger.py
+    0b8455c574e3539e496ae39e523ffe8e43ea2968acb2a3fa5729a88d356b37fd
+CORE_ENGINE/blacklist.py
+    bc9ebc6b9ee4ba4705c4304254245e32a4e0f3505a8e0017c47b20e86b36317e
+SINE/sine.py
+    b575772211d39504a8d83a2f6125aac890bfe17c5a1675ca73d0c965b2b6b115
+MIRL/mirl.py
+    25f67be5c688b4f0923b8a0e54efa51fc56e970b95c56388803337c5e80b2304
+COSECANT_STUDY_MODE/study.py
+    8af0e398d3f30fa974c100c990d816a8555ff7e3043ac2cd521f1300c46f6ec2
+COSECANT_STUDY_MODE/study_alignment.py
+    81efa2ec7bb6fdc53d1874a581644fdfe94d2e6f104ea2bf344222bb6f81e9b3
+PERSISTENCE/storage.py
+    8009fea4d42d21b900ad5527e2243d3ac2ba4e4441e37489ac79128ac5208d71
+
+TIMING CONSTANTS READ FROM THE LIVE SOURCE, UNCHANGED:
+49:DEFAULT_POLL_SECONDS: Final = 1.5
+117:    return_confirmation_seconds: float = 3
+118:    maximum_presence_gap_seconds: float = 1.5

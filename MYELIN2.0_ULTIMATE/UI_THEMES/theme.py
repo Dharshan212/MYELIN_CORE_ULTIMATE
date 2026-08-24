@@ -201,7 +201,13 @@ def build_application_stylesheet(tokens: ThemeTokens | None = None) -> str:
     base, surface, soft = t.window_background, t.surface, t.surface_soft
     text, muted, border = t.text_primary, t.muted, t.border
     cyan, cyan_dim = t.cyan, t.cyan_dim
-    red, red_dim, amber, green = t.red, t.red_dim, t.amber, t.green
+    red, red_dim, amber, green, violet = (
+        t.red,
+        t.red_dim,
+        t.amber,
+        t.green,
+        t.violet,
+    )
 
     return f"""
 /* ---------- base ---------- */
@@ -387,6 +393,7 @@ QLabel#feedTag {{
 QLabel#feedTag[tone="amber"] {{ color: {amber}; background: {alpha(amber, 0.12)}; }}
 QLabel#feedTag[tone="red"]   {{ color: {red};   background: {alpha(red, 0.12)}; }}
 QLabel#feedTag[tone="green"] {{ color: {green}; background: {alpha(green, 0.12)}; }}
+QLabel#feedTag[tone="violet"] {{ color: {violet}; background: {alpha(violet, 0.14)}; }}
 
 /* ---------- scroll areas ---------- */
 QScrollArea {{ background: transparent; border: none; }}

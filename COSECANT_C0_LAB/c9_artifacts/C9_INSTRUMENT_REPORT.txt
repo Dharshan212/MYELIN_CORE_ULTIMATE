@@ -1,0 +1,459 @@
+================================================================================
+MYELIN 2.0 — C9-A INSTRUMENT REPORT
+REAL-RUNTIME MEASUREMENT OF COSECANT'S EFFECTIVE PRESENCE GAP
+DATE: 22 August 2026
+PRODUCTION CHANGES: ZERO
+G DECISION: NOT MADE — MEASUREMENT ONLY
+================================================================================
+
+0. WHAT THIS PHASE WAS AND WAS NOT
+--------------------------------------------------------------------------------
+    C9-A collected evidence. It selected nothing.
+
+    No production file was modified. maximum_presence_gap_seconds,
+    return_confirmation_seconds and DEFAULT_POLL_SECONDS were read, never
+    written. No value for G is recommended, calculated or implied anywhere in
+    this report. That decision belongs to the C9-B architecture review.
+
+
+1. ENVIRONMENT
+--------------------------------------------------------------------------------
+    OS                Windows 11 Home Single Language 10.0.26200
+    Python            3.13.5 (CPython, win32)
+    Production body   MYELIN_GENALOGY/MYELIN2.0_ULTIMATE
+    Instrument        COSECANT_C0_LAB/measure_c9_runtime_gap.py
+    Storage           redirected to a throwaway APPDATA before PERSISTENCE
+                      import; the real MYELIN database was never opened
+
+    PRODUCTION TIMING AS MEASURED (unchanged throughout)
+        P = 1.5 s    monitor.py:49    DEFAULT_POLL_SECONDS
+        G = 1.5 s    cosecant.py:118  maximum_presence_gap_seconds
+        C = 3.0 s    cosecant.py:117  return_confirmation_seconds
+
+
+2. THE QUANTITY MEASURED, AND WHY THE OLD ONE WAS INSUFFICIENT
+--------------------------------------------------------------------------------
+    Monitor's real per-cycle order:
+
+        O(i) foreground observation timestamp
+          -> real Win32 foreground read
+          -> real Browser / UIA address-bar read
+          -> Resource Intent
+          -> COSINE / MIRL / SINE / Blacklist / break admission / Study advance
+          -> COSECANT.advance()            <-- A(i)
+          -> COSECANT.observe_return(O(i))
+
+    COSECANT has TWO continuity gates and advance() runs FIRST:
+
+        advance()        while RETURN_CONFIRMING:  A(i) - O(i-1) > G -> stale
+        observe_return():                          O(i) - O(i-1) > G -> restart
+
+    Therefore the dominant quantity is
+
+        E(i) = A(i) - O(i-1) = dO(i) + L(i)
+
+    where dO(i) = O(i) - O(i-1) and L(i) = A(i) - O(i).
+
+    The historical measure_cadence.py measured dO only, with a scripted
+    foreground reader and scripted browser reads. It is preserved untouched as
+    C0 evidence and contributed no sample to this dataset.
+
+    IDENTITY VERIFICATION
+        Every one of the 1600 rows was checked for E == dO + L.
+        Violations: 0.  Worst delta: 1e-9 s (float rounding).
+
+
+3. INSTRUMENTATION METHOD — NO PRODUCTION MUTATION
+--------------------------------------------------------------------------------
+    All recording is done by LAB-only delegating wrappers. No profiler code was
+    inserted into monitor.py or cosecant.py, no call order was changed, and
+    advance() is never called an extra time.
+
+    RecordingForegroundReader   delegates to the REAL WindowsForegroundReader
+                                and times the read
+    make_recording_browser      wraps the REAL BrowserEvidenceAuthority.observe
+                                and records STATUS ONLY
+    make_recording_intent       wraps the REAL ResourceIntentAuthority.observe
+                                and records the OPAQUE identity only
+    RecordingCosecant           subclasses the REAL CosecantRuntime; overrides
+                                _read_monotonic purely to OBSERVE the value
+                                production already computes -- no second clock
+                                read is introduced
+
+    Everything downstream is the genuine production object: real Win32
+    foreground sampling, real UIA address-bar reading, real Resource Intent,
+    real Monitor coordinator, real Study/COSECANT/SINE/MIRL/COSINE/Trigger/
+    Blacklist/storage, at the real DEFAULT_POLL_SECONDS = 1.5.
+
+    PRIVACY
+        No URL, window title or page content is recorded in any artifact.
+        resource_stable_key is Resource Intent's own irreversible hash -- the
+        same value production already persists as resource_key.
+
+
+4. CONDITIONS AND SAMPLE SIZES
+--------------------------------------------------------------------------------
+    Each condition: 320 valid consecutive intervals, one lock-holding process,
+    production cadence, ~480 s wall clock.
+
+    A_desktop_baseline      320   normal desktop use
+    B_browser_normal        320   ordinary browser use, real UIA reads
+    C_study_active_browser  320   Study Mode ACTIVE via the real command path
+    D_switching             320   realistic tab/window switching
+    E_cosecant_break        320   REAL admitted COSECANT break
+
+    TOTAL AUTHORITATIVE INTERVALS: 1600
+
+    A is NOT a browser-free baseline and is not presented as one. Its observed
+    foreground mix was chatgpt classic 152, claude 133, chrome 25,
+    snippingtool 9, explorer 1 -- so 25 intervals (7.8%) carried real UIA
+    reads. Section 8 gives both framings.
+
+
+5. HEADLINE RESULTS — E = A(i) - O(i-1)
+--------------------------------------------------------------------------------
+    condition                 median      p95      p99      max    E>=3.0
+    A_desktop_baseline        1.5031   1.5573   1.5951   1.8799        0
+    B_browser_normal          1.5794   1.6584   1.8509   2.8283        0
+    C_study_active_browser    1.5709   1.6043   1.7764   1.9594        0
+    D_switching               1.5656   1.6328   1.6825   2.6531        0
+    E_cosecant_break          1.5680   1.6344   1.6986   2.5383        0
+
+    0 of 1600 authoritative intervals reached 3.0 s.
+    Overall observed maximum: E = 2.8283 s (condition B).
+
+    OBSERVATION CADENCE dO WAS STABLE EVERYWHERE
+        A median 1.5002  max 1.6232
+        B median 1.5003  max 1.5861
+        C median 1.5007  max 1.5970
+        D median 1.5008  max 1.5151
+        E median 1.5007  max 2.4169   (see section 9)
+
+    PRE-ADVANCE LATENCY L
+        A median 0.0012  p99 0.0842  max 0.3827
+        B median 0.0801  p99 0.3472  max 1.3252
+        C median 0.0700  p99 0.2673  max 0.4667
+        D median 0.0642  p99 0.1784  max 1.1542
+        E median 0.0691  p99 0.1844  max 0.2148
+
+    Full per-condition statistics, threshold counts and per-browser_status
+    breakdowns are in C9_RUNTIME_GAP_SUMMARY.txt. Every interval is in
+    C9_RUNTIME_GAP_RAW.csv.
+
+
+6. E THRESHOLD EXCEEDANCE COUNTS (as requested by C9-A)
+--------------------------------------------------------------------------------
+    threshold      A       B       C       D       E
+    E > 1.5      191     313     320     311     317
+    E > 1.8        1       5       3       2       1
+    E > 2.0        0       3       0       1       1
+    E > 2.2        0       2       0       1       1
+    E > 2.4        0       2       0       1       1
+    E > 2.6        0       2       0       1       0
+    E > 2.8        0       1       0       0       0
+    E >= 3.0       0       0       0       0       0
+
+    NOTE ON THE "E > 1.5" ROW. G is exactly 1.5 s and the measured E medians sit
+    between 1.5031 and 1.5794. That row is therefore knife-edge by
+    construction: a median a few milliseconds either side of the threshold
+    swings the percentage dramatically. It should be read as "E routinely sits
+    at or just above G", not as "60-99% of cycles are dangerously late". The
+    p95/p99/max columns are the load-bearing figures.
+
+
+7. MEASUREMENT PROBE BIAS — RESOLVED BY CONDITION E
+--------------------------------------------------------------------------------
+    CosecantRuntime.advance() returns EARLY, before reading its monotonic
+    clock, whenever no break is active. So in conditions A-D the exact internal
+    value does not exist and the instrument recorded advance_call_ns, taken at
+    wrapper entry before the lock and the state check. That is a LOWER BOUND on
+    the value production uses, and it biases E downward -- toward looking safer
+    than reality.
+
+    Condition E is the only condition where a break is genuinely active, so it
+    is the only condition that can measure that bias directly.
+
+        advance source in E: internal = 319, call-entry = 1
+
+        bias = advance_internal_ns - advance_call_ns   (seconds)
+            n=319  min=0.0000  mean=0.0000  median=0.0000
+                   p95=0.0000  p99=0.0000  max=0.0010
+
+    RESULT: the call-entry approximation used in A-D was experimentally bounded
+    in this run at approximately 1 millisecond worst case. Against a G decision
+    measured in tenths of a second that is negligible, so the A-D datasets can
+    be treated as measuring the intended quantity.
+
+    WHY ONLY 319 OF 320 E ROWS HAVE advance_internal_ns
+        The single exception is sequence 2, recorded with
+        cosecant_state = INACTIVE. It is the first interval of the run, taken
+        during the cycle in which the break was still being admitted, before
+        COSECANT entered BREAK_ACTIVE. advance() therefore still took its early
+        return and never reached its clock read. The row is retained in the CSV
+        with advance_internal_ns blank and advance_source = advance_call_ns.
+        It is not omitted, and it is not fabricated.
+
+
+8. A1 / A2 — DESKTOP BASELINE, BOTH FRAMINGS
+--------------------------------------------------------------------------------
+    The 25 Chrome intervals in condition A are legitimate real behaviour and
+    were NOT deleted. Both analyses are preserved:
+
+        A1  all 320 intervals            E median 1.5031  p95 1.5573
+                                         p99 1.5951       max 1.8799
+        A2  295 non-browser intervals    E median 1.5019  p95 1.5134
+                                         p99 1.5740       max 1.8799
+
+    A2 is tighter through the body of the distribution, consistent with browser
+    cycles carrying the extra sensing cost. The maximum is identical because
+    A's single largest excursion did not occur on a browser cycle.
+
+
+9. TAIL MECHANISMS — THREE DISTINCT SOURCES, PRESERVED SEPARATELY
+--------------------------------------------------------------------------------
+    The largest excursions do not share one cause. They are recorded here
+    separately rather than merged into a single "jitter" number.
+
+    (i) BROWSER / UIA LATENCY — conditions B and D
+        B's two worst intervals were degraded reads, not successful ones:
+            E 2.8283   dO 1.5031   L 1.3252   browser_status window_not_found
+            E 2.6767   dO 1.5005   L 1.1762   browser_status address_value_invalid
+        Within B, L median was 0.0824 s on 295 successful reads versus 0.0067 s
+        on 25 cycles with no UIA read at all -- and the failure cases cost
+        1.2-1.3 s. D's worst interval (E 2.6531, L 1.1542) carried a SUCCESSFUL
+        ok read during an identity transition.
+
+    (ii) SCHEDULER / OBSERVATION-GAP EXCURSION — condition E
+        E's maximum has a different shape from B's and D's. It is the ONLY
+        top-tail event in the dataset dominated by dO rather than L:
+            E 2.5383   dO 2.4169   L 0.1214   browser_status ok
+        This is the break-admission cycle (sequence 2, cosecant_state
+        INACTIVE). The preceding cycle performed C5 admission work -- validate
+        the target, pause Study, start the break, publish the BREAK context --
+        which delayed the NEXT foreground observation. It is a one-off
+        transient at break start, not steady-state break behaviour.
+
+    (iii) STEADY-STATE ACTIVE BREAK — condition E, BREAK_ACTIVE only
+        Excluding that admission transient, the 319 intervals where COSECANT
+        was genuinely BREAK_ACTIVE were the tightest tail in the whole dataset:
+            dO median 1.5007  p99 1.5132  max 1.5146
+            E  median 1.5680  p95 1.6344  p99 1.6873  max 1.7144
+
+        Stated as a measurement only, with no recommendation attached: G gates
+        continuity while a break is running, and in that state the observed
+        maximum E was 1.7144 s. Whether the admission transient and the UIA
+        failure excursions must also be absorbed by a static G is exactly the
+        architectural question C9-B has to answer, and this report does not
+        answer it.
+
+
+10. STABLE vs TRANSITION — EXPLORATORY ONLY, NOT AUTHORITATIVE
+--------------------------------------------------------------------------------
+    STATUS: INSUFFICIENT TRANSITION SAMPLE. NO CAUSAL CLAIM IS MADE.
+
+    D_switching
+        STABLE      n=313  non-ok 6.1%   L median 0.0642  E max 1.9441
+        TRANSITION  n=6    non-ok 0.0%   L median 0.0870  E max 2.6531
+    E_cosecant_break
+        STABLE      n=307  non-ok 2.9%   L median 0.0691  E max 1.7012
+        TRANSITION  n=12   non-ok 25.0%  L median 0.0606  E max 1.7144
+
+    WHY THE TRANSITION GROUP IS NOT TRUSTWORTHY
+        The instrument detected only 6 identity changes across D's 320
+        intervals -- one every 80 s -- against an intended switching rate of
+        10-30 s. Two independent facts explain this and both were verified
+        against the raw data rather than assumed:
+
+        1. UNDER-DETECTION. resource_stable_key is derived partly from the
+           normalised window title. Two tabs on the same site can produce the
+           SAME identity, so genuine tab switches collapse into "STABLE". D
+           recorded only 5 distinct stable_keys and 2 distinct hwnds in 320
+           intervals.
+        2. UNDER-SWITCHING. The observed dwell pattern was
+           [20, 6, 29, 5, 28, 80, 152] cycles. The final two identities held
+           for 120 s and 228 s. Roughly the last four minutes contained no
+           detected change at all. No title-collision artefact explains a
+           228-second unbroken stretch.
+
+        Consequently the TRANSITION rows are a FLOOR, not a measurement, and
+        some STABLE rows are probably mislabelled transitions.
+
+    WHAT MAY BE SAID
+        D's single worst interval was a transition carrying a SUCCESSFUL ok
+        read with L = 1.1542 s. That is a genuine observation and it is
+        preserved. It is consistent with the hypothesis that a moving sensory
+        target can make even a successful UIA read slow.
+
+    WHAT MAY NOT BE SAID
+        "Transitions cause the tail." n=6 cannot support that, and this report
+        does not assert it. If the eventual G decision turns on whether the
+        2.6-2.8 s events are transition-specific, a dedicated supplemental
+        experiment (different domains, separate windows, sustained deliberate
+        cross-site switching) would be required first.
+
+
+11. STUDY MODE
+--------------------------------------------------------------------------------
+    Study ACTIVE introduced no new visible timing burden in this experiment.
+    Browser/UIA remained the dominant timing variable.
+
+    This is deliberately worded as an experimental observation, not a causal
+    claim. C's statistics sit slightly below B's on every measure, but B and C
+    had materially different degraded-UIA distributions -- B had 24 non-ok
+    reads, C had 1 -- so the two conditions are not a clean isolate and no
+    stronger conclusion is drawn from the comparison.
+
+
+12. C5 LIVE ADMISSION RESULT (CONDITION E)
+--------------------------------------------------------------------------------
+    Condition E required a genuine C5 break admission and was explicitly
+    permitted to fail. The instrument re-requested the break every 6 s for up
+    to 180 s, drained monitor's real engine_command_rejected telemetry, and
+    would have raised "CONDITION E NOT MEASURED" with the verbatim refusals
+    rather than simulate a break.
+
+    RESULT: admitted on real evidence, with NO refusals recorded.
+        Study Mode reached ACTIVE through the real command path.
+        COSECANT reached BREAK_ACTIVE.
+
+    This means the live foreground carried, on one real observation: Study
+    ACTIVE, a fresh STUDY_ALIGNED verdict, matching Study context token,
+    authoritative and non-held Browser evidence, a non-empty certified platform
+    and opaque resource token, Browser/Resource-Intent agreement on both, and
+    no Protected Red.
+
+    Worth recording for the project history: this is the first time the
+    C4.5 -> C4 -> C5 chain has been exercised end to end against a REAL UIA
+    read of a REAL browser page. Every previous test used the scripted browser
+    reader. It succeeded on the first attempt.
+
+
+13. EXCLUDED RUNS — FULL LEDGER
+--------------------------------------------------------------------------------
+    Detailed in C9_EXCLUDED_RUNS.txt. Summary:
+
+    EXCLUSION 1 — SMOKE TEST, 8 intervals, 0 samples used.
+        Instrument verification only. Its L median of 0.157 s was later shown
+        to be contention, not physiology: the clean run measured 0.0012 s, a
+        130x difference.
+
+    EXCLUSION 2 — CONCURRENT-MONITOR CONTAMINATION, 0 samples used.
+        PIDs: py 70848 / python 49808 (started 01:07:51, attempt 1)
+              py 23752 / python 30780 (started 01:09:26, attempt 2)
+        A backgrounded run was reported "completed, exit code 0" by the task
+        harness but its Python child outlived the shell. A second run was then
+        started while the first was still polling, so for ~2 minutes TWO real
+        Monitor coordinators polled the same machine and both were queued to
+        append to the same CSV.
+        Detected by checking for live processes rather than trusting the
+        completion notification. All four PIDs terminated. Neither attempt had
+        written the CSV, so no contaminated row ever entered the artifacts; the
+        entire artifact directory was deleted and recreated.
+
+    EXCLUSION 3 — INSTRUMENT SMOKE ROWS (GUARD_CHECK, D_SMOKE, D_SMOKE2,
+        STUDY_SMOKE), 0 samples used. Written while verifying the exclusivity
+        guard, the Study activation path, the transition split and the schema
+        migration. All removed before the affected authoritative run.
+
+    TOTAL EXCLUDED SAMPLES USED IN ANY STATISTIC: 0
+
+
+14. INSTRUMENT DEFECTS FOUND AND FIXED DURING C9-A
+--------------------------------------------------------------------------------
+    Both were SILENT failure modes that would have produced plausible-looking
+    numbers. Both are LAB-only fixes; production diff remained zero.
+
+    (a) NO SINGLE-INSTANCE PROTECTION
+        Cause of Exclusion 2. measure_c9_runtime_gap.py now takes an exclusive
+        lock (c9_artifacts/measurement.lock) recording pid, condition and UTC
+        start time, refuses to start if it exists, and releases in a finally
+        block. A measurement that cannot prove it ran alone is not
+        authoritative.
+
+    (b) CSV SCHEMA DRIFT
+        Adding resource_stable_key and hwnd made the instrument write 20-field
+        rows while the existing file still had an 18-field header. Appending
+        does not crash -- it silently misaligns every later column, so values
+        read back against the wrong names and look valid. Five smoke rows hit
+        this. The CSV was migrated to the unified 20-field schema and
+        append_csv now REFUSES to append under a mismatched header.
+
+    BACKFILL POLICY
+        Conditions A, B and C were collected before resource_stable_key and
+        hwnd existed. Their rows carry those two columns BLANK. They were not
+        back-computed, estimated or fabricated, and their summaries correctly
+        print "STABLE vs TRANSITION: NOT DERIVABLE -- this run predates the
+        opaque resource_stable_key column."
+
+
+15. LAB FIXTURE CORRECTION (PERFORMED BEFORE MEASUREMENT)
+--------------------------------------------------------------------------------
+    Production WindowsForegroundReader emits EXTENSIONLESS process identities.
+    The shared _lab.py Monitor-style surfaces still carried "chrome.exe", which
+    Trigger's scope match can never satisfy, so no lab test had ever minted an
+    Executive Blacklist candidate.
+
+    Corrected in _lab.py only: LECTURE, OTHER_LECTURE, MRBEAST, SHORTS,
+    INSTAGRAM -> process_name="chrome". Those were the only five ".exe"
+    occurrences in the file. No mass replacement was performed; direct Browser
+    tests that intentionally exercise Browser's executable-name normaliser were
+    left untouched. The canonical rule is documented on the Surface dataclass.
+
+    REGRESSION AFTER THE CORRECTION
+        223 fast tests passed, 9 slow tests passed, 0 failures.
+        Nothing that was previously green went red, so nothing was escalated.
+
+
+16. ARTIFACTS
+--------------------------------------------------------------------------------
+    C9_RUNTIME_GAP_RAW.csv        1600 authoritative rows, 20 columns
+    C9_RUNTIME_GAP_SUMMARY.txt    per-condition statistics, thresholds,
+                                  per-browser_status, STABLE/TRANSITION
+    C9_INSTRUMENT_REPORT.txt      this document
+    C9_PRODUCTION_SHA_TABLE.txt   post-measurement production hashes
+    C9_EXCLUDED_RUNS.txt          discarded runs with PIDs and reasons
+    measure_c9_runtime_gap.py     instrument source
+
+    No artifact was placed inside MYELIN2.0_ULTIMATE.
+    measure_cadence.py is preserved untouched as historical C0 evidence.
+
+    PERCENTILE METHOD
+        Nearest-rank on the sorted sample: p_k = sorted[ceil(k/100 * n) - 1],
+        1-indexed, no interpolation. Groups with n < 100 are explicitly
+        labelled "[n<100: p99 == max, not a true percentile]" so a small
+        failure bucket cannot be misread as a percentile.
+
+
+17. PRODUCTION INTEGRITY
+--------------------------------------------------------------------------------
+    All eleven production files re-hashed after every measurement and match
+    their pre-measurement values exactly. Full table in
+    C9_PRODUCTION_SHA_TABLE.txt.
+
+        monitor.py          9dcc8db19911aee9dc460f1ecebb959391920e7c30a7e2fb439066e48401a02f
+        cosecant.py         115bdb1cadd4a74657afea5a0ad2ceab89a034f1674f38c0bd1329cc2860b4e8
+        resource_intent.py  ecbb9990e8c5056995c2b0eb66aaeb7ddda1c5cf6ed5883f5c17b48c94df2244
+        browser.py          32869a749719e48dd3000ada1c05d9206207d519d73012f432b0ef68b27b0711
+        trigger.py          0b8455c574e3539e496ae39e523ffe8e43ea2968acb2a3fa5729a88d356b37fd
+
+    Timing constants read from the live source and unchanged:
+        monitor.py:49    DEFAULT_POLL_SECONDS = 1.5
+        cosecant.py:117  return_confirmation_seconds = 3
+        cosecant.py:118  maximum_presence_gap_seconds = 1.5
+
+
+18. OPEN ITEMS NOT ADDRESSED BY C9-A
+--------------------------------------------------------------------------------
+    W-7 remains OPEN. C9-A measured it; it did not repair it.
+    H-1 remains OPEN.
+    D transition subgroup remains exploratory; a supplemental cross-site
+        switching experiment would be needed to make it authoritative.
+    Production hygiene: MYELIN2.0_ULTIMATE still holds 9 __pycache__
+        directories and 32 .pyc files. Separate cleanup, untouched here.
+
+
+================================================================================
+C9-A MEASUREMENT COMPLETE
+G DECISION: NOT MADE
+PRODUCTION DIFF: ZERO
+================================================================================

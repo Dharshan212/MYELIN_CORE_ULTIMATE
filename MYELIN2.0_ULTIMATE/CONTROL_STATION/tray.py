@@ -292,7 +292,7 @@ class TrayController(QObject):
         self._lifecycle = lifecycle
         self._settings = settings
         self._guard = lifecycle.red_guard
-        self._base_icon = resource_icon("icons/Myelin.ico")
+        self._base_icon = resource_icon("icons/Myelin_Loading_Screen.ico")
         self._engine_status = engine.status
         self._study_snapshot = None
         self._state = TrayState.IDLE

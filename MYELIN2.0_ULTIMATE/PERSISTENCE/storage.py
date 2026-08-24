@@ -67,14 +67,11 @@ class ProfileLearningState:
     Ebbinghaus equation and it does not choose SINE timing.
 
     ``learned_return_latency_seconds`` is the ACTUAL verified MIRL return
-    latency (Tr) from the previous eligible session -- the sole adaptation
-    authority for MBRM's ``F = Tr_ref / Tr_previous``.  ``learned_lambda`` is
-    retained alongside it purely as an audit/telemetry value: it was derived
-    per-episode with a category-specific D0 (see
-    ``CORE_ENGINE.trigger.MODEL_MAGNITUDE_MULTIPLIERS``), so reconstructing Tr
-    back out of it would silently reintroduce category-dependent
-    personalization into what must be a pure return-time ratio. Both fields
-    are learned or unlearned together.
+    latency (Tr) from the previous eligible session. ``learned_lambda`` is the
+    corresponding learned Ebbinghaus recovery-rate evidence. Both are retained
+    together so MYELIN preserves the factual observation and its mathematical
+    Ebbinghaus derivation. Storage does not invent a reference time, reference
+    lambda, factor bound, or SINE timing decision.
     """
 
     profile_key: str
@@ -709,23 +706,15 @@ class EngineStorage:
     ) -> TransactionReceipt:
         """Submit one completed-session learning update.
 
-        ``session_return_latency_seconds`` is the authoritative adaptation
-        value -- already-calculated evidence supplied by later phases (the
-        mean of this one session's ACTUAL verified MIRL return latencies,
-        computed upstream -- storage does not calculate Ebbinghaus and does
-        not touch MIRL). ``session_lambda`` (the mean of this session's
-        observed lambda estimates) is stored alongside it purely as an
-        audit/telemetry value.
+        ``session_return_latency_seconds`` is factual previous-session MIRL
+        recovery evidence (the mean of this session's ACTUAL verified return
+        latencies, computed upstream). ``session_lambda`` is the matching
+        Ebbinghaus recovery-rate evidence derived upstream. Storage preserves
+        both facts and does not choose how a future session normalizes them.
 
-        CORRECTION (Chief audit, MBRM D0-contamination fix): lambda is
-        derived per-episode with a category-specific D0 (short_form_video,
-        social_feed, media_hub/generic all use a different D0 -- see
-        CORE_ENGINE.trigger.MODEL_MAGNITUDE_MULTIPLIERS). Reconstructing next
-        session's Tr_previous back out of a stored lambda therefore silently
-        reintroduces category-dependent personalization into MBRM's
-        ``F = Tr_ref / Tr_previous``, which must be a pure return-time ratio.
-        Tr is now its own durable, previous-eligible-session-only fact so
-        MBRM never has to invert lambda at all.
+        Policy boundary: persistence never invents a reference return time, a
+        reference lambda, factor bounds, or SINE timing. Those are not storage
+        decisions.
 
         BUGFIX (locked-design conformance): this previously stored a
         cumulative, unweighted running mean of ``session_lambda`` across the

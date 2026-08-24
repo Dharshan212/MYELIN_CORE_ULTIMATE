@@ -415,7 +415,7 @@ class Dot(QWidget):
 
         roles = {
             "cyan": t.cyan, "red": t.red, "amber": t.amber,
-            "green": t.green, "muted": t.muted,
+            "green": t.green, "violet": t.violet, "muted": t.muted,
         }
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)

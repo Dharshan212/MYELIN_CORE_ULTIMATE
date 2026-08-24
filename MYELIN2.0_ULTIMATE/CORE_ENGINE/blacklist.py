@@ -554,9 +554,9 @@ class BlacklistAuthority:
     def start_session(self, *, personalization_factor: float = 1.0) -> None:
         """Begin one session, optionally personalized by this session's F.
 
-        ``personalization_factor`` arrives already clamped from
-        ``trigger.mbrm_session_personalization``.  Blacklist neither derives
-        nor re-clamps it; it only applies it to its own stage-one threshold so
+        ``personalization_factor`` arrives already authorized and computed by
+        the upstream MBRM/Ebbinghaus path. Blacklist neither derives a reference
+        nor invents bounds; it only applies the frozen factor to stage one so
         the first SINE adapts exactly like stages two and three.
         """
 

@@ -298,65 +298,48 @@ class ObservedLambdaEstimate:
 
 
 # ---------------------------------------------------------------------------
-# MBRM session personalization factor
+# MBRM / Ebbinghaus session personalization factor
 # ---------------------------------------------------------------------------
 #
-# Locked design (PERSISTENCE/storage.py freezes
-# ``learned_return_latency_seconds`` as the previous ELIGIBLE session's
-# actual verified MIRL return latency only -- never a running average; see
-# ``update_profile_learning_session``). F is the locked identity implemented
-# literally, directly on that authoritative Tr fact:
+# Policy boundary:
+# No implementation authority may invent a reference return time or fixed
+# personalization bounds. Unapproved calibration placeholders are deliberately
+# absent here.
 #
-#     F = Tr_ref / Tr_previous
+# The Ebbinghaus mathematics itself remains intact.  For an observed user
+# recovery rate lambda_user and a separately USER-AUTHORIZED reference
+# recovery rate lambda_ref, the dimensionless timing factor is:
 #
-# CORRECTION (Chief audit): an earlier version of this authority reconstructed
-# Tr_previous from the stored lambda via ``t* = ln(D0/D_threshold) / lambda``
-# using a fixed D0 = INITIAL_MAGNITUDE_UNITLESS. But the stored lambda had
-# itself been derived per-episode with a CATEGORY-SPECIFIC D0
-# (short_form_video=1.00, social_feed=0.85, media_hub/generic=0.70 -- see
-# MODEL_MAGNITUDE_MULTIPLIERS). D0 only cancels out of F when the SAME D0 is
-# used on both sides of the ratio; reconstructing lambda's Tr through a
-# *different*, fixed D0 silently reintroduced category-dependent
-# personalization into what must be a pure return-time ratio -- two users
-# with an identical real 5-minute return latency got different F depending on
-# which distraction category triggered the episode. Tr is now carried as its
-# own durable fact end to end (MIRL -> monitor.py ->
-# PERSISTENCE.storage.ProfileLearningState -> here), so this function never
-# touches D0/D_threshold at all. Lambda remains stored and reported elsewhere
-# purely as an audit/telemetry value; it is not an input to F.
+#     F = lambda_user / lambda_ref
 #
-# Tr_ref is the "typical" verified return latency the static SINE baseline
-# (F = 1.0) implicitly assumes. A previous return slower than Tr_ref yields
-# F < 1 (SINE escalates sooner); a faster previous return yields F > 1 (SINE
-# waits longer). F_min/F_max bound one session's personalization so a single
-# extreme return latency can never collapse or balloon the SINE timers.
-# These three numbers are still placeholders pending product calibration --
-# see the module-level note in CORE_ENGINE/monitor.py.
-REFERENCE_RETURN_LATENCY_MINUTES: Final = 8.0
-PERSONALIZATION_FACTOR_MINIMUM: Final = 0.5
-PERSONALIZATION_FACTOR_MAXIMUM: Final = 1.5
+# When both rates are derived from the same D0 / threshold model, this is
+# algebraically equivalent to Tr_ref / Tr_previous.  Keeping the lambda-ratio
+# form here preserves the Ebbinghaus lineage without creating any new time
+# constant inside software.
+#
+# This pure function does not choose lambda_ref, does not clamp F, and does not
+# schedule SINE.  Until an authorized reference is supplied by policy, runtime
+# must fail closed to the exact static SINE baseline (F = 1.0).
 
 
 @dataclass(frozen=True, slots=True)
 class MbrmSessionPersonalization:
-    """One frozen MBRM personalization snapshot derived from a prior
-    session's actual verified MIRL return latency.
+    """Pure Ebbinghaus normalization result for one session.
 
-    Pure evidence-to-factor conversion only. No SINE/session-timing type is
-    built here -- this module does not schedule SINE (see module docstring);
-    the caller (CORE_ENGINE/monitor.py) turns this into one
-    ``SINE.sine.SineSessionTiming`` for ``SineAuthority.start_session``.
+    ``learned_lambda_per_minute`` is the previous eligible session's factual
+    Ebbinghaus lambda. ``reference_lambda_per_minute`` must come from an
+    explicitly authorized MYELIN policy source; this module never invents it.
     """
 
     personalization_factor: float
-    previous_return_latency_minutes: float
-    reference_return_latency_minutes: float
+    learned_lambda_per_minute: float
+    reference_lambda_per_minute: float
 
     def __post_init__(self) -> None:
         for name, value in (
             ("personalization_factor", self.personalization_factor),
-            ("previous_return_latency_minutes", self.previous_return_latency_minutes),
-            ("reference_return_latency_minutes", self.reference_return_latency_minutes),
+            ("learned_lambda_per_minute", self.learned_lambda_per_minute),
+            ("reference_lambda_per_minute", self.reference_lambda_per_minute),
         ):
             if not math.isfinite(float(value)) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
@@ -364,41 +347,32 @@ class MbrmSessionPersonalization:
 
 def mbrm_session_personalization(
     *,
-    previous_return_latency_minutes: float,
-    reference_return_latency_minutes: float = REFERENCE_RETURN_LATENCY_MINUTES,
-    minimum_factor: float = PERSONALIZATION_FACTOR_MINIMUM,
-    maximum_factor: float = PERSONALIZATION_FACTOR_MAXIMUM,
+    learned_lambda_per_minute: float,
+    reference_lambda_per_minute: float,
 ) -> MbrmSessionPersonalization:
-    """Derive one session's clamped SINE personalization factor F = Tr_ref / Tr_previous.
+    """Return the unbounded Ebbinghaus factor ``F = lambda_user/lambda_ref``.
 
-    ``previous_return_latency_minutes`` must already be the durably stored,
-    previous-eligible-session-only, ACTUAL verified MIRL return latency from
-    ``PERSISTENCE.storage.ProfileLearningState.learned_return_latency_seconds``
-    -- this function does not read storage, does not average across sessions,
-    and (deliberately, after the D0-contamination fix) never reconstructs Tr
-    from lambda or touches D0/D_threshold.
+    No time reference and no clamp are defined here.  Both lambda values must
+    already be valid, positive Ebbinghaus recovery-rate parameters.  The
+    caller is responsible for proving that ``reference_lambda_per_minute`` was
+    explicitly authorized before allowing this factor to drive SINE timing.
     """
 
-    previous_latency = float(previous_return_latency_minutes)
-    if not math.isfinite(previous_latency) or previous_latency <= 0:
-        raise ValueError("previous_return_latency_minutes must be finite and positive")
-    reference_latency = float(reference_return_latency_minutes)
-    if not math.isfinite(reference_latency) or reference_latency <= 0:
-        raise ValueError("reference_return_latency_minutes must be finite and positive")
-    if not math.isfinite(minimum_factor) or minimum_factor <= 0:
-        raise ValueError("minimum_factor must be finite and positive")
-    if not math.isfinite(maximum_factor) or maximum_factor < minimum_factor:
-        raise ValueError("maximum_factor must be finite and >= minimum_factor")
+    learned_lambda = float(learned_lambda_per_minute)
+    reference_lambda = float(reference_lambda_per_minute)
+    if not math.isfinite(learned_lambda) or learned_lambda <= 0:
+        raise ValueError("learned_lambda_per_minute must be finite and positive")
+    if not math.isfinite(reference_lambda) or reference_lambda <= 0:
+        raise ValueError("reference_lambda_per_minute must be finite and positive")
 
-    raw_factor = reference_latency / previous_latency
-    if not math.isfinite(raw_factor) or raw_factor <= 0:
+    factor = learned_lambda / reference_lambda
+    if not math.isfinite(factor) or factor <= 0:
         raise RuntimeError("MBRM personalization factor became invalid")
-    clamped_factor = min(maximum_factor, max(minimum_factor, raw_factor))
 
     return MbrmSessionPersonalization(
-        personalization_factor=clamped_factor,
-        previous_return_latency_minutes=previous_latency,
-        reference_return_latency_minutes=reference_latency,
+        personalization_factor=factor,
+        learned_lambda_per_minute=learned_lambda,
+        reference_lambda_per_minute=reference_lambda,
     )
 
 
@@ -1278,9 +1252,6 @@ __all__ = (
     "MODEL_MAGNITUDE_MULTIPLIERS",
     "MbrmSessionPersonalization",
     "ObservedLambdaEstimate",
-    "PERSONALIZATION_FACTOR_MAXIMUM",
-    "PERSONALIZATION_FACTOR_MINIMUM",
-    "REFERENCE_RETURN_LATENCY_MINUTES",
     "RESOLUTION_THRESHOLD_UNITLESS",
     "TriggerAuthority",
     "TriggerCandidate",

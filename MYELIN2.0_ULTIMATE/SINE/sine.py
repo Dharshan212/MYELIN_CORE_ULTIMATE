@@ -29,8 +29,8 @@ SINE owns exactly two baseline gaps: SINE-1 -> SINE-2 (``stage_2_delay_seconds``
 and SINE-2 -> SINE-3 (``stage_3_delay_seconds``).  It does NOT own the initial
 pre-trigger dwell (that belongs to CORE_ENGINE/blacklist.py as a separate organ).
 
-SINE never recomputes Ebbinghaus/MBRM.  It consumes exactly one already-derived,
-already-clamped personalization factor F for the whole session:
+SINE never recomputes Ebbinghaus/MBRM. It consumes exactly one already-derived,
+policy-authorized personalization factor F for the whole session:
 
     stage_2_delay_seconds_applied = stage_2_delay_seconds (baseline) * F
     stage_3_delay_seconds_applied = stage_3_delay_seconds (baseline) * F
@@ -39,11 +39,10 @@ F is never a full substitution for the baseline -- it is a small nudge on top
 of it.  Both gaps move together, from the same F, because F represents one
 verified fact about the user's last session, not two.
 
-F must arrive on the trigger candidate's Ebbinghaus recovery model already
-computed and already clamped to [F_min, F_max] by whichever authority owns
-that math (F_min/F_max are explicitly NOT SINE's decision and NOT invented
-here -- see ``_normalise_session_timing``).  SINE performs only a
-mathematical sanity check (finite, positive) before trusting it.
+F must arrive from the upstream MBRM/Ebbinghaus authority already computed
+from explicitly authorized model inputs. SINE never invents a reference value
+or factor bound; it performs only a mathematical sanity check (finite, positive)
+before trusting the frozen session snapshot.
 
 If F is missing, invalid, or the candidate carries no learned recovery model at
 all (first-use / learning-session profile), SINE fails closed: F = 1.0, and
@@ -76,7 +75,11 @@ from typing import Final
 # alignment as well as an exact manual allowance -- and Protected Red no longer
 # resolves through APPROVED_BREAK.  A v1 fact therefore describes a narrower
 # recovery population and a different Red release surface than a v2 one.
-SINE_SCHEMA_VERSION: Final = "myelin-sine-v2"
+# v3: MIRL's factual ten-second return-entry verification may withhold the
+# current Study SINE presentation without resolving the intervention episode.
+# Relapse restores the same Protected-Red presentation; final MIRL recovery is
+# still the only return path that terminally resolves SINE.
+SINE_SCHEMA_VERSION: Final = "myelin-sine-v3"
 WEBER_FECHNER_MODEL_VERSION: Final = "myelin-weber-fechner-v1"
 WEBER_FECHNER_EQUATION: Final = "P = k * ln(I / I0)"
 EBBINGHAUS_TIMING_SOURCE: Final = "learned_ebbinghaus_t_star"
@@ -223,7 +226,7 @@ class SineSessionTiming:
     """One immutable personalization snapshot, frozen for exactly one session.
 
     SINE does not derive or clamp ``personalization_factor``. It must already
-    have been computed and clamped by the MBRM/Ebbinghaus authority from a
+    have been computed from policy-authorized Ebbinghaus inputs from a
     verified previous session. SINE's job is narrow: trust the snapshot only
     if it is well-formed and was produced specifically for THIS session, else
     fail closed to the exact static baseline.
@@ -335,6 +338,8 @@ class SineFact:
     popup_request_id: str = ""
     reason: str = ""
     response: str = ""
+    study_context_token: str = ""
+    resource_key: str = ""
     popup: SinePopupRequest | None = None
     mirl_display_token: object | None = None
     schema_version: str = SINE_SCHEMA_VERSION
@@ -368,6 +373,7 @@ class SineLiveView:
     personalization_factor: float = 1.0
     ebbinghaus_t_star_minutes: float | None = None
     ebbinghaus_lambda_per_minute: float | None = None
+    presentation_withheld_for_recovery: bool = False
 
 
 @dataclass(slots=True)
@@ -423,6 +429,7 @@ class _Episode:
     retry_stage: SineStage = SineStage.NONE
     retry_due_monotonic_ns: int | None = None
     study_alignment_announced: bool = False
+    presentation_withheld_for_recovery: bool = False
 
     @property
     def terminal(self) -> bool:
@@ -622,18 +629,11 @@ class SineAuthority:
             if self._foreground_is_current_popup(foreground):
                 return
 
-            # Preserve the old safe rule: a known different distraction is a
-            # different episode.  UNCERTAIN evidence never makes this decision.
-            current_resource_key = str(
-                _field(_field(verdict, "resource_identity"), "stable_key", "") or ""
-            )
-            if (
-                classification == "DISTRACTION"
-                and current_resource_key
-                and episode.resource_key
-                and current_resource_key != episode.resource_key
-            ):
-                self._cancel_episode("different_distraction_resource", now_ns)
+            # Resource switching does not release intervention ownership.
+            # The episode was founded by one durable trigger and remains the
+            # same unresolved SINE/MIRL episode across later distracting apps
+            # or resources. Only an existing authoritative terminal path may
+            # release it; UNCERTAIN evidence remains non-terminal as before.
 
     def request_trigger(
         self,
@@ -808,33 +808,37 @@ class SineAuthority:
 
             episode = self._episode
             if episode is not None and not episode.terminal:
-                self._advance_popup_deadline(episode, now_monotonic_ns)
-                self._advance_display_retry(episode, now_monotonic_ns)
+                # MIRL has verified recovery ENTRY but not final stability.
+                # Deadlines retain their original timestamps, while the
+                # presentation remains inhibited until relapse or closure.
+                if not episode.presentation_withheld_for_recovery:
+                    self._advance_popup_deadline(episode, now_monotonic_ns)
+                    self._advance_display_retry(episode, now_monotonic_ns)
 
-                if (
-                    episode.current_stage >= SineStage.SINE_1
-                    and episode.requested_stage < SineStage.SINE_2
-                    and now_monotonic_ns >= episode.stage_2_deadline_monotonic_ns
-                ):
-                    self._request_stage(
-                        episode,
-                        SineStage.SINE_2,
-                        now_monotonic_ns,
-                        "stage_2_deadline_reached",
-                    )
+                    if (
+                        episode.current_stage >= SineStage.SINE_1
+                        and episode.requested_stage < SineStage.SINE_2
+                        and now_monotonic_ns >= episode.stage_2_deadline_monotonic_ns
+                    ):
+                        self._request_stage(
+                            episode,
+                            SineStage.SINE_2,
+                            now_monotonic_ns,
+                            "stage_2_deadline_reached",
+                        )
 
-                if (
-                    episode.current_stage >= SineStage.SINE_2
-                    and episode.requested_stage < SineStage.SINE_3
-                    and episode.stage_3_deadline_monotonic_ns is not None
-                    and now_monotonic_ns >= episode.stage_3_deadline_monotonic_ns
-                ):
-                    self._request_stage(
-                        episode,
-                        SineStage.SINE_3,
-                        now_monotonic_ns,
-                        "stage_3_deadline_reached",
-                    )
+                    if (
+                        episode.current_stage >= SineStage.SINE_2
+                        and episode.requested_stage < SineStage.SINE_3
+                        and episode.stage_3_deadline_monotonic_ns is not None
+                        and now_monotonic_ns >= episode.stage_3_deadline_monotonic_ns
+                    ):
+                        self._request_stage(
+                            episode,
+                            SineStage.SINE_3,
+                            now_monotonic_ns,
+                            "stage_3_deadline_reached",
+                        )
 
             return self._take_facts()
 
@@ -1073,28 +1077,24 @@ class SineAuthority:
                 occurrence=occurrence,
                 response=selected.value,
             )
-            # A click is an intent, never a fact, so a click alone may not end
-            # the surface it was clicked on.
+            # A click is an intent, never verified recovery.  Presentation
+            # closure and recovery truth are deliberately separate:
             #
-            #   THIS_IS_STUDY_MATERIAL is a request to Resource Intent.
-            #   RETURN_TO_FOCUS is a request to the recovery authority: the
-            #     user has said they are going back, but only MIRL can observe
-            #     whether they actually did.  Closing here would make the
-            #     button the reason the episode ended, which is exactly the
-            #     "I'M BACK == recovery" conflation this design forbids.
+            #   RETURN_TO_FOCUS
+            #       -> record the user's intent
+            #       -> request closure of this popup immediately
+            #       -> keep the SINE episode ACTIVE
+            #       -> keep MIRL recovery UNVERIFIED
+            #       -> continue SINE/MIRL observation in the background
             #
-            # Both therefore leave the popup under authority control.  It ends
-            # when MIRL-verified recovery resolves the episode
-            # (_resolve_episode -> "episode_resolved"), or, if the claimed
-            # return never happened, when the stage's own display deadline
-            # expires and SINE escalation continues normally.
+            # Closing the surface therefore does NOT call _resolve_episode(),
+            # does NOT confirm MIRL recovery, and does NOT cancel escalation.
+            # Only later authoritative MIRL evidence may resolve the episode.
             #
-            # REQUEST_BREAK and CONTINUE_SINE remain immediate: neither claims
-            # that focus was recovered.
-            if selected not in {
-                SineResponse.THIS_IS_STUDY_MATERIAL,
-                SineResponse.RETURN_TO_FOCUS,
-            }:
+            # THIS_IS_STUDY_MATERIAL remains open while Resource Intent decides
+            # that separate request. REQUEST_BREAK and CONTINUE_SINE still close
+            # immediately after SINE accepts them.
+            if selected is not SineResponse.THIS_IS_STUDY_MATERIAL:
                 self._request_popup_close(
                     episode,
                     occurrence,
@@ -1182,6 +1182,8 @@ class SineAuthority:
                 occurrence.request.stage is SineStage.SINE_3
                 and episode.protected_red
                 and not episode.terminal
+                and not episode.presentation_withheld_for_recovery
+                and episode.current_popup_request_id == occurrence.request.request_id
             ):
                 episode.retry_stage = SineStage.SINE_3
                 episode.retry_due_monotonic_ns = occurred_monotonic_ns
@@ -1198,6 +1200,106 @@ class SineAuthority:
     # ------------------------------------------------------------------
     # Confirmations from authoritative non-UI owners
     # ------------------------------------------------------------------
+
+    def withhold_presentation_for_verified_return_entry(
+        self,
+        *,
+        candidate_uid: str,
+        verified_monotonic_ns: int,
+        evidence_source: str,
+    ) -> bool:
+        """Hide Study SINE after MIRL verifies return entry, without resolution."""
+
+        with self._lock:
+            episode = self._episode
+            if (
+                episode is None
+                or episode.terminal
+                or not episode.study_mode
+                or episode.candidate_uid != str(candidate_uid or "")
+                or not str(evidence_source or "").strip()
+                or episode.first_displayed_monotonic_ns is None
+                or not self._valid_event_time(
+                    verified_monotonic_ns,
+                    episode.first_displayed_monotonic_ns,
+                )
+            ):
+                return False
+            if episode.presentation_withheld_for_recovery:
+                return True
+
+            episode.presentation_withheld_for_recovery = True
+            episode.retry_stage = SineStage.NONE
+            episode.retry_due_monotonic_ns = None
+            occurrence = self._current_popup(episode)
+            self._emit(
+                "SINE_PRESENTATION_WITHHELD_FOR_RECOVERY",
+                "MIRL verified return entry; SINE presentation is withheld "
+                "while final recovery remains unverified.",
+                verified_monotonic_ns,
+                episode=episode,
+                occurrence=occurrence,
+                reason=str(evidence_source).strip(),
+            )
+            if occurrence is not None and occurrence.state in {
+                PopupState.REQUESTED,
+                PopupState.DISPLAYED,
+            }:
+                self._request_popup_close(
+                    episode,
+                    occurrence,
+                    verified_monotonic_ns,
+                    "mirl_return_entry_verified",
+                )
+            return True
+
+    def resume_presentation_after_recovery_relapse(
+        self,
+        *,
+        candidate_uid: str,
+        occurred_monotonic_ns: int,
+        evidence_source: str,
+    ) -> bool:
+        """End a recovery presentation hold without founding a new episode."""
+
+        with self._lock:
+            episode = self._episode
+            if (
+                episode is None
+                or episode.terminal
+                or episode.candidate_uid != str(candidate_uid or "")
+                or not str(evidence_source or "").strip()
+                or episode.first_displayed_monotonic_ns is None
+                or not self._valid_event_time(
+                    occurred_monotonic_ns,
+                    episode.first_displayed_monotonic_ns,
+                )
+            ):
+                return False
+            if not episode.presentation_withheld_for_recovery:
+                return True
+
+            episode.presentation_withheld_for_recovery = False
+            episode.study_alignment_announced = False
+            occurrence = self._current_popup(episode)
+            self._emit(
+                "SINE_PRESENTATION_RESUMED_AFTER_RELAPSE",
+                "MIRL detected relapse; the same SINE episode resumed its "
+                "presentation authority.",
+                occurred_monotonic_ns,
+                episode=episode,
+                occurrence=occurrence,
+                reason=str(evidence_source).strip(),
+            )
+            if episode.protected_red and (
+                occurrence is None
+                or occurrence.request.stage is not SineStage.SINE_3
+                or occurrence.state
+                not in {PopupState.REQUESTED, PopupState.DISPLAYED}
+            ):
+                episode.retry_stage = SineStage.SINE_3
+                episode.retry_due_monotonic_ns = occurred_monotonic_ns
+            return True
 
     def confirm_verified_return(
         self,
@@ -1272,7 +1374,7 @@ class SineAuthority:
         occurred_monotonic_ns: int,
         reason: str,
     ) -> bool:
-        """Record Resource Intent's answer to a Study Material request."""
+        """Record Monitor's answer to a Study Material declaration."""
 
         with self._lock:
             occurrence = self._popups.get(str(request_id or ""))
@@ -1290,7 +1392,7 @@ class SineAuthority:
                 return False
             self._emit(
                 "SINE_STUDY_MATERIAL_RESULT",
-                "Resource Intent returned the Study Material allowance result.",
+                "Monitor returned the Study Material declaration result.",
                 occurred_monotonic_ns,
                 episode=episode,
                 occurrence=occurrence,
@@ -1302,10 +1404,8 @@ class SineAuthority:
                 # settled for I'M BACK.  Granting the allowance means Resource
                 # Intent accepted the resource identity, so this popup
                 # occurrence may close and let the user reach the underlying
-                # Study resource.  That closure is also what arms Resource
-                # Intent's post-popup revalidation, without which the allowance
-                # would stay provisional and STUDY_ALIGNED could never appear.
-                # The SINE episode deliberately stays ACTIVE, waiting for MIRL.
+                # Study resource. The SINE episode deliberately stays ACTIVE,
+                # waiting for MIRL.
                 self._request_popup_close(
                     episode,
                     occurrence,
@@ -1334,6 +1434,8 @@ class SineAuthority:
             episode = self._episode
             if episode is None or episode.terminal or not episode.protected_red:
                 return False
+            if episode.presentation_withheld_for_recovery:
+                return True
             current = self._current_popup(episode)
             if (
                 current is not None
@@ -1395,6 +1497,7 @@ class SineAuthority:
                     personalization_factor=1.0,
                     ebbinghaus_t_star_minutes=None,
                     ebbinghaus_lambda_per_minute=None,
+                    presentation_withheld_for_recovery=False,
                 )
             occurrence = self._current_popup(episode)
             now_ns = self._now_ns() if self._active_session() else 0
@@ -1428,6 +1531,9 @@ class SineAuthority:
                 personalization_factor=episode.personalization_factor,
                 ebbinghaus_t_star_minutes=episode.ebbinghaus_t_star_minutes,
                 ebbinghaus_lambda_per_minute=episode.ebbinghaus_lambda_per_minute,
+                presentation_withheld_for_recovery=(
+                    episode.presentation_withheld_for_recovery
+                ),
             )
 
     def emergency_stop(self) -> None:
@@ -1664,9 +1770,10 @@ class SineAuthority:
     ) -> SineSessionTiming:
         """Return one safe, session-scoped timing snapshot for this session.
 
-        SINE does not recalculate Ebbinghaus and does not own F_min/F_max --
-        those belong to the MBRM/Ebbinghaus authority that produced ``timing``
-        from a verified previous session. SINE's only job is provenance: a
+        SINE does not recalculate Ebbinghaus and does not invent normalization
+        references or factor bounds. Those belong outside SINE and require
+        explicit policy authorization before ``timing`` may exist. SINE's only
+        job is provenance: a
         snapshot is usable only if it explicitly names THIS session as its
         target. A bare ``source_session_id < session_id`` check would accept
         an arbitrarily stale snapshot from many sessions ago; requiring an
@@ -1934,6 +2041,8 @@ class SineAuthority:
             popup_request_id=occurrence.request.request_id if occurrence else "",
             reason=reason,
             response=response,
+            study_context_token=episode.study_context_token if episode else "",
+            resource_key=episode.resource_key if episode else "",
             popup=popup,
             mirl_display_token=mirl_display_token,
         )
