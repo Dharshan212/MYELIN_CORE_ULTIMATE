@@ -9,6 +9,7 @@ Written before the production patch.
 
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
@@ -21,6 +22,19 @@ NS = 10**9
 # Keywords chosen so the C4 calculator scores LECTURE at 100%.
 KEYWORDS = ("direct", "indirect")
 IMPORTANT = ("basal ganglia",)
+
+MYELIN_CONTROL_STATION = Surface(
+    process_name="python",
+    title="MYELIN — Control Station v2.0",
+    hwnd=8801,
+    process_id=os.getpid(),
+)
+WHATSAPP = Surface(
+    process_name="whatsapp",
+    title="WhatsApp",
+    hwnd=8802,
+    process_id=8802,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +351,15 @@ def _request_break(engine, seconds=60):
     time.sleep(1.5)
 
 
+def _wait_for_remembered_target(engine):
+    engine.wait_until(
+        lambda: engine.coordinator._break_eligible_study_target is not None,
+        timeout=15,
+        what="Monitor to remember the certified Study break target",
+    )
+    return engine.coordinator._break_eligible_study_target
+
+
 def test_aligned_lecture_admits_a_break_and_freezes_the_target(engine):
     _prepare_and_start(engine)
     assert engine.intent().classification.value == "STUDY_ALIGNED", (
@@ -352,6 +375,131 @@ def test_aligned_lecture_admits_a_break_and_freezes_the_target(engine):
     assert target.platform_key == "youtube"
     assert target.resource_token
     assert target.study_context_token == engine.study().context_token
+
+
+def test_study_lecture_then_myelin_foreground_admits_exact_original_target(engine):
+    _prepare_and_start(engine)
+    remembered = _wait_for_remembered_target(engine)
+
+    engine.look_at(MYELIN_CONTROL_STATION)
+    time.sleep(0.6)
+    assert engine.coordinator._break_eligible_study_target == remembered
+
+    _request_break(engine)
+
+    snapshot = engine.cosecant()
+    assert snapshot.state.value == "BREAK_ACTIVE"
+    target = snapshot.intended_return_target
+    assert target is not None
+    assert target.study_context_token == remembered.study_context_token
+    assert target.platform_key == remembered.platform_key
+    assert target.resource_token == remembered.resource_token
+    assert target.observed_monotonic_ns == remembered.observed_monotonic_ns
+    assert engine.coordinator._break_eligible_study_target is None
+
+
+def test_external_non_study_then_myelin_invalidates_target_and_refuses(engine):
+    _prepare_and_start(engine)
+    assert _wait_for_remembered_target(engine) is not None
+
+    engine.look_at(WHATSAPP)
+    engine.wait_until(
+        lambda: engine.coordinator._break_eligible_study_target is None,
+        timeout=15,
+        what="external non-Study observation to invalidate break target",
+    )
+    engine.look_at(MYELIN_CONTROL_STATION)
+    time.sleep(0.6)
+
+    _request_break(engine)
+
+    assert engine.cosecant().state.value == "INACTIVE"
+    assert engine.study().state.value == "ACTIVE"
+
+
+def test_changed_study_identity_cannot_reuse_previous_target(engine):
+    _prepare_and_start(engine)
+    old_target = _wait_for_remembered_target(engine)
+    old_block_id = engine.study().block_id
+
+    engine.look_at(MYELIN_CONTROL_STATION)
+    time.sleep(0.6)
+    engine.send("study_action", action="COMPLETE")
+    engine.wait_until(
+        lambda: engine.study().state.value == "COMPLETED",
+        timeout=15,
+        what="first Study block to complete",
+    )
+    engine.wait_until(
+        lambda: engine.coordinator._break_eligible_study_target is None,
+        timeout=15,
+        what="completed Study identity to clear its remembered target",
+    )
+
+    engine.send(
+        "study_prepare",
+        subject="Neuroscience",
+        task="Basal Ganglia",
+        planned_seconds=3600,
+        keywords=KEYWORDS,
+        important_keywords=IMPORTANT,
+    )
+    engine.wait_until(
+        lambda: bool(engine.study().block_id)
+        and engine.study().block_id != old_block_id,
+        timeout=15,
+        what="second Study block to be prepared",
+    )
+    engine.send("study_action", action="START")
+    engine.wait_until(
+        lambda: engine.study().state.value == "ACTIVE",
+        timeout=15,
+        what="second Study block to become ACTIVE",
+    )
+    assert engine.study().context_token != old_target.study_context_token
+    assert engine.coordinator._break_eligible_study_target is None
+
+    _request_break(engine)
+
+    assert engine.cosecant().state.value == "INACTIVE"
+    assert engine.study().state.value == "ACTIVE"
+
+
+def test_protected_red_still_refuses_remembered_target_from_myelin(engine):
+    _prepare_and_start(engine)
+    remembered = _wait_for_remembered_target(engine)
+    engine.look_at(MYELIN_CONTROL_STATION)
+    time.sleep(0.6)
+    assert engine.coordinator._break_eligible_study_target == remembered
+
+    real_protected_red_active = engine.services.sine.protected_red_active
+    engine.services.sine.protected_red_active = lambda: True
+    try:
+        _request_break(engine)
+    finally:
+        engine.services.sine.protected_red_active = real_protected_red_active
+
+    assert engine.cosecant().state.value == "INACTIVE"
+    assert engine.study().state.value == "ACTIVE"
+
+
+def test_session_shutdown_clears_remembered_break_target():
+    running = Engine(surface=LECTURE, poll_seconds=0.2, fast_cosecant=True)
+    with running as engine:
+        _prepare_and_start(engine)
+        assert _wait_for_remembered_target(engine) is not None
+
+    assert running.coordinator._break_eligible_study_target is None
+
+
+def test_emergency_clears_remembered_break_target():
+    with Engine(surface=LECTURE, poll_seconds=0.2, fast_cosecant=True) as engine:
+        _prepare_and_start(engine)
+        assert _wait_for_remembered_target(engine) is not None
+
+        engine.send("emergency")
+        assert engine.cleanup_complete_event.wait(timeout=20)
+        assert engine.coordinator._break_eligible_study_target is None
 
 
 def test_break_is_refused_when_the_resource_is_not_aligned(engine):

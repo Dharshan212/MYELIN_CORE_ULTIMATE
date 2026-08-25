@@ -36,6 +36,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes
 import math
+import os
 import queue
 import sys
 import time
@@ -127,6 +128,18 @@ class MonitorContext:
     browser_evidence: object
     resource_intent: object
     cosine_platform: object | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BreakEligibleStudyTarget:
+    """One exact Study resource already certified for managed-break return."""
+
+    study_block_id: str
+    study_generation: int
+    study_context_token: str
+    platform_key: str
+    resource_token: str
+    observed_monotonic_ns: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -913,6 +926,12 @@ class WindowsMonitorCoordinator:
         #: Expected (Study block_id, generation) carried by a parked GUI break
         #: request, re-checked at admission.  None for identity-free commands.
         self._pending_break_study_identity: tuple[str, int] | None = None
+        # A Control Station click necessarily foregrounds MYELIN before the
+        # worker consumes the command.  Preserve only the last exact Study
+        # resource which already passed Browser + Resource Intent authority;
+        # this is evidence memory, never a second classifier.
+        self._myelin_process_id = os.getpid()
+        self._break_eligible_study_target: BreakEligibleStudyTarget | None = None
         self._last_foreground_identity: tuple[object, ...] | None = None
         self._last_red_state: bool | None = None
         self._last_blacklist_console_signature: tuple[object, ...] | None = None
@@ -1304,6 +1323,7 @@ class WindowsMonitorCoordinator:
         blacklist_result = self.services.blacklist.observe(context)
         self._prepare_dwell_telemetry(blacklist_result)
 
+        self._refresh_break_eligible_study_target(context)
         # A parked break request is decided here, on the same observation the
         # other organs are consuming, so admission never performs its own
         # foreground or browser read.
@@ -3128,6 +3148,7 @@ class WindowsMonitorCoordinator:
         from COSECANT_STUDY_MODE.study import StudyState
 
         state = _field(snapshot, "state", None)
+        self._reconcile_break_target_with_study(snapshot)
         if state is not StudyState.ACTIVE:
             self.services.resource_intent.retire_study_context()
             return
@@ -3190,6 +3211,7 @@ class WindowsMonitorCoordinator:
         from COSECANT_STUDY_MODE.study import StudyCompletionReason, StudyState
 
         state = _field(snapshot, "state", None)
+        self._reconcile_break_target_with_study(snapshot)
         if state is StudyState.ACTIVE:
             self._sync_study_context_with_resource_intent(snapshot)
             return
@@ -3223,6 +3245,133 @@ class WindowsMonitorCoordinator:
         if not persisted:
             raise RuntimeError("Study target-reached snapshot was not durably accepted")
         self._last_study_completion_signature = signature
+
+    def _reconcile_break_target_with_study(self, study: object) -> None:
+        """Clear remembered evidence when its owning Study identity retires."""
+
+        target = self._break_eligible_study_target
+        if target is None:
+            return
+        from COSECANT_STUDY_MODE.study import StudyState
+
+        if (
+            _field(study, "state", None) is not StudyState.ACTIVE
+            or str(_field(study, "block_id", "") or "") != target.study_block_id
+            or int(_field(study, "generation", 0) or 0)
+            != target.study_generation
+            or str(_field(study, "context_token", "") or "")
+            != target.study_context_token
+        ):
+            self._break_eligible_study_target = None
+
+    def _certified_break_target_from_context(
+        self,
+        context: MonitorContext,
+        *,
+        study: object | None = None,
+    ) -> tuple[BreakEligibleStudyTarget | None, str]:
+        """Extract one exact target only from current certified Study facts."""
+
+        from CORE_ENGINE.resource_intent import ResourceIntent
+        from COSECANT_STUDY_MODE.study import StudyState
+
+        study = self.services.study.snapshot() if study is None else study
+        if _field(study, "state") is not StudyState.ACTIVE:
+            return None, "Study Mode is not ACTIVE"
+
+        snapshot = context.resource_intent
+        verdict = _field(snapshot, "verdict")
+        if _field(verdict, "classification") is not ResourceIntent.STUDY_ALIGNED:
+            return None, "the current resource is not verified Study material"
+        if not bool(_field(snapshot, "fresh", False)):
+            return None, "the current observation is not fresh"
+
+        study_block_id = str(_field(study, "block_id", "") or "")
+        study_generation = int(_field(study, "generation", 0) or 0)
+        study_context_token = str(_field(study, "context_token", "") or "")
+        if str(_field(verdict, "study_context_token", "") or "") != study_context_token:
+            return None, "the verdict belongs to a different Study block"
+        if not study_block_id or study_generation <= 0 or not study_context_token:
+            return None, "the active Study block has no exact identity"
+
+        browser = context.browser_evidence
+        if not bool(_field(browser, "authoritative", False)):
+            return None, "browser evidence is not authoritative"
+        if bool(_field(browser, "holding_previous_strong_evidence", False)):
+            return None, "browser evidence is a held previous read"
+
+        evidence = _field(browser, "evidence")
+        browser_platform = str(_field(evidence, "platform_key", "") or "")
+        browser_token = str(_field(evidence, "resource_token", "") or "")
+        if not browser_platform:
+            return None, "browser evidence has no certified platform"
+        if not browser_token:
+            return None, "this resource has no exact identity to return to"
+
+        identity = _field(verdict, "resource_identity")
+        if not bool(_field(identity, "browser_evidence_certified", False)):
+            return None, "the resource identity is not certified"
+        if str(_field(identity, "platform_key", "") or "") != browser_platform:
+            return None, "Resource Intent and Browser disagree about the platform"
+        if str(_field(identity, "opaque_resource_token", "") or "") != browser_token:
+            return None, "Resource Intent and Browser disagree about the resource"
+
+        observed_ns = int(context.foreground.observed_monotonic_ns)
+        if observed_ns <= 0:
+            return None, "the Study resource observation has no valid timestamp"
+        return (
+            BreakEligibleStudyTarget(
+                study_block_id=study_block_id,
+                study_generation=study_generation,
+                study_context_token=study_context_token,
+                platform_key=browser_platform,
+                resource_token=browser_token,
+                observed_monotonic_ns=observed_ns,
+            ),
+            "",
+        )
+
+    def _refresh_break_eligible_study_target(self, context: MonitorContext) -> None:
+        """Refresh from external Study truth; preserve only across MYELIN UI."""
+
+        study = self.services.study.snapshot()
+        self._reconcile_break_target_with_study(study)
+        if int(context.foreground.process_id or 0) == self._myelin_process_id:
+            return
+
+        target, _refusal = self._certified_break_target_from_context(
+            context,
+            study=study,
+        )
+        # Any genuinely observed external surface replaces or invalidates the
+        # prior memory. Unknown/uncertified evidence fails closed to no target.
+        self._break_eligible_study_target = target
+
+    def _remembered_break_admission_refusal(
+        self,
+        context: MonitorContext,
+        target: BreakEligibleStudyTarget | None,
+    ) -> str:
+        """Recheck live lifecycle guards around an already-certified target."""
+
+        from COSECANT_STUDY_MODE.study import StudyState
+
+        study = self.services.study.snapshot()
+        if _field(study, "state") is not StudyState.ACTIVE:
+            return "Study Mode is not ACTIVE"
+        if bool(_field(context.resource_intent, "protected_red_active", False)):
+            return "Protected Red must be resolved before starting a managed break"
+        if target is None:
+            return "no fresh certified Study return target was preserved"
+        if (
+            str(_field(study, "block_id", "") or "") != target.study_block_id
+            or int(_field(study, "generation", 0) or 0)
+            != target.study_generation
+            or str(_field(study, "context_token", "") or "")
+            != target.study_context_token
+        ):
+            return "the remembered target belongs to a different Study block"
+        return ""
 
     def _request_cosecant_break(
         self,
@@ -3284,6 +3433,11 @@ class WindowsMonitorCoordinator:
         selected_break_seconds = self._pending_break_seconds
         if selected_break_seconds is None:
             return
+        # Direct callers in the external lab exercise this boundary without a
+        # complete _route_context() cycle. Production already refreshed the
+        # slot immediately before this call; repeating the idempotent refresh
+        # keeps the authority boundary self-contained.
+        self._refresh_break_eligible_study_target(context)
         self._pending_break_seconds = None
         expected_study_identity = self._pending_break_study_identity
         self._pending_break_study_identity = None
@@ -3297,7 +3451,14 @@ class WindowsMonitorCoordinator:
             self._publish_study_views()
             return
 
-        refusal = self._break_admission_refusal(context)
+        remembered_target = self._break_eligible_study_target
+        if int(context.foreground.process_id or 0) == self._myelin_process_id:
+            refusal = self._remembered_break_admission_refusal(
+                context,
+                remembered_target,
+            )
+        else:
+            refusal = self._break_admission_refusal(context)
         if refusal:
             _telemetry(
                 self.telemetry_queue,
@@ -3318,13 +3479,15 @@ class WindowsMonitorCoordinator:
         # and must never be resolvable through this path.
         outgoing_sine_candidate = self._active_sine_candidate_uid()
 
-        verdict = _field(context.resource_intent, "verdict")
-        identity = _field(verdict, "resource_identity")
+        if remembered_target is None:
+            raise RuntimeError(
+                "break admission passed without an exact certified Study target"
+            )
         target = CosecantReturnTarget(
-            study_context_token=str(_field(verdict, "study_context_token", "")),
-            platform_key=str(_field(identity, "platform_key", "")),
-            resource_token=str(_field(identity, "opaque_resource_token", "")),
-            observed_monotonic_ns=int(context.foreground.observed_monotonic_ns),
+            study_context_token=remembered_target.study_context_token,
+            platform_key=remembered_target.platform_key,
+            resource_token=remembered_target.resource_token,
+            observed_monotonic_ns=remembered_target.observed_monotonic_ns,
         )
 
         # Study pauses only now, once the target is known to be constructible.
@@ -3368,6 +3531,7 @@ class WindowsMonitorCoordinator:
         # Durability first: the BREAK_STARTED fact is routed and persisted
         # before any ownership changes hands.
         self._route_cosecant_result(result, context.foreground)
+        self._break_eligible_study_target = None
 
         # C10.2 -- ATOMIC OWNERSHIP TRANSFER.
         #
@@ -3448,7 +3612,6 @@ class WindowsMonitorCoordinator:
         policy that must not become an admission gate.
         """
 
-        from CORE_ENGINE.resource_intent import ResourceIntent
         from COSECANT_STUDY_MODE.study import StudyState
 
         study = self.services.study.snapshot()
@@ -3456,7 +3619,6 @@ class WindowsMonitorCoordinator:
             return "Study Mode is not ACTIVE"
 
         snapshot = context.resource_intent
-        verdict = _field(snapshot, "verdict")
         if bool(_field(snapshot, "protected_red_active", False)):
             # Protected Red used to make this unreachable by masking every
             # verdict as UNCERTAIN.  Now that Resource Intent reports facts
@@ -3465,39 +3627,11 @@ class WindowsMonitorCoordinator:
             # strongest intervention MYELIN has.  This is a lifecycle gate, not
             # a second Study classifier.
             return "Protected Red must be resolved before starting a managed break"
-        if _field(verdict, "classification") is not ResourceIntent.STUDY_ALIGNED:
-            return "the current resource is not verified Study material"
-        if not bool(_field(snapshot, "fresh", False)):
-            return "the current observation is not fresh"
-        if str(_field(verdict, "study_context_token", "")) != str(
-            _field(study, "context_token", "")
-        ):
-            return "the verdict belongs to a different Study block"
-
-        browser = context.browser_evidence
-        if not bool(_field(browser, "authoritative", False)):
-            return "browser evidence is not authoritative"
-        if bool(_field(browser, "holding_previous_strong_evidence", False)):
-            # A held read proves the LAST resource, not the current one, so it
-            # can never found a target the user must return to.
-            return "browser evidence is a held previous read"
-
-        evidence = _field(browser, "evidence")
-        browser_platform = str(_field(evidence, "platform_key", "") or "")
-        browser_token = str(_field(evidence, "resource_token", "") or "")
-        if not browser_platform:
-            return "browser evidence has no certified platform"
-        if not browser_token:
-            return "this resource has no exact identity to return to"
-
-        identity = _field(verdict, "resource_identity")
-        if not bool(_field(identity, "browser_evidence_certified", False)):
-            return "the resource identity is not certified"
-        if str(_field(identity, "platform_key", "")) != browser_platform:
-            return "Resource Intent and Browser disagree about the platform"
-        if str(_field(identity, "opaque_resource_token", "")) != browser_token:
-            return "Resource Intent and Browser disagree about the resource"
-        return ""
+        _target, refusal = self._certified_break_target_from_context(
+            context,
+            study=study,
+        )
+        return refusal
 
     def _publish_study_views(self) -> None:
         _telemetry(
@@ -3517,6 +3651,7 @@ class WindowsMonitorCoordinator:
         if self.session_id is None:
             raise RuntimeError("emergency requested before session became durable")
         self._emergency_requested = True
+        self._break_eligible_study_target = None
 
         # Stop presentation/runtime activity first, then record the emergency
         # before permitting application exit.
@@ -3571,6 +3706,7 @@ class WindowsMonitorCoordinator:
     def _cleanup(self) -> bool:
         """Stop authorities in dependency order and close durable session."""
 
+        self._break_eligible_study_target = None
         # First try to settle a live trigger transaction. Never reject a
         # RUNNING transaction: it may still commit a moment later.
         try:

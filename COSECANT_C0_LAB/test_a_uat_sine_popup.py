@@ -406,10 +406,12 @@ def _open_real_study_material_popup(bench, qt_app):
     episode = bench.services.sine._episode
 
     # D-H. The Blacklist founded the trigger, Resource Intent supplied the
-    # resource identity, SINE allowed the action, and the popup really exists.
+    # resource identity, and the factual Study-SINE popup exposes only return
+    # intent.  Study-material clarification belongs to the independent 50%
+    # UNCERTAIN popup after Phase 2.
     assert episode is not None and episode.study_material_action_allowed is True
-    assert SineResponse.THIS_IS_STUDY_MATERIAL in (
-        window.request.presentation.allowed_responses
+    assert window.request.presentation.allowed_responses == (
+        SineResponse.RETURN_TO_FOCUS,
     )
     assert window.isVisible()
     assert episode.study_context_token == context.resource_intent.verdict.study_context_token
@@ -430,15 +432,15 @@ def _open_real_study_material_popup(bench, qt_app):
     }
 
 
-def test_uat02_complete_declaration_close_and_alignment_journey(bench, qt_app):
+def test_uat02_real_study_sine_routes_only_return_intent(bench, qt_app):
     journey = _open_real_study_material_popup(bench, qt_app)
     presenter = journey["presenter"]
     window = journey["window"]
     request_id = journey["request_id"]
     try:
-        # I/J. Press the real visible button through Qt -> Presenter -> Monitor
-        # -> SINE and record the authority's actual Boolean acceptance.
-        window._buttons[SineResponse.THIS_IS_STUDY_MATERIAL].click()
+        # Press the one real visible Study-SINE action through Qt -> Presenter
+        # -> Monitor -> SINE and record the authority's acceptance.
+        window._buttons[SineResponse.RETURN_TO_FOCUS].click()
         _pump_sine(
             bench,
             presenter,
@@ -450,27 +452,11 @@ def test_uat02_complete_declaration_close_and_alignment_journey(bench, qt_app):
 
         kinds = [fact.kind for fact in journey["facts"]]
         assert journey["popup_response_results"] == [True]
-        assert "SINE_STUDY_MATERIAL_REQUESTED" in kinds
-
-        # L-O. The SINE fact carried the captured Study/resource binding;
-        # Monitor accepted the declaration and Resource Intent stored it.
-        requested = [
-            fact
-            for fact in journey["facts"]
-            if fact.kind == "SINE_STUDY_MATERIAL_REQUESTED"
-        ]
-        assert len(requested) == 1
-        assert (
-            requested[0].study_context_token
-            == journey["context"].resource_intent.verdict.study_context_token
-        )
-        assert requested[0].resource_key == journey["context"].resource_intent.resource_key
-        assert len(journey["allowance_results"]) == 1
-        grant = journey["allowance_results"][0]
-        assert grant.granted is True
-        assert grant.outcome.value == "granted"
-        assert journey["record_result_results"] == [True]
-        assert "SINE_STUDY_MATERIAL_RESULT" in kinds
+        assert "SINE_RETURN_INTENT_RECORDED" in kinds
+        assert "SINE_STUDY_MATERIAL_REQUESTED" not in kinds
+        assert "SINE_STUDY_MATERIAL_RESULT" not in kinds
+        assert journey["allowance_results"] == []
+        assert journey["record_result_results"] == []
 
         # P-T. SINE alone requested closure and the presenter routed the same id.
         close_facts = [
@@ -483,46 +469,39 @@ def test_uat02_complete_declaration_close_and_alignment_journey(bench, qt_app):
         assert request_id not in presenter.active_request_ids()
         assert journey["popup_closed_results"] == [True]
 
-        # U-W. The next normal observation of that exact certified resource is
-        # classified by Resource Intent as STUDY_ALIGNED at confidence 1.00.
+        # A return-intent click cannot manufacture Study-material allowance.
         after = bench.coordinator._classify_observation(bench.foreground.observe())
         bench.services.sine.observe(after)
-        allowance = bench.services.resource_intent._allowance
-        assert allowance is not None and allowance.active is True
-        assert after.resource_intent.verdict.classification.value == "STUDY_ALIGNED"
-        assert after.resource_intent.verdict.confidence == 1.00
+        assert bench.services.resource_intent._allowance is None
+        assert after.resource_intent.verdict.classification.value == "UNCERTAIN"
+        assert after.resource_intent.verdict.confidence == 0.50
     finally:
         presenter.emergency_close_all("disposed_by_test")
         qt_app.processEvents()
 
 
-def test_uat02_study_end_before_click_rejects_without_allowance(bench, qt_app):
+def test_uat02_hidden_study_material_response_is_rejected(bench, qt_app):
     journey = _open_real_study_material_popup(bench, qt_app)
     presenter = journey["presenter"]
     window = journey["window"]
     request_id = journey["request_id"]
     try:
-        assert bench.services.study.complete().accepted
-        window._buttons[SineResponse.THIS_IS_STUDY_MATERIAL].click()
-        _pump_sine(
-            bench,
-            presenter,
-            qt_app,
-            journey["facts"],
-            until=lambda: bool(journey["record_result_results"]),
+        accepted = bench.services.sine.popup_response(
+            request_id=request_id,
+            response=SineResponse.THIS_IS_STUDY_MATERIAL,
+            occurred_monotonic_ns=time.monotonic_ns(),
         )
-
-        assert journey["popup_response_results"] == [True]
+        assert accepted is False
         assert journey["allowance_results"] == []
-        assert journey["record_result_results"] == [True]
+        assert journey["record_result_results"] == []
         assert bench.services.resource_intent._allowance is None
         assert request_id in presenter.active_request_ids()
         assert window.isVisible()
-        assert "STUDY MATERIAL ALLOWANCE NOT APPLIED" in window._status.text()
-        assert "NO ACTIVE BLOCK" in window._status.text()
-        assert all(button.isEnabled() for button in window._buttons.values())
         assert not any(
-            fact.kind == "SINE_POPUP_CLOSE_REQUESTED"
+            fact.kind in {
+                "SINE_STUDY_MATERIAL_REQUESTED",
+                "SINE_POPUP_CLOSE_REQUESTED",
+            }
             for fact in journey["facts"]
         )
     finally:

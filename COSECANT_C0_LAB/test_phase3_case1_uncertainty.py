@@ -407,17 +407,17 @@ def test_c1_14_clarification_path_contains_no_lambda_update():
 
 def test_c1_15_ebbinghaus_and_sine_timing_authorities_are_byte_exact():
     # Phase 4 adds only SINE-owned presentation withholding/resumption around
-    # MIRL's verified recovery entry. The timing authority remains byte-pinned
-    # at this reviewed Phase-4 implementation and its policy values below stay
-    # independently explicit.
-    assert _sha256("SINE/sine.py") == "2F7B0C5E7D24A85A2D1963624B15F2EED87A60C7CA56951833245DAC4AD0CE82"
+    # MIRL's verified recovery entry, including Normal Protected Red. The
+    # timing authority remains byte-pinned at this reviewed implementation and
+    # its policy values below stay independently explicit.
+    assert _sha256("SINE/sine.py") == "CC8EDF0243236A3FC9860BCE2352AF97C9EA4553F6EF5DB9C55B66936EAE76B3"
     assert _sha256("CORE_ENGINE/trigger.py") == "161BB48E6ACBD15A2754A15E1F41540AAE289EB6CA1D0E880B81BC8120B4FC7A"
     assert SinePolicy().stage_2_delay_seconds == 600.0
     assert SinePolicy().stage_3_delay_seconds == 795.0
 
 
 def test_c1_16_cosecant_policy_and_implementation_are_unchanged():
-    assert _sha256("COSECANT_STUDY_MODE/cosecant.py") == "F6EFC96795F8BC4BA930BB53C16E6720A745C9097D8016D1642FBC40761A0ACB"
+    assert _sha256("COSECANT_STUDY_MODE/cosecant.py") == "02F7114498E38ACBEC09A1FD225470F6CB34922A0AAE69DF379AA2D698761490"
     policy = CosecantPolicy()
     assert policy.already_over_delay_seconds == 300.0
     assert policy.final_lock_delay_seconds == 60.0

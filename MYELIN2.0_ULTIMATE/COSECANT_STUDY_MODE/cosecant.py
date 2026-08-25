@@ -384,6 +384,11 @@ class CosecantRuntime:
         self._confirmation_due_ns: int | None = None
         self._last_presence_ns: int | None = None
         self._confirmation_origin: CosecantState | None = None
+        # Presentation acknowledgement belongs to COSECANT, not the popup.
+        # It suppresses only the exact earlier reminder whose accepted
+        # RETURN_TO_STUDY intent produced it.  It is deliberately neither
+        # return evidence nor a state/deadline mutation.
+        self._acknowledged_reminder: CosecantState | None = None
         # Two independent time domains that must never write each other.
         # ``_last_monotonic_ns`` is COSECANT's own clock progression, owned by
         # ``_read_monotonic``.  ``_last_observation_ns`` is the ordering of
@@ -481,6 +486,7 @@ class CosecantRuntime:
                 + _seconds_to_ns(self._policy.final_lock_delay_seconds)
             )
             self._clear_confirmation()
+            self._acknowledged_reminder = None
             self._terminal_overdue_seconds = None
 
             previous = self._state
@@ -608,6 +614,7 @@ class CosecantRuntime:
                 now_wall=now_wall,
                 message="Return intent recorded; waiting for observed study presence",
             )
+            self._acknowledged_reminder = self._state
             self._last_action = fact.message
             self._snapshot = self._make_snapshot(now_ns=now_ns)
             return self._accept(fact.message, (fact,))
@@ -712,6 +719,7 @@ class CosecantRuntime:
                 previous = self._state
                 self._terminal_overdue_seconds = self._overdue_seconds(now_ns)
                 self._state = CosecantState.CONFIRMED
+                self._acknowledged_reminder = None
                 self._last_action = "Study return confirmed"
                 self._retire_break_context()
                 fact = self._new_fact(
@@ -741,6 +749,7 @@ class CosecantRuntime:
             self._terminal_overdue_seconds = self._overdue_seconds(now_ns)
             self._state = CosecantState.CANCELLED
             self._clear_confirmation()
+            self._acknowledged_reminder = None
             self._retire_break_context()
             self._last_action = "Break cancelled because the Study session ended"
             fact = self._new_fact(
@@ -773,6 +782,7 @@ class CosecantRuntime:
             if previous is CosecantState.INACTIVE:
                 self._state = CosecantState.SHUTDOWN
                 self._clear_confirmation()
+                self._acknowledged_reminder = None
                 self._last_action = "COSECANT shut down safely"
                 self._snapshot = self._make_snapshot(now_ns=now_ns)
                 return self._accept(self._last_action, ())
@@ -782,6 +792,7 @@ class CosecantRuntime:
             self._retire_break_context()
             self._state = CosecantState.SHUTDOWN
             self._clear_confirmation()
+            self._acknowledged_reminder = None
             self._last_action = "COSECANT shut down safely"
             fact = self._new_fact(
                 CosecantFactKind.SAFE_SHUTDOWN,
@@ -912,6 +923,14 @@ class CosecantRuntime:
     ) -> CosecantFact:
         previous = self._state
         self._state = new_state
+        if new_state in {
+            CosecantState.BREAK_COMPLETE,
+            CosecantState.BREAK_ALREADY_OVER,
+            CosecantState.FINAL_LOCK,
+        }:
+            # Acknowledgement is reminder-scoped.  A later reminder is a new
+            # presentation obligation and must never inherit the old one.
+            self._acknowledged_reminder = None
         self._last_action = message
         return self._new_fact(
             kind,
@@ -1056,6 +1075,17 @@ class CosecantRuntime:
         }:
             allowed_actions = (CosecantUiAction.RETURN_TO_STUDY,)
 
+        reminder_acknowledged = (
+            self._acknowledged_reminder is not None
+            and (
+                self._state is self._acknowledged_reminder
+                or (
+                    self._state is CosecantState.RETURN_CONFIRMING
+                    and self._confirmation_origin is self._acknowledged_reminder
+                )
+            )
+        )
+
         return CosecantSnapshot(
             state=self._state,
             generation=self._generation,
@@ -1079,13 +1109,16 @@ class CosecantRuntime:
             ),
             confirmation_elapsed_seconds=round(confirmation_elapsed, 3),
             message=self._current_message(),
-            popup_required=self._state
-            in {
-                CosecantState.BREAK_COMPLETE,
-                CosecantState.BREAK_ALREADY_OVER,
-                CosecantState.FINAL_LOCK,
-                CosecantState.RETURN_CONFIRMING,
-            },
+            popup_required=(
+                self._state
+                in {
+                    CosecantState.BREAK_COMPLETE,
+                    CosecantState.BREAK_ALREADY_OVER,
+                    CosecantState.FINAL_LOCK,
+                    CosecantState.RETURN_CONFIRMING,
+                }
+                and not reminder_acknowledged
+            ),
             popup_must_remain_open=final_locked,
             allowed_actions=allowed_actions,
             final_locked=final_locked,
@@ -1139,6 +1172,7 @@ class CosecantRuntime:
         self._already_over_due_ns = None
         self._final_lock_due_ns = None
         self._clear_confirmation()
+        self._acknowledged_reminder = None
         self._terminal_overdue_seconds = None
 
     def _accept(

@@ -1027,35 +1027,108 @@ class ContinuityPopup(QDialog):
         super().__init__(None)
         self.setObjectName("cosecantContinuityPopup")
         self.setWindowTitle("MYELIN — COSECANT")
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setModal(False)
-        self.setMinimumWidth(520)
+        self.setFixedSize(620, 460)
+        self.setAccessibleName("MYELIN COSECANT Study return notice")
         self._snapshot: CosecantSnapshot | None = None
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(34, 30, 34, 28)
-        root.setSpacing(14)
-        badge = QLabel("COSECANT · BREAK RETURN", self)
+        root.setContentsMargins(3, 3, 3, 3)
+        root.setSpacing(0)
+
+        shell = QFrame(self)
+        shell.setObjectName("cosecantPopupShell")
+        root.addWidget(shell)
+        body = QVBoxLayout(shell)
+        body.setContentsMargins(28, 24, 28, 22)
+        body.setSpacing(12)
+
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        status_dot = QLabel("●", shell)
+        status_dot.setObjectName("cosecantPopupStatusDot")
+        status_dot.setFont(make_font(17, 700))
+        header.addWidget(status_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        eyebrow = QLabel("MYELIN · STUDY RETURN", shell)
+        eyebrow.setObjectName("cosecantPopupEyebrow")
+        eyebrow.setFont(make_font(11, 600, spacing=1.4))
+        header.addWidget(eyebrow, 0, Qt.AlignmentFlag.AlignVCenter)
+        header.addStretch(1)
+        badge = QLabel("COSECANT", shell)
         badge.setObjectName("cosecantPopupBadge")
-        root.addWidget(badge)
-        self.message_label = QLabel("", self)
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        badge.setFixedSize(106, 28)
+        badge.setFont(make_font(10.5, 700, mono=True, spacing=1.0))
+        header.addWidget(badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        body.addLayout(header)
+
+        body.addSpacing(8)
+        self.message_label = QLabel("", shell)
         self.message_label.setObjectName("cosecantPopupMessage")
         self.message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.message_label.setWordWrap(True)
-        root.addWidget(self.message_label)
-        self.detail_label = QLabel("", self)
+        self.message_label.setFont(make_font(27, 800))
+        body.addWidget(self.message_label)
+        self.detail_label = QLabel("", shell)
         self.detail_label.setObjectName("cosecantPopupDetail")
         self.detail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.detail_label.setWordWrap(True)
-        root.addWidget(self.detail_label)
-        self.countdown_label = QLabel("", self)
+        self.detail_label.setFont(make_font(14, 400))
+        body.addWidget(self.detail_label)
+
+        body.addStretch(1)
+        self.status_label = QLabel("WAITING FOR FACTUAL STUDY PRESENCE", shell)
+        self.status_label.setObjectName("cosecantPopupStatus")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_label.setWordWrap(True)
+        self.status_label.setFont(make_font(10.5, 600, mono=True, spacing=0.6))
+        body.addWidget(self.status_label)
+
+        self.countdown_label = QLabel("", shell)
         self.countdown_label.setObjectName("cosecantPopupCountdown")
         self.countdown_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        root.addWidget(self.countdown_label)
-        self.return_button = QPushButton("RETURN TO STUDY", self)
+        self.countdown_label.setFont(make_font(11, 500, mono=True))
+        body.addWidget(self.countdown_label)
+
+        action_row = QHBoxLayout()
+        action_row.addStretch(1)
+        self.return_button = QPushButton("RETURN TO STUDY", shell)
         self.return_button.setObjectName("cosecantReturnIntentButton")
+        self.return_button.setFixedSize(286, 50)
+        self.return_button.setFont(make_font(12.5, 700, spacing=0.7))
+        self.return_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.return_button.clicked.connect(self._emit_return_intent)
-        root.addWidget(self.return_button)
+        action_row.addWidget(self.return_button)
+        action_row.addStretch(1)
+        body.addLayout(action_row)
+
+        self.protected_label = QLabel(
+            "NO BUTTONS · EXACT STUDY RETURN REQUIRED", shell
+        )
+        self.protected_label.setObjectName("cosecantPopupProtected")
+        self.protected_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.protected_label.setFont(
+            make_font(10.5, 700, mono=True, spacing=0.6)
+        )
+        self.protected_label.hide()
+        body.addWidget(self.protected_label)
+
+        accent_line = QFrame(shell)
+        accent_line.setObjectName("cosecantPopupAccentLine")
+        accent_line.setFixedHeight(5)
+        body.addWidget(accent_line)
+
+        footer = QLabel("MYELIN · APPROVED BREAK RETURN", shell)
+        footer.setObjectName("cosecantPopupFooter")
+        footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        footer.setFont(make_font(9.5, 400, mono=True, spacing=0.5))
+        body.addWidget(footer)
 
     def _emit_return_intent(self) -> None:
         """Emit the identity of the snapshot that displayed this button.
@@ -1088,30 +1161,57 @@ class ContinuityPopup(QDialog):
         if not snapshot.popup_required:
             self.hide()
             return
-        self.message_label.setText(snapshot.message.value)
+        headline = {
+            CosecantState.BREAK_COMPLETE: "BREAK COMPLETE",
+            CosecantState.BREAK_ALREADY_OVER: "BREAK ALREADY OVER",
+            CosecantState.FINAL_LOCK: "COME BACK PLEASE",
+            CosecantState.RETURN_CONFIRMING: "RETURN DETECTED",
+        }.get(snapshot.state, snapshot.message.value)
+        self.message_label.setText(headline)
         if snapshot.state is CosecantState.RETURN_CONFIRMING:
             self.detail_label.setText(
-                "Keep the confirmed Study resource present for 3 continuous seconds."
+                "Keep the exact registered Study resource present while "
+                "COSECANT verifies the return."
             )
+            self.status_label.setText("FACTUAL RETURN DETECTED · VERIFYING CONTINUITY")
         elif snapshot.final_locked:
             self.detail_label.setText(
-                "Open the intended Study resource. This notice closes only after observed return."
+                "Open the exact registered Study resource. This protected notice "
+                "closes only after observed return."
             )
+            self.status_label.setText("FINAL RETURN LOCK · WAITING FOR EXACT RESOURCE")
+        elif snapshot.state is CosecantState.BREAK_ALREADY_OVER:
+            self.detail_label.setText(
+                "Your planned break has been over for five minutes. Return to "
+                "your registered Study task."
+            )
+            self.status_label.setText("APPROVED BREAK OVERDUE · RETURN INTENT AVAILABLE")
         else:
             self.detail_label.setText(
-                "Your selected break has ended. Return evidence is verified by MYELIN."
+                "Your planned break has ended. Return to your registered Study task."
             )
-        self.countdown_label.setText(
-            _duration(snapshot.seconds_to_next_stage)
-            if snapshot.seconds_to_next_stage is not None
-            else ""
-        )
+            self.status_label.setText("APPROVED BREAK COMPLETE · RETURN INTENT AVAILABLE")
+        if snapshot.seconds_to_next_stage is not None:
+            countdown_prefix = (
+                "RETURN VERIFICATION"
+                if snapshot.state is CosecantState.RETURN_CONFIRMING
+                else "NEXT AUTHORITY"
+            )
+            self.countdown_label.setText(
+                f"{countdown_prefix} · {_duration(snapshot.seconds_to_next_stage)}"
+            )
+        else:
+            self.countdown_label.setText("EXACT STUDY RETURN REQUIRED")
         action_allowed = (
             CosecantUiAction.RETURN_TO_STUDY in snapshot.allowed_actions
         )
         # Locked invariant: FINAL_LOCK and its confirmation have no button.
         self.return_button.setVisible(action_allowed and not snapshot.final_locked)
         self.return_button.setEnabled(action_allowed and not snapshot.final_locked)
+        self.protected_label.setVisible(snapshot.final_locked)
+        self.setAccessibleDescription(
+            f"{headline}. {self.detail_label.text()}"
+        )
         self.show()
         self.raise_()
         self.activateWindow()

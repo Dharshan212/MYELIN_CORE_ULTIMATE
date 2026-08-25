@@ -201,11 +201,12 @@ def build_application_stylesheet(tokens: ThemeTokens | None = None) -> str:
     base, surface, soft = t.window_background, t.surface, t.surface_soft
     text, muted, border = t.text_primary, t.muted, t.border
     cyan, cyan_dim = t.cyan, t.cyan_dim
-    red, red_dim, amber, green, violet = (
+    red, red_dim, amber, green, green_dim, violet = (
         t.red,
         t.red_dim,
         t.amber,
         t.green,
+        t.green_dim,
         t.violet,
     )
 
@@ -695,6 +696,75 @@ QLabel#studyTelemetryValue, QLabel#resourceIntentValue {{
     background: transparent;
     border-bottom: 1px solid {border};
     padding-bottom: 9px;
+}}
+
+/* COSECANT continuity popup -- one green MYELIN presentation family. */
+QDialog#cosecantContinuityPopup {{
+    background: {alpha(green, 0.10)};
+    border: none;
+}}
+QFrame#cosecantPopupShell {{
+    background: {soft};
+    border: 2px solid {green};
+    border-radius: 18px;
+}}
+QLabel#cosecantPopupStatusDot {{
+    color: {green};
+    background: transparent;
+}}
+QLabel#cosecantPopupEyebrow {{
+    color: {muted};
+    background: transparent;
+}}
+QLabel#cosecantPopupBadge {{
+    color: {green};
+    background: {alpha(green, 0.08)};
+    border: 1px solid {green};
+    border-radius: 13px;
+}}
+QLabel#cosecantPopupMessage {{
+    color: {green};
+    background: transparent;
+}}
+QLabel#cosecantPopupDetail {{
+    color: {text};
+    background: transparent;
+}}
+QLabel#cosecantPopupStatus, QLabel#cosecantPopupProtected {{
+    color: {green};
+    background: transparent;
+}}
+QLabel#cosecantPopupCountdown, QLabel#cosecantPopupFooter {{
+    color: {muted};
+    background: transparent;
+}}
+QFrame#cosecantPopupAccentLine {{
+    background: {green};
+    border: none;
+    border-radius: 2px;
+}}
+QPushButton#cosecantReturnIntentButton {{
+    color: #06210F;
+    background: {green};
+    border: 1px solid {green};
+    border-radius: 10px;
+    padding: 10px 22px;
+}}
+QPushButton#cosecantReturnIntentButton:hover {{
+    background: {mix(green, 86, text)};
+    border-color: {mix(green, 86, text)};
+}}
+QPushButton#cosecantReturnIntentButton:pressed {{
+    background: {green_dim};
+    border-color: {green_dim};
+}}
+QPushButton#cosecantReturnIntentButton:focus {{
+    border: 2px solid {mix(green, 70, text)};
+}}
+QPushButton#cosecantReturnIntentButton:disabled {{
+    color: {mix(muted, 55, soft)};
+    background: {mix(green_dim, 28, soft)};
+    border-color: {mix(green_dim, 40, soft)};
 }}
 """
 

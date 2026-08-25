@@ -113,6 +113,18 @@ class _StudyProbe:
     def __init__(self) -> None:
         self.advance_calls = 0
 
+    def snapshot(self):
+        # Current Monitor refreshes its break-return target from every Study
+        # snapshot before routing SINE.  This Phase-1 probe has no active Study
+        # block, so it supplies the explicit inert identity instead of omitting
+        # the modern collaborator method.
+        return SimpleNamespace(
+            state="INACTIVE",
+            block_id="",
+            generation=0,
+            context_token="",
+        )
+
     def advance(self):
         self.advance_calls += 1
         return SimpleNamespace(state="INACTIVE")

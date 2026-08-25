@@ -1208,14 +1208,24 @@ class SineAuthority:
         verified_monotonic_ns: int,
         evidence_source: str,
     ) -> bool:
-        """Hide Study SINE after MIRL verifies return entry, without resolution."""
+        """Hide an eligible SINE surface after MIRL verifies return entry."""
 
         with self._lock:
             episode = self._episode
+            eligible_for_return_entry_withhold = bool(
+                episode is not None
+                and (
+                    episode.study_mode
+                    or (
+                        episode.current_stage is SineStage.SINE_3
+                        and episode.protected_red
+                    )
+                )
+            )
             if (
                 episode is None
                 or episode.terminal
-                or not episode.study_mode
+                or not eligible_for_return_entry_withhold
                 or episode.candidate_uid != str(candidate_uid or "")
                 or not str(evidence_source or "").strip()
                 or episode.first_displayed_monotonic_ns is None
@@ -1819,11 +1829,6 @@ class SineAuthority:
             responses: tuple[SineResponse, ...]
             if stage is SineStage.SINE_3:
                 responses = ()
-            elif episode.study_material_action_allowed:
-                responses = (
-                    SineResponse.RETURN_TO_FOCUS,
-                    SineResponse.THIS_IS_STUDY_MATERIAL,
-                )
             else:
                 responses = (SineResponse.RETURN_TO_FOCUS,)
         else:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import queue
 from types import MethodType, SimpleNamespace
 
+import pytest
+
 import _lab  # noqa: F401 - installs the production tree on sys.path
 
 from CORE_ENGINE.monitor import WindowsMonitorCoordinator
@@ -20,16 +22,20 @@ from SINE.sine import (
 NS = 1_000_000_000
 
 
-def _candidate(uid: str = "phase4-study-candidate"):
+def _candidate(
+    uid: str = "phase4-study-candidate",
+    *,
+    study_mode: bool = True,
+):
     return SimpleNamespace(
         candidate_uid=uid,
         session_id=1,
-        profile_type="STUDY",
+        profile_type="STUDY" if study_mode else "GENERAL",
         evidence=SimpleNamespace(
             observed_monotonic_ns=1 * NS,
             dwell_seconds=300.0,
             threshold_seconds=300.0,
-            study_context_token="study-block-phase4:1",
+            study_context_token="study-block-phase4:1" if study_mode else "",
             resource_key="youtube:study-distraction",
             resource_observation_token="study-observation-1",
             surface_class="youtube_watch",
@@ -42,7 +48,12 @@ def _candidate(uid: str = "phase4-study-candidate"):
     )
 
 
-def _authority(*, stage_2_delay: float = 1.0, stage_3_delay: float = 1.0):
+def _authority(
+    *,
+    stage_2_delay: float = 1.0,
+    stage_3_delay: float = 1.0,
+    study_mode: bool = True,
+):
     clock = [1 * NS]
     sine = SineAuthority(
         policy=SinePolicy(
@@ -54,9 +65,12 @@ def _authority(*, stage_2_delay: float = 1.0, stage_3_delay: float = 1.0):
         ),
         monotonic_ns=lambda: clock[0],
     )
-    sine.start_session(session_id=1, profile_type="STUDY")
+    sine.start_session(
+        session_id=1,
+        profile_type="STUDY" if study_mode else "GENERAL",
+    )
     assert sine.request_trigger(
-        candidate=_candidate(),
+        candidate=_candidate(study_mode=study_mode),
         operational_event_id=1,
         mirl_display_token=SimpleNamespace(),
     )
@@ -77,8 +91,8 @@ def _show_current(sine: SineAuthority, clock: list[int], second: int):
     return request_id
 
 
-def _protected_red():
-    sine, clock = _authority()
+def _protected_red(*, study_mode: bool = True):
+    sine, clock = _authority(study_mode=study_mode)
     _show_current(sine, clock, 2)
     clock[0] = 3 * NS
     sine.advance(now_monotonic_ns=clock[0])
@@ -88,6 +102,138 @@ def _protected_red():
     request_id = _show_current(sine, clock, 6)
     assert sine.live_view().phase is SinePhase.PROTECTED_RED
     return sine, clock, request_id
+
+
+def _normal_stage(stage: SineStage):
+    sine, clock = _authority(
+        study_mode=False,
+        stage_2_delay=1.0 if stage >= SineStage.SINE_2 else 100.0,
+        stage_3_delay=1.0 if stage >= SineStage.SINE_3 else 100.0,
+    )
+    _show_current(sine, clock, 2)
+    if stage >= SineStage.SINE_2:
+        clock[0] = 3 * NS
+        sine.advance(now_monotonic_ns=clock[0])
+        _show_current(sine, clock, 4)
+    if stage >= SineStage.SINE_3:
+        clock[0] = 5 * NS
+        sine.advance(now_monotonic_ns=clock[0])
+        _show_current(sine, clock, 6)
+    assert sine.live_view().stage is stage
+    return sine, clock
+
+
+def test_normal_sine_three_return_entry_closes_only_its_surface():
+    sine, clock, request_id = _protected_red(study_mode=False)
+    before = sine.live_view()
+
+    clock[0] = 16 * NS
+    assert sine.withhold_presentation_for_verified_return_entry(
+        candidate_uid=before.candidate_uid,
+        verified_monotonic_ns=clock[0],
+        evidence_source="mirl_return_verified",
+    )
+    facts = sine.advance(now_monotonic_ns=clock[0])
+    assert "SINE_POPUP_CLOSE_REQUESTED" in {fact.kind for fact in facts}
+
+    held = sine.live_view()
+    assert held.episode_uid == before.episode_uid
+    assert held.phase is SinePhase.PROTECTED_RED
+    assert held.protected_red_active is True
+    assert held.presentation_withheld_for_recovery is True
+    assert held.popup_state is PopupState.CLOSE_REQUESTED
+
+    clock[0] = 17 * NS
+    assert sine.popup_closed(
+        request_id=request_id,
+        reason="mirl_return_entry_verified",
+        occurred_monotonic_ns=clock[0],
+    )
+    sine.advance(now_monotonic_ns=clock[0])
+    closed = sine.live_view()
+    assert closed.episode_uid == before.episode_uid
+    assert closed.phase is SinePhase.PROTECTED_RED
+    assert closed.protected_red_active is True
+    assert closed.popup_state is PopupState.CLOSED
+
+
+def test_normal_sine_three_relapse_restores_same_red_episode_not_sine_one():
+    sine, clock, request_id = _protected_red(study_mode=False)
+    original = sine.live_view()
+    clock[0] = 16 * NS
+    assert sine.withhold_presentation_for_verified_return_entry(
+        candidate_uid=original.candidate_uid,
+        verified_monotonic_ns=clock[0],
+        evidence_source="mirl_return_verified",
+    )
+    sine.advance(now_monotonic_ns=clock[0])
+    clock[0] = 17 * NS
+    assert sine.popup_closed(
+        request_id=request_id,
+        reason="mirl_return_entry_verified",
+        occurred_monotonic_ns=clock[0],
+    )
+    sine.advance(now_monotonic_ns=clock[0])
+
+    clock[0] = 25 * NS
+    assert sine.resume_presentation_after_recovery_relapse(
+        candidate_uid=original.candidate_uid,
+        occurred_monotonic_ns=clock[0],
+        evidence_source="mirl_relapse_detected",
+    )
+    facts = sine.advance(now_monotonic_ns=clock[0])
+    requests = [fact for fact in facts if fact.kind == "SINE_POPUP_REQUESTED"]
+    assert len(requests) == 1
+    assert requests[0].stage == 3
+    assert sine.live_view().episode_uid == original.episode_uid
+    assert sine.live_view().stage is SineStage.SINE_3
+
+
+@pytest.mark.parametrize("stage", [SineStage.SINE_1, SineStage.SINE_2])
+def test_normal_sine_one_and_two_cannot_gain_return_entry_withholding(stage):
+    sine, clock = _normal_stage(stage)
+    before = sine.live_view()
+    clock[0] += 10 * NS
+
+    assert not sine.withhold_presentation_for_verified_return_entry(
+        candidate_uid=before.candidate_uid,
+        verified_monotonic_ns=clock[0],
+        evidence_source="mirl_return_verified",
+    )
+    facts = sine.advance(now_monotonic_ns=clock[0])
+    assert "SINE_POPUP_CLOSE_REQUESTED" not in {fact.kind for fact in facts}
+    assert sine.live_view().presentation_withheld_for_recovery is False
+
+
+def test_normal_sine_three_final_recovery_still_resolves_after_early_close():
+    sine, clock, request_id = _protected_red(study_mode=False)
+    original = sine.live_view()
+    clock[0] = 16 * NS
+    assert sine.withhold_presentation_for_verified_return_entry(
+        candidate_uid=original.candidate_uid,
+        verified_monotonic_ns=clock[0],
+        evidence_source="mirl_return_verified",
+    )
+    sine.advance(now_monotonic_ns=clock[0])
+    clock[0] = 17 * NS
+    assert sine.popup_closed(
+        request_id=request_id,
+        reason="mirl_return_entry_verified",
+        occurred_monotonic_ns=clock[0],
+    )
+    sine.advance(now_monotonic_ns=clock[0])
+
+    clock[0] = 76 * NS
+    assert sine.confirm_verified_return(
+        candidate_uid=original.candidate_uid,
+        verified_monotonic_ns=clock[0],
+        evidence_source="mirl",
+    )
+    sine.advance(now_monotonic_ns=clock[0])
+    final = sine.live_view()
+    assert final.episode_uid == original.episode_uid
+    assert final.phase is SinePhase.RESOLVED
+    assert final.protected_red_active is False
 
 
 def test_return_entry_closes_red_surface_but_keeps_same_episode_alive():
