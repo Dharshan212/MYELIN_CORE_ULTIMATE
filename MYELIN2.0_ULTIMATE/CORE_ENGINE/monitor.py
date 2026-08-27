@@ -219,6 +219,8 @@ class BlacklistAuthority(Protocol):
 
     def live_view(self) -> object: ...
 
+    def set_paused(self, paused: bool) -> None: ...
+
     def shutdown(self) -> None: ...
 
 
@@ -312,6 +314,39 @@ class SineAuthority(Protocol):
         occurred_monotonic_ns: int,
     ) -> bool: ...
 
+    def hold_for_normal_break(
+        self,
+        *,
+        candidate_uid: str,
+        episode_uid: str,
+        break_id: str,
+        break_generation: int,
+        started_monotonic_ns: int,
+        source_popup_request_id: str,
+    ) -> bool: ...
+
+    def cancel_normal_break_hold(
+        self,
+        *,
+        candidate_uid: str,
+        episode_uid: str,
+        break_id: str,
+        break_generation: int,
+        occurred_monotonic_ns: int,
+        reason: str,
+    ) -> bool: ...
+
+    def resume_from_normal_break_as_sine2(
+        self,
+        *,
+        candidate_uid: str,
+        episode_uid: str,
+        break_id: str,
+        break_generation: int,
+        occurred_monotonic_ns: int,
+        completion_kind: str,
+    ) -> bool: ...
+
     def restore_protected_red(self) -> bool: ...
 
     def live_view(self) -> object: ...
@@ -375,6 +410,11 @@ class MirlAuthority(Protocol):
 
     def observe(self, context: MonitorContext) -> tuple[object, ...]: ...
 
+    def record_recovery_observation(
+        self,
+        observation: object,
+    ) -> tuple[object, ...]: ...
+
     def prepare_trigger(
         self,
         *,
@@ -435,6 +475,8 @@ class StorageAuthority(Protocol):
 
     def append_sine_facts(self, facts: tuple[object, ...]) -> bool: ...
 
+    def append_normal_break_facts(self, facts: tuple[object, ...]) -> bool: ...
+
     def append_mirl_events(self, events: tuple[object, ...]) -> bool: ...
 
     def append_cosecant_facts(self, *, session_id: int | None, facts: tuple[object, ...]) -> bool: ...
@@ -442,6 +484,30 @@ class StorageAuthority(Protocol):
     def record_study_snapshot(self, *, session_id: int | None, action: str, snapshot: object) -> bool: ...
 
     def shutdown(self) -> None: ...
+
+
+@runtime_checkable
+class NormalBreakAuthority(Protocol):
+    @property
+    def active(self) -> bool: ...
+
+    def request_duration(self, **kwargs) -> object: ...
+
+    def cancel_duration(self, **kwargs) -> object: ...
+
+    def start_break(self, **kwargs) -> object: ...
+
+    def stop_break(self, **kwargs) -> object: ...
+
+    def advance(self, *, now_monotonic_ns: int) -> object: ...
+
+    def terminate(self, **kwargs) -> object: ...
+
+    def rollback_start(self, **kwargs) -> object: ...
+
+    def snapshot(self) -> object: ...
+
+    def drain_facts(self) -> tuple[object, ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,6 +523,7 @@ class MonitorServices:
     mirl: MirlAuthority
     study: StudyAuthority
     cosecant: CosecantAuthority
+    normal_break: NormalBreakAuthority
     storage: StorageAuthority
 
 
@@ -867,6 +934,7 @@ def _build_services(*, profile_type: str) -> MonitorServices:
     from COSINE.cosine import CosineRuntime
     from MIRL.mirl import MirlAuthority as Mirl
     from PERSISTENCE.storage import EngineStorage
+    from SINE.normal_break import NormalBreakAuthority as NormalBreak
     from SINE.sine import SineAuthority as Sine
 
     storage = EngineStorage()
@@ -881,6 +949,7 @@ def _build_services(*, profile_type: str) -> MonitorServices:
         mirl=Mirl(),
         study=StudyRuntime(),
         cosecant=CosecantRuntime(context_authority=intent),
+        normal_break=NormalBreak(),
         storage=storage,
     )
 
@@ -918,6 +987,10 @@ class WindowsMonitorCoordinator:
         self.telemetry_queue = telemetry_queue
         self.command_queue = command_queue
         self.poll_seconds = float(poll_seconds)
+        # Backend command admission and SINE deadline precedence must read one
+        # monotonic authority.  Kept as an instance seam for deterministic
+        # external physiology tests; production resolves to time.monotonic_ns.
+        self._monotonic_ns = time.monotonic_ns
 
         self.session_id: int | None = None
         self._pending_trigger: PendingTriggerWorkflow | None = None
@@ -956,6 +1029,8 @@ class WindowsMonitorCoordinator:
         self._session_personalization_factor: float = 1.0
         self._observed_lambda_estimates: list[object] = []
         self._learned_candidate_uids: set[str] = set()
+        self._normal_break_learning_ineligible_candidate_uids: set[str] = set()
+        self._normal_break_resume_fault = False
 
     def run(self) -> None:
         """Initialize, monitor, and always perform ordered cleanup."""
@@ -1062,6 +1137,8 @@ class WindowsMonitorCoordinator:
         self._session_decay_rate_per_minute = learned_lambda
         self._observed_lambda_estimates.clear()
         self._learned_candidate_uids.clear()
+        self._normal_break_learning_ineligible_candidate_uids.clear()
+        self._normal_break_resume_fault = False
 
         # MBRM / Ebbinghaus policy boundary. ``learned_lambda`` remains the
         # previous eligible session's factual learned recovery-rate parameter.
@@ -1215,6 +1292,10 @@ class WindowsMonitorCoordinator:
             if self.stop_event.is_set():
                 break
             if self.pause_event.is_set():
+                # Global Pause inhibits ordinary monitoring cycles, but it is
+                # not authority to extend a factual Normal Break deadline.
+                # Advance only the independent break clock; no sensing occurs.
+                self._advance_normal_break(time.monotonic_ns(), None)
                 self.stop_event.wait(min(self.poll_seconds, 0.25))
                 next_cycle = time.monotonic()
                 continue
@@ -1315,9 +1396,12 @@ class WindowsMonitorCoordinator:
         for effect in self.services.cosine.advance(now_ns=now_ns):
             self._route_cosine_effect(effect, context.foreground)
 
-        self._persist_mirl_events(
-            tuple(self.services.mirl.observe(context)), context.foreground
-        )
+        # Break completion is decided before MIRL interprets this observation.
+        # If the break remains active, one explicit NEUTRAL observation replaces
+        # (never supplements) MIRL's ordinary context route.
+        self._advance_normal_break(now_ns, context.foreground)
+        mirl_events = self._observe_mirl_for_context(context)
+        self._persist_mirl_events(tuple(mirl_events), context.foreground)
 
         self.services.sine.observe(context)
         blacklist_result = self.services.blacklist.observe(context)
@@ -1344,6 +1428,7 @@ class WindowsMonitorCoordinator:
         if (
             self._pending_trigger is None
             and not self._sine_owns_intervention()
+            and not self._normal_break_owns_pause()
             and self._study_trigger_admission_open(context)
         ):
             candidate = self.services.trigger.evaluate(
@@ -1355,6 +1440,10 @@ class WindowsMonitorCoordinator:
 
         for fact in self.services.sine.advance(now_monotonic_ns=now_ns):
             self._route_sine_fact(fact, context.foreground)
+        self._reconcile_pending_normal_break_selector(
+            occurred_monotonic_ns=now_ns,
+            observation=context.foreground,
+        )
 
     def _study_trigger_admission_open(self, context: MonitorContext) -> bool:
         """Do not let Blacklist backdate an active Study uncertainty period."""
@@ -1382,6 +1471,272 @@ class WindowsMonitorCoordinator:
             SinePhase.ACTIVE,
             SinePhase.PROTECTED_RED,
         }
+
+    def _normal_break_owns_pause(self) -> bool:
+        """Defence-in-depth gate for active or failed-close break ownership."""
+
+        sine_view = self.services.sine.live_view()
+        normal_break = getattr(self.services, "normal_break", None)
+        return bool(
+            bool(getattr(normal_break, "active", False))
+            or self._normal_break_resume_fault
+            or _field(sine_view, "normal_break_held", False)
+        )
+
+    def _observe_mirl_for_context(self, context: MonitorContext) -> tuple[object, ...]:
+        """Route exactly one MIRL path, including fail-closed break ownership."""
+
+        if not self._normal_break_owns_pause():
+            return tuple(self.services.mirl.observe(context) or ())
+
+        from MIRL.mirl import RecoveryContext, RecoveryObservation
+
+        normal_break = getattr(self.services, "normal_break", None)
+        break_view = normal_break.snapshot() if normal_break is not None else None
+        now_ns = context.foreground.observed_monotonic_ns
+        return tuple(
+            self.services.mirl.record_recovery_observation(
+                RecoveryObservation(
+                    context=RecoveryContext.NEUTRAL,
+                    observed_monotonic_ns=now_ns,
+                    observed_wall_time_utc=context.foreground.observed_wall_time_utc,
+                    source="normal_break",
+                    observation_token=(
+                        f"normal-break:{_field(break_view, 'break_id', '')}:"
+                        f"{context.foreground.sequence}:{now_ns}"
+                    ),
+                )
+            )
+            or ()
+        )
+
+    @staticmethod
+    def _normal_break_fact_kind(fact: object) -> str:
+        value = _field(fact, "kind", "")
+        return str(getattr(value, "value", value) or "").upper()
+
+    def _persist_normal_break_result(
+        self,
+        result: object,
+        observation: ForegroundObservation | None = None,
+    ) -> bool:
+        """Drain and durably route exactly the facts returned by one operation."""
+
+        result_facts = tuple(_field(result, "facts", ()) or ())
+        drained = tuple(self.services.normal_break.drain_facts() or ())
+        if drained != result_facts:
+            raise RuntimeError(
+                "Normal Break result facts did not match the authority outbox"
+            )
+        if not drained:
+            return True
+        if not self.services.storage.append_normal_break_facts(drained):
+            return False
+        for fact in drained:
+            _telemetry(
+                self.telemetry_queue,
+                "normal_break_fact",
+                observation=observation,
+                message=_field(fact, "reason", "")
+                or self._normal_break_fact_kind(fact),
+                domain="normal_break",
+                fact=fact,
+            )
+            self._console_history(
+                f"[NORMAL BREAK] {self._normal_break_fact_kind(fact)}",
+                observation,
+            )
+        return True
+
+    def _advance_normal_break(
+        self,
+        now_ns: int,
+        observation: ForegroundObservation | None,
+    ) -> bool:
+        """Advance a factual break and perform persistence-first SINE resume."""
+
+        normal_break = getattr(self.services, "normal_break", None)
+        if normal_break is None or not normal_break.active:
+            return True
+        result = normal_break.advance(now_monotonic_ns=now_ns)
+        facts = tuple(_field(result, "facts", ()) or ())
+        if not facts:
+            return bool(_field(result, "accepted", False))
+        terminal = facts[-1]
+        if not self._persist_normal_break_result(result, observation):
+            self._normal_break_resume_fault = True
+            self.services.blacklist.set_paused(False)
+            _telemetry(
+                self.telemetry_queue,
+                "normal_break_integrity_failure",
+                observation=observation,
+                message=(
+                    "Normal Break ended but its terminal fact was not durable; "
+                    "SINE resume is blocked fail-closed"
+                ),
+            )
+            return False
+        return self._resume_normal_break_terminal(terminal, observation)
+
+    def _resume_normal_break_terminal(
+        self,
+        fact: object,
+        observation: ForegroundObservation | None,
+    ) -> bool:
+        """Hand one durable completion back to the same SINE episode."""
+
+        kind = self._normal_break_fact_kind(fact)
+        occurred_ns = int(_field(fact, "occurred_monotonic_ns", 0) or 0)
+        accepted = bool(
+            self.services.sine.resume_from_normal_break_as_sine2(
+                candidate_uid=_field(fact, "candidate_uid", ""),
+                episode_uid=_field(fact, "episode_uid", ""),
+                break_id=_field(fact, "break_id", ""),
+                break_generation=_field(fact, "generation", 0),
+                occurred_monotonic_ns=occurred_ns,
+                completion_kind=kind,
+            )
+        )
+        if not accepted:
+            self._normal_break_resume_fault = True
+            self.services.blacklist.set_paused(False)
+            _telemetry(
+                self.telemetry_queue,
+                "normal_break_integrity_failure",
+                observation=observation,
+                message=(
+                    "SINE refused the exact Normal Break completion; new "
+                    "trigger founding remains blocked"
+                ),
+                break_id=_field(fact, "break_id", ""),
+                generation=_field(fact, "generation", 0),
+                completion_kind=kind,
+            )
+            return False
+
+        try:
+            for sine_fact in self.services.sine.advance(
+                now_monotonic_ns=occurred_ns
+            ):
+                self._route_sine_fact(sine_fact, observation)
+        finally:
+            # Completion/STOP always unwinds the Blacklist pause, even if a
+            # later telemetry/persistence route raises.
+            self.services.blacklist.set_paused(False)
+        self._normal_break_resume_fault = False
+        _telemetry(
+            self.telemetry_queue,
+            "normal_break_resumed",
+            observation=observation,
+            message="The same SINE episode resumed immediately at SINE 2",
+            break_id=_field(fact, "break_id", ""),
+            generation=_field(fact, "generation", 0),
+            episode_uid=_field(fact, "episode_uid", ""),
+            candidate_uid=_field(fact, "candidate_uid", ""),
+            occurred_monotonic_ns=occurred_ns,
+            completion_kind=kind,
+        )
+        return True
+
+    def _normal_break_selector_is_eligible(
+        self,
+        pending: object,
+        sine: object,
+        *,
+        occurred_monotonic_ns: int,
+    ) -> bool:
+        """Validate the exact SINE-1 T-joint at one backend admission time."""
+
+        from SINE.sine import SinePhase, SineStage
+
+        state = _field(pending, "state", None)
+        state_text = str(getattr(state, "value", state) or "").upper()
+        deadline_ns = _field(sine, "stage_2_deadline_monotonic_ns", None)
+        return bool(
+            state_text == "AWAITING_DURATION"
+            and type(occurred_monotonic_ns) is int
+            and occurred_monotonic_ns > 0
+            and type(deadline_ns) is int
+            and occurred_monotonic_ns < deadline_ns
+            and _field(sine, "episode_uid", "")
+            == _field(pending, "episode_uid", "")
+            and _field(sine, "candidate_uid", "")
+            == _field(pending, "candidate_uid", "")
+            and _field(sine, "popup_request_id", "")
+            == _field(pending, "source_sine_popup_request_id", "")
+            and _field(sine, "phase") is SinePhase.ACTIVE
+            and _field(sine, "stage") is SineStage.SINE_1
+            and _field(sine, "last_response", "") == "request_break"
+            and not _field(sine, "study_mode", False)
+            and not _field(sine, "protected_red_active", False)
+            and not _field(sine, "normal_break_held", False)
+        )
+
+    def _cancel_pending_normal_break_selector(
+        self,
+        pending: object,
+        *,
+        occurred_monotonic_ns: int,
+        observation: ForegroundObservation | None,
+        reason: str,
+    ) -> bool:
+        """Retire one exact obsolete selector through its frozen authority API."""
+
+        result = self.services.normal_break.cancel_duration(
+            break_id=_field(pending, "break_id", ""),
+            generation=_field(pending, "generation", 0),
+            episode_uid=_field(pending, "episode_uid", ""),
+            candidate_uid=_field(pending, "candidate_uid", ""),
+            source_sine_popup_request_id=_field(
+                pending, "source_sine_popup_request_id", ""
+            ),
+            occurred_monotonic_ns=occurred_monotonic_ns,
+        )
+        if not bool(_field(result, "accepted", False)):
+            raise RuntimeError(
+                "Normal Break refused cancellation of its exact obsolete selector"
+            )
+        if not self._persist_normal_break_result(result, observation):
+            raise RuntimeError("Obsolete Normal Break selector cancellation was not durable")
+        _telemetry(
+            self.telemetry_queue,
+            "normal_break_selector_retired",
+            observation=observation,
+            message="An obsolete Normal SINE-1 break selector was retired",
+            reason=reason,
+            episode_uid=_field(pending, "episode_uid", ""),
+            candidate_uid=_field(pending, "candidate_uid", ""),
+        )
+        return True
+
+    def _reconcile_pending_normal_break_selector(
+        self,
+        *,
+        occurred_monotonic_ns: int,
+        observation: ForegroundObservation | None,
+    ) -> bool:
+        """Cancel an abandoned selector as soon as its exact SINE-1 dies."""
+
+        normal_break = getattr(self.services, "normal_break", None)
+        if normal_break is None or normal_break.active:
+            return True
+        pending = normal_break.snapshot()
+        state = _field(pending, "state", None)
+        if str(getattr(state, "value", state) or "").upper() != "AWAITING_DURATION":
+            return True
+        sine = self.services.sine.live_view()
+        if self._normal_break_selector_is_eligible(
+            pending,
+            sine,
+            occurred_monotonic_ns=occurred_monotonic_ns,
+        ):
+            return True
+        return self._cancel_pending_normal_break_selector(
+            pending,
+            occurred_monotonic_ns=occurred_monotonic_ns,
+            observation=observation,
+            reason="source_sine1_no_longer_eligible",
+        )
 
     def _route_cosine_effect(
         self,
@@ -1814,6 +2169,27 @@ class WindowsMonitorCoordinator:
 
             # ---- learning path (independent of the release above) ----------
 
+            # A user-selected sanctioned break contaminates Tr with policy
+            # time. The behavioural recovery still releases SINE normally,
+            # but this exact candidate can never contribute a lambda sample.
+            if candidate_uid in self._normal_break_learning_ineligible_candidate_uids:
+                _telemetry(
+                    self.telemetry_queue,
+                    "profile_learning_evidence_rejected",
+                    observation=observation,
+                    message=(
+                        "Verified recovery was released, but this episode "
+                        "contained a factual Normal Break; no Tr or lambda "
+                        "sample was taken"
+                    ),
+                    reason="normal_break_present",
+                    profile_key=self._profile_learning_key,
+                    candidate_uid=candidate_uid,
+                    episode_id=str(_field(package, "episode_id", "") or ""),
+                    released=released,
+                )
+                continue
+
             # EVIDENCE-GENERATION GATE.
             #
             # The release above already happened, deliberately: an incompatible
@@ -2023,6 +2399,50 @@ class WindowsMonitorCoordinator:
 
         if not self.services.storage.append_sine_facts((fact,)):
             raise RuntimeError(f"SINE fact was not durably accepted: {kind}")
+
+        if kind == "SINE_BREAK_REQUESTED":
+            result = self.services.normal_break.request_duration(
+                session_id=self.session_id,
+                episode_uid=_field(fact, "episode_uid", ""),
+                candidate_uid=_field(fact, "candidate_uid", ""),
+                source_sine_popup_request_id=_field(
+                    fact, "popup_request_id", ""
+                ),
+                requested_monotonic_ns=occurred_ns,
+            )
+            if not bool(_field(result, "accepted", False)):
+                action_result_recorded = False
+                _telemetry(
+                    self.telemetry_queue,
+                    "engine_command_rejected",
+                    message=(
+                        "Normal Break refused the exact SINE break request: "
+                        f"{_field(result, 'message', 'unknown refusal')}"
+                    ),
+                    episode_uid=_field(fact, "episode_uid", ""),
+                    candidate_uid=_field(fact, "candidate_uid", ""),
+                )
+            elif not self._persist_normal_break_result(result, observation):
+                # The request never became durable and must not leave an
+                # operable selector branch behind.
+                pending = self.services.normal_break.snapshot()
+                cancelled = self.services.normal_break.cancel_duration(
+                    break_id=_field(pending, "break_id", ""),
+                    generation=_field(pending, "generation", 0),
+                    episode_uid=_field(pending, "episode_uid", ""),
+                    candidate_uid=_field(pending, "candidate_uid", ""),
+                    source_sine_popup_request_id=_field(
+                        pending, "source_sine_popup_request_id", ""
+                    ),
+                    occurred_monotonic_ns=max(1, occurred_ns),
+                )
+                # The first write failed, so this is runtime cleanup rather
+                # than a claim that cancellation became durable.
+                self.services.normal_break.drain_facts()
+                del cancelled
+                raise RuntimeError(
+                    "Normal Break duration request was not durably accepted"
+                )
 
         if kind == "SINE_STUDY_MATERIAL_REQUESTED":
             request_id = str(_field(fact, "popup_request_id", "") or "")
@@ -2798,6 +3218,10 @@ class WindowsMonitorCoordinator:
                     self._route_cosine_effect(effect)
                 self._answer_command(response_queue, result)
                 continue
+            if kind.startswith("normal_break_"):
+                accepted = self._handle_normal_break_command(kind, payload)
+                self._answer_command(response_queue, accepted)
+                continue
             if kind.startswith("sine_"):
                 accepted = self._handle_sine_command(kind, payload)
                 self._answer_command(response_queue, accepted)
@@ -2871,6 +3295,221 @@ class WindowsMonitorCoordinator:
             response_queue.put_nowait(result)
         except (AttributeError, queue.Full):
             return
+
+    def _handle_normal_break_command(self, kind: str, payload: object) -> bool:
+        """Direct Phase-2 command seam; Controller/UI work remains Phase 3."""
+
+        if kind == "normal_break_start":
+            return self._start_normal_break(payload)
+        if kind == "normal_break_cancel":
+            result = self.services.normal_break.cancel_duration(
+                break_id=_field(payload, "break_id"),
+                generation=_field(payload, "generation"),
+                episode_uid=_field(payload, "episode_uid"),
+                candidate_uid=_field(payload, "candidate_uid"),
+                source_sine_popup_request_id=_field(
+                    payload, "source_sine_popup_request_id"
+                ),
+            )
+            if not bool(_field(result, "accepted", False)):
+                return self._reject_command(
+                    f"Normal Break CANCEL rejected: {_field(result, 'message', '')}"
+                )
+            if not self._persist_normal_break_result(result):
+                raise RuntimeError("Normal Break cancellation was not durable")
+            return True
+        if kind == "normal_break_stop":
+            result = self.services.normal_break.stop_break(
+                break_id=_field(payload, "break_id"),
+                generation=_field(payload, "generation"),
+                episode_uid=_field(payload, "episode_uid"),
+                candidate_uid=_field(payload, "candidate_uid"),
+            )
+            if not bool(_field(result, "accepted", False)):
+                return self._reject_command(
+                    f"Normal Break STOP rejected: {_field(result, 'message', '')}"
+                )
+            facts = tuple(_field(result, "facts", ()) or ())
+            if not facts or not self._persist_normal_break_result(result):
+                self._normal_break_resume_fault = True
+                self.services.blacklist.set_paused(False)
+                return self._reject_command(
+                    "Normal Break STOP was not durable; SINE resume remains fail-closed"
+                )
+            return self._resume_normal_break_terminal(facts[-1], None)
+        return self._reject_command(f"Unsupported Normal Break command: {kind}")
+
+    def _start_normal_break(self, payload: object) -> bool:
+        """Persistence-first Normal Break start and exact SINE hold handoff."""
+
+        pending = self.services.normal_break.snapshot()
+        declared = (
+            _field(payload, "break_id"),
+            _field(payload, "generation"),
+            _field(payload, "episode_uid"),
+            _field(payload, "candidate_uid"),
+            _field(payload, "source_sine_popup_request_id"),
+        )
+        current = (
+            _field(pending, "break_id", ""),
+            _field(pending, "generation", 0),
+            _field(pending, "episode_uid", ""),
+            _field(pending, "candidate_uid", ""),
+            _field(pending, "source_sine_popup_request_id", ""),
+        )
+        if (
+            any(type(value) is not str for value in (declared[0], *declared[2:]))
+            or type(declared[1]) is not int
+            or declared != current
+        ):
+            return self._reject_command(
+                "Normal Break START carried a stale or mistyped authority identity"
+            )
+
+        state = _field(pending, "state", None)
+        state_text = str(getattr(state, "value", state) or "").upper()
+        if state_text == "ACTIVE":
+            return self._reject_command(
+                "Normal Break START rejected because this break is already ACTIVE"
+            )
+
+        sine = self.services.sine.live_view()
+        admission_ns = self._monotonic_ns()
+        sine_eligible = self._normal_break_selector_is_eligible(
+            pending,
+            sine,
+            occurred_monotonic_ns=admission_ns,
+        )
+        if not sine_eligible:
+            self._cancel_pending_normal_break_selector(
+                pending,
+                occurred_monotonic_ns=admission_ns,
+                observation=None,
+                reason="start_admission_source_sine1_no_longer_eligible",
+            )
+            return self._reject_command(
+                "Normal Break START was stale because Normal SINE 1 is no longer eligible"
+            )
+
+        result = self.services.normal_break.start_break(
+            break_id=declared[0],
+            generation=declared[1],
+            episode_uid=declared[2],
+            candidate_uid=declared[3],
+            source_sine_popup_request_id=declared[4],
+            selected_minutes=_field(payload, "selected_minutes"),
+            started_monotonic_ns=admission_ns,
+        )
+        if not bool(_field(result, "accepted", False)):
+            return self._reject_command(
+                f"Normal Break START rejected: {_field(result, 'message', '')}"
+            )
+        start_facts = tuple(_field(result, "facts", ()) or ())
+        if len(start_facts) != 1:
+            raise RuntimeError("Normal Break START did not produce one exact fact")
+        start_fact = start_facts[0]
+        if not self._persist_normal_break_result(result):
+            rollback = self.services.normal_break.rollback_start(
+                break_id=_field(start_fact, "break_id", ""),
+                generation=_field(start_fact, "generation", 0),
+                episode_uid=_field(start_fact, "episode_uid", ""),
+                candidate_uid=_field(start_fact, "candidate_uid", ""),
+                reason="break_started_persistence_failed",
+                occurred_monotonic_ns=_field(
+                    start_fact, "occurred_monotonic_ns", 0
+                ),
+            )
+            self.services.normal_break.drain_facts()
+            del rollback
+            self.services.blacklist.set_paused(False)
+            return self._reject_command(
+                "Normal Break START was not durable; SINE remained unchanged"
+            )
+
+        started_ns = int(_field(start_fact, "occurred_monotonic_ns", 0) or 0)
+        held = bool(
+            self.services.sine.hold_for_normal_break(
+                candidate_uid=_field(start_fact, "candidate_uid", ""),
+                episode_uid=_field(start_fact, "episode_uid", ""),
+                break_id=_field(start_fact, "break_id", ""),
+                break_generation=_field(start_fact, "generation", 0),
+                started_monotonic_ns=started_ns,
+                source_popup_request_id=_field(
+                    start_fact, "source_sine_popup_request_id", ""
+                ),
+            )
+        )
+        if not held:
+            rollback = self.services.normal_break.rollback_start(
+                break_id=_field(start_fact, "break_id", ""),
+                generation=_field(start_fact, "generation", 0),
+                episode_uid=_field(start_fact, "episode_uid", ""),
+                candidate_uid=_field(start_fact, "candidate_uid", ""),
+                reason="sine_hold_refused",
+                occurred_monotonic_ns=started_ns,
+            )
+            if not self._persist_normal_break_result(rollback):
+                raise RuntimeError(
+                    "SINE refused Normal Break hold and rollback was not durable"
+                )
+            self.services.blacklist.set_paused(False)
+            return self._reject_command(
+                "SINE refused the exact Normal Break ownership handoff"
+            )
+
+        try:
+            self.services.blacklist.set_paused(True)
+        except Exception:
+            rollback_ns = max(started_ns, time.monotonic_ns())
+            released = self.services.sine.cancel_normal_break_hold(
+                candidate_uid=_field(start_fact, "candidate_uid", ""),
+                episode_uid=_field(start_fact, "episode_uid", ""),
+                break_id=_field(start_fact, "break_id", ""),
+                break_generation=_field(start_fact, "generation", 0),
+                occurred_monotonic_ns=rollback_ns,
+                reason="blacklist_pause_failed",
+            )
+            rollback = self.services.normal_break.rollback_start(
+                break_id=_field(start_fact, "break_id", ""),
+                generation=_field(start_fact, "generation", 0),
+                episode_uid=_field(start_fact, "episode_uid", ""),
+                candidate_uid=_field(start_fact, "candidate_uid", ""),
+                reason="blacklist_pause_failed",
+                occurred_monotonic_ns=rollback_ns,
+            )
+            rollback_durable = self._persist_normal_break_result(rollback)
+            for sine_fact in self.services.sine.advance(
+                now_monotonic_ns=rollback_ns
+            ):
+                self._route_sine_fact(sine_fact, None)
+            self.services.blacklist.set_paused(False)
+            if not released or not rollback_durable:
+                raise RuntimeError(
+                    "Normal Break failed to roll back after Blacklist pause failure"
+                )
+            return self._reject_command(
+                "Normal Break ownership rolled back because Blacklist could not pause"
+            )
+
+        self._normal_break_learning_ineligible_candidate_uids.add(
+            _field(start_fact, "candidate_uid", "")
+        )
+        for sine_fact in self.services.sine.advance(now_monotonic_ns=started_ns):
+            self._route_sine_fact(sine_fact, None)
+        _telemetry(
+            self.telemetry_queue,
+            "normal_break_started",
+            message="Normal Break durably started and the same SINE episode is held",
+            break_id=_field(start_fact, "break_id", ""),
+            generation=_field(start_fact, "generation", 0),
+            episode_uid=_field(start_fact, "episode_uid", ""),
+            candidate_uid=_field(start_fact, "candidate_uid", ""),
+            started_monotonic_ns=started_ns,
+            deadline_monotonic_ns=_field(
+                start_fact, "deadline_monotonic_ns", None
+            ),
+        )
+        return True
 
     def _handle_study_confirmation_command(self, kind: str, payload: object) -> bool:
         request_id = str(_field(payload, "request_id", "") or "")
@@ -3655,6 +4294,16 @@ class WindowsMonitorCoordinator:
 
         # Stop presentation/runtime activity first, then record the emergency
         # before permitting application exit.
+        from SINE.normal_break import NormalBreakTerminationReason
+
+        if not self._terminate_normal_break(
+            NormalBreakTerminationReason.EMERGENCY
+        ):
+            _telemetry(
+                self.telemetry_queue,
+                "normal_break_integrity_failure",
+                message="Normal Break emergency termination was not durable",
+            )
         self.services.sine.emergency_stop()
         from COSINE.cosine import ClosureReason
         for effect in self.services.cosine.close(
@@ -3672,6 +4321,24 @@ class WindowsMonitorCoordinator:
         )
         self._emergency_durable = _receipt_state(committed) == COMMITTED_STATE
         self.stop_event.set()
+
+    def _terminate_normal_break(self, reason: object) -> bool:
+        """Terminate pending/active Normal Break without resuming SINE 2."""
+
+        try:
+            snapshot = self.services.normal_break.snapshot()
+            state = _field(snapshot, "state", None)
+            state_text = str(getattr(state, "value", state) or "").upper()
+            if state_text == "IDLE":
+                self.services.normal_break.drain_facts()
+                return True
+            result = self.services.normal_break.terminate(reason=reason)
+            if not bool(_field(result, "accepted", False)):
+                return False
+            return self._persist_normal_break_result(result)
+        finally:
+            self.services.blacklist.set_paused(False)
+            self._normal_break_resume_fault = False
 
     def _wait_for_commit(
         self,
@@ -3707,6 +4374,20 @@ class WindowsMonitorCoordinator:
         """Stop authorities in dependency order and close durable session."""
 
         self._break_eligible_study_target = None
+        try:
+            from SINE.normal_break import NormalBreakTerminationReason
+
+            reason = (
+                NormalBreakTerminationReason.EMERGENCY
+                if self._emergency_requested
+                else NormalBreakTerminationReason.SESSION_END
+            )
+            if not self._terminate_normal_break(reason):
+                self._cleanup_errors.append(
+                    "Normal Break: terminal fact was not durable"
+                )
+        except Exception as error:
+            self._cleanup_errors.append(f"Normal Break: {error}")
         # First try to settle a live trigger transaction. Never reject a
         # RUNNING transaction: it may still commit a moment later.
         try:

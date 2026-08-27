@@ -342,6 +342,9 @@ class SineFact:
     resource_key: str = ""
     popup: SinePopupRequest | None = None
     mirl_display_token: object | None = None
+    normal_break_id: str = ""
+    normal_break_generation: int = 0
+    normal_break_completion_kind: str = ""
     schema_version: str = SINE_SCHEMA_VERSION
 
 
@@ -374,6 +377,10 @@ class SineLiveView:
     ebbinghaus_t_star_minutes: float | None = None
     ebbinghaus_lambda_per_minute: float | None = None
     presentation_withheld_for_recovery: bool = False
+    normal_break_held: bool = False
+    normal_break_id: str = ""
+    normal_break_generation: int = 0
+    post_normal_break_completion_kind: str = ""
 
 
 @dataclass(slots=True)
@@ -424,12 +431,19 @@ class _Episode:
     protected_red: bool = False
     terminal_reason: str = ""
     last_response: str = ""
+    last_response_monotonic_ns: int | None = None
     stage_occurrences: dict[SineStage, int] = field(default_factory=dict)
     display_failures: dict[SineStage, int] = field(default_factory=dict)
     retry_stage: SineStage = SineStage.NONE
     retry_due_monotonic_ns: int | None = None
     study_alignment_announced: bool = False
     presentation_withheld_for_recovery: bool = False
+    normal_break_held: bool = False
+    normal_break_id: str = ""
+    normal_break_generation: int = 0
+    normal_break_started_monotonic_ns: int | None = None
+    normal_break_source_popup_request_id: str = ""
+    post_normal_break_completion_kind: str = ""
 
     @property
     def terminal(self) -> bool:
@@ -553,6 +567,12 @@ class SineAuthority:
             self._latest_context = context
             episode = self._episode
             if episode is None or episode.terminal:
+                return
+
+            # Normal Break owns the sanctioned pause while this exact episode
+            # is held. SINE retains identity and diagnostics, but ordinary
+            # observations cannot resolve, cancel, or advance the episode.
+            if episode.normal_break_held:
                 return
 
             foreground = _field(context, "foreground")
@@ -811,7 +831,10 @@ class SineAuthority:
                 # MIRL has verified recovery ENTRY but not final stability.
                 # Deadlines retain their original timestamps, while the
                 # presentation remains inhibited until relapse or closure.
-                if not episode.presentation_withheld_for_recovery:
+                if (
+                    not episode.presentation_withheld_for_recovery
+                    and not episode.normal_break_held
+                ):
                     self._advance_popup_deadline(episode, now_monotonic_ns)
                     self._advance_display_retry(episode, now_monotonic_ns)
 
@@ -1055,6 +1078,7 @@ class SineAuthority:
 
             occurrence.response = selected.value
             episode.last_response = selected.value
+            episode.last_response_monotonic_ns = occurred_monotonic_ns
             self._emit(
                 "SINE_RESPONSE_RECORDED",
                 "SINE recorded a user response; the UI did not change engine state.",
@@ -1277,6 +1301,7 @@ class SineAuthority:
             if (
                 episode is None
                 or episode.terminal
+                or episode.normal_break_held
                 or episode.candidate_uid != str(candidate_uid or "")
                 or not str(evidence_source or "").strip()
                 or episode.first_displayed_monotonic_ns is None
@@ -1338,6 +1363,7 @@ class SineAuthority:
             if (
                 episode is None
                 or episode.terminal
+                or episode.normal_break_held
                 or episode.candidate_uid != str(candidate_uid or "")
                 or not str(evidence_source or "").strip()
                 or episode.first_displayed_monotonic_ns is None
@@ -1374,6 +1400,184 @@ class SineAuthority:
             ):
                 return False
             self._resolve_episode("approved_break_started", occurred_monotonic_ns)
+            return True
+
+    def hold_for_normal_break(
+        self,
+        *,
+        candidate_uid: str,
+        episode_uid: str,
+        break_id: str,
+        break_generation: int,
+        started_monotonic_ns: int,
+        source_popup_request_id: str,
+    ) -> bool:
+        """Hold one exact Normal SINE-1 episode without resolving it."""
+
+        identities = (
+            candidate_uid,
+            episode_uid,
+            break_id,
+            source_popup_request_id,
+        )
+        if any(type(value) is not str or not value for value in identities):
+            return False
+        if type(break_generation) is not int or break_generation <= 0:
+            return False
+        if type(started_monotonic_ns) is not int or started_monotonic_ns <= 0:
+            return False
+
+        with self._lock:
+            episode = self._episode
+            if episode is None or episode.terminal:
+                return False
+            if episode.normal_break_held:
+                return bool(
+                    episode.candidate_uid == candidate_uid
+                    and episode.episode_uid == episode_uid
+                    and episode.normal_break_id == break_id
+                    and episode.normal_break_generation == break_generation
+                    and episode.normal_break_started_monotonic_ns
+                    == started_monotonic_ns
+                    and episode.normal_break_source_popup_request_id
+                    == source_popup_request_id
+                )
+
+            occurrence = self._popups.get(source_popup_request_id)
+            earliest = max(
+                episode.accepted_monotonic_ns,
+                int(episode.first_displayed_monotonic_ns or 0),
+                int(episode.last_response_monotonic_ns or 0),
+            )
+            if (
+                episode.candidate_uid != candidate_uid
+                or episode.episode_uid != episode_uid
+                or episode.study_mode
+                or episode.protected_red
+                or episode.current_stage is not SineStage.SINE_1
+                or episode.requested_stage is not SineStage.SINE_1
+                or episode.current_popup_request_id != source_popup_request_id
+                or episode.last_response != SineResponse.REQUEST_BREAK.value
+                or episode.first_displayed_monotonic_ns is None
+                or episode.last_response_monotonic_ns is None
+                or started_monotonic_ns
+                >= episode.stage_2_deadline_monotonic_ns
+                or occurrence is None
+                or occurrence.request.stage is not SineStage.SINE_1
+                or occurrence.request.episode_uid != episode_uid
+                or occurrence.request.candidate_uid != candidate_uid
+                or occurrence.response != SineResponse.REQUEST_BREAK.value
+                or not self._valid_event_time(started_monotonic_ns, earliest)
+            ):
+                return False
+
+            episode.normal_break_held = True
+            episode.normal_break_id = break_id
+            episode.normal_break_generation = break_generation
+            episode.normal_break_started_monotonic_ns = started_monotonic_ns
+            episode.normal_break_source_popup_request_id = source_popup_request_id
+            episode.post_normal_break_completion_kind = ""
+            episode.retry_stage = SineStage.NONE
+            episode.retry_due_monotonic_ns = None
+            self._emit(
+                "SINE_NORMAL_BREAK_HELD",
+                "The same Normal SINE episode was held by factual Normal Break authority.",
+                started_monotonic_ns,
+                episode=episode,
+                occurrence=occurrence,
+                reason="normal_break_started",
+            )
+            return True
+
+    def cancel_normal_break_hold(
+        self,
+        *,
+        candidate_uid: str,
+        episode_uid: str,
+        break_id: str,
+        break_generation: int,
+        occurred_monotonic_ns: int,
+        reason: str,
+    ) -> bool:
+        """Restore original SINE-1 flow after a failed ownership handoff."""
+
+        with self._lock:
+            episode = self._matching_normal_break_hold(
+                candidate_uid=candidate_uid,
+                episode_uid=episode_uid,
+                break_id=break_id,
+                break_generation=break_generation,
+                occurred_monotonic_ns=occurred_monotonic_ns,
+            )
+            if episode is None or type(reason) is not str or not reason.strip():
+                return False
+            occurrence = self._current_popup(episode)
+            held_break_id = episode.normal_break_id
+            held_generation = episode.normal_break_generation
+            self._clear_normal_break_hold(episode)
+            episode.post_normal_break_completion_kind = ""
+            self._emit(
+                "SINE_NORMAL_BREAK_HOLD_CANCELLED",
+                "Normal Break handoff failed; the original SINE flow remained authoritative.",
+                occurred_monotonic_ns,
+                episode=episode,
+                occurrence=occurrence,
+                reason=reason.strip(),
+                normal_break_id=held_break_id,
+                normal_break_generation=held_generation,
+            )
+            return True
+
+    def resume_from_normal_break_as_sine2(
+        self,
+        *,
+        candidate_uid: str,
+        episode_uid: str,
+        break_id: str,
+        break_generation: int,
+        occurred_monotonic_ns: int,
+        completion_kind: str,
+    ) -> bool:
+        """Resume the exact held episode by requesting SINE 2 immediately."""
+
+        allowed_completion_kinds = {
+            "NORMAL_BREAK_COMPLETED",
+            "NORMAL_BREAK_STOPPED",
+        }
+        if type(completion_kind) is not str or completion_kind not in allowed_completion_kinds:
+            return False
+        with self._lock:
+            episode = self._matching_normal_break_hold(
+                candidate_uid=candidate_uid,
+                episode_uid=episode_uid,
+                break_id=break_id,
+                break_generation=break_generation,
+                occurred_monotonic_ns=occurred_monotonic_ns,
+            )
+            if episode is None:
+                return False
+            occurrence = self._current_popup(episode)
+            held_break_id = episode.normal_break_id
+            held_generation = episode.normal_break_generation
+            self._clear_normal_break_hold(episode)
+            episode.post_normal_break_completion_kind = completion_kind
+            self._emit(
+                "SINE_NORMAL_BREAK_RESUMED_AS_SINE_2",
+                "Normal Break ended; the same SINE episode resumed immediately at SINE 2.",
+                occurred_monotonic_ns,
+                episode=episode,
+                occurrence=occurrence,
+                reason=completion_kind,
+                normal_break_id=held_break_id,
+                normal_break_generation=held_generation,
+                normal_break_completion_kind=completion_kind,
+            )
+            self._request_stage(
+                episode,
+                SineStage.SINE_2,
+                occurred_monotonic_ns,
+                "normal_break_resumed_immediately",
+            )
             return True
 
     def record_study_material_result(
@@ -1508,10 +1712,14 @@ class SineAuthority:
                     ebbinghaus_t_star_minutes=None,
                     ebbinghaus_lambda_per_minute=None,
                     presentation_withheld_for_recovery=False,
+                    normal_break_held=False,
+                    normal_break_id="",
+                    normal_break_generation=0,
+                    post_normal_break_completion_kind="",
                 )
             occurrence = self._current_popup(episode)
             now_ns = self._now_ns() if self._active_session() else 0
-            deadline = self._next_deadline(episode)
+            deadline = None if episode.normal_break_held else self._next_deadline(episode)
             remaining = (
                 None
                 if deadline is None
@@ -1544,6 +1752,12 @@ class SineAuthority:
                 presentation_withheld_for_recovery=(
                     episode.presentation_withheld_for_recovery
                 ),
+                normal_break_held=episode.normal_break_held,
+                normal_break_id=episode.normal_break_id,
+                normal_break_generation=episode.normal_break_generation,
+                post_normal_break_completion_kind=(
+                    episode.post_normal_break_completion_kind
+                ),
             )
 
     def emergency_stop(self) -> None:
@@ -1571,6 +1785,7 @@ class SineAuthority:
                 }:
                     self._request_popup_close(episode, occurrence, now_ns, "emergency")
                 episode.protected_red = False
+                self._clear_normal_break_hold(episode)
                 episode.phase = SinePhase.EMERGENCY_STOPPED
                 episode.terminal_reason = "emergency"
             self._emit(
@@ -1605,7 +1820,7 @@ class SineAuthority:
         occurred_ns: int,
         reason: str,
     ) -> None:
-        if episode.terminal:
+        if episode.terminal or episode.normal_break_held:
             return
         current = self._current_popup(episode)
         if current is not None and current.state in {PopupState.REQUESTED, PopupState.DISPLAYED}:
@@ -1727,6 +1942,7 @@ class SineAuthority:
             self._request_popup_close(episode, occurrence, occurred_ns, "episode_resolved")
         was_red = episode.protected_red
         episode.protected_red = False
+        self._clear_normal_break_hold(episode)
         episode.phase = SinePhase.RESOLVED
         episode.terminal_reason = reason
         if was_red:
@@ -1758,6 +1974,7 @@ class SineAuthority:
         }:
             self._request_popup_close(episode, occurrence, occurred_ns, "episode_cancelled")
         episode.protected_red = False
+        self._clear_normal_break_hold(episode)
         episode.phase = SinePhase.CANCELLED
         episode.terminal_reason = reason
         self._emit(
@@ -1840,15 +2057,25 @@ class SineAuthority:
                     SineResponse.REQUEST_BREAK,
                 )
             elif stage is SineStage.SINE_2:
-                headline = "Still Here?"
-                message = (
-                    "You stepped away for a moment, but the loop pulled you back. "
-                    "Your focus window is still open."
-                )
-                responses = (
-                    SineResponse.RETURN_TO_FOCUS,
-                    SineResponse.CONTINUE_SINE,
-                )
+                if _field(episode, "post_normal_break_completion_kind", "") in {
+                    "NORMAL_BREAK_COMPLETED",
+                    "NORMAL_BREAK_STOPPED",
+                }:
+                    headline = "WELCOME BACK"
+                    message = (
+                        "Hope you have refreshed and enjoyed your break. "
+                        "Let's come back to focus."
+                    )
+                else:
+                    headline = "Still Here?"
+                    message = (
+                        "You stepped away for a moment, but the loop pulled you back. "
+                        "Your focus window is still open."
+                    )
+                # Normal SINE 2 now has one return action.  The compatibility
+                # enum/handler for CONTINUE_SINE remains available for old
+                # persisted inputs, but new presentation never offers it.
+                responses = (SineResponse.RETURN_TO_FOCUS,)
             else:
                 headline = "Long Drift Detected"
                 message = (
@@ -2026,6 +2253,9 @@ class SineAuthority:
         response: str = "",
         popup: SinePopupRequest | None = None,
         mirl_display_token: object | None = None,
+        normal_break_id: str | None = None,
+        normal_break_generation: int | None = None,
+        normal_break_completion_kind: str | None = None,
     ) -> None:
         stage = occurrence.request.stage if occurrence is not None else (
             episode.current_stage if episode is not None else SineStage.NONE
@@ -2050,6 +2280,21 @@ class SineAuthority:
             resource_key=episode.resource_key if episode else "",
             popup=popup,
             mirl_display_token=mirl_display_token,
+            normal_break_id=(
+                normal_break_id
+                if normal_break_id is not None
+                else (episode.normal_break_id if episode else "")
+            ),
+            normal_break_generation=(
+                normal_break_generation
+                if normal_break_generation is not None
+                else (episode.normal_break_generation if episode else 0)
+            ),
+            normal_break_completion_kind=(
+                normal_break_completion_kind
+                if normal_break_completion_kind is not None
+                else (episode.post_normal_break_completion_kind if episode else "")
+            ),
         )
         self._pending_facts.append(fact)
         self._last_fact = kind
@@ -2058,6 +2303,46 @@ class SineAuthority:
         facts = tuple(self._pending_facts)
         self._pending_facts.clear()
         return facts
+
+    def _matching_normal_break_hold(
+        self,
+        *,
+        candidate_uid: object,
+        episode_uid: object,
+        break_id: object,
+        break_generation: object,
+        occurred_monotonic_ns: object,
+    ) -> _Episode | None:
+        identities = (candidate_uid, episode_uid, break_id)
+        if any(type(value) is not str or not value for value in identities):
+            return None
+        if type(break_generation) is not int or break_generation <= 0:
+            return None
+        episode = self._episode
+        if (
+            episode is None
+            or episode.terminal
+            or not episode.normal_break_held
+            or episode.candidate_uid != candidate_uid
+            or episode.episode_uid != episode_uid
+            or episode.normal_break_id != break_id
+            or episode.normal_break_generation != break_generation
+            or episode.normal_break_started_monotonic_ns is None
+            or not self._valid_event_time(
+                occurred_monotonic_ns,
+                episode.normal_break_started_monotonic_ns,
+            )
+        ):
+            return None
+        return episode
+
+    @staticmethod
+    def _clear_normal_break_hold(episode: _Episode) -> None:
+        episode.normal_break_held = False
+        episode.normal_break_id = ""
+        episode.normal_break_generation = 0
+        episode.normal_break_started_monotonic_ns = None
+        episode.normal_break_source_popup_request_id = ""
 
     def _active_session(self) -> bool:
         """Return whether SINE will accept observations and new triggers.

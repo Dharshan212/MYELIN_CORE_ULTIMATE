@@ -201,6 +201,7 @@ def build_services(
     from COSINE.cosine import CosineRuntime
     from MIRL.mirl import MirlAuthority
     from PERSISTENCE.storage import EngineStorage
+    from SINE.normal_break import NormalBreakAuthority
     from SINE.sine import SineAuthority
 
     storage = EngineStorage()
@@ -227,6 +228,7 @@ def build_services(
         mirl=MirlAuthority(),
         study=StudyRuntime(),
         cosecant=CosecantRuntime(context_authority=intent, policy=policy),
+        normal_break=NormalBreakAuthority(),
         storage=storage,
     )
 

@@ -1087,6 +1087,47 @@ class EngineStorage:
         receipt = _terminal(self._lane, self._submit("append SINE fact batch", write))
         return receipt.state is ReceiptState.COMMITTED
 
+    def append_normal_break_facts(self, facts) -> bool:
+        """Durably append immutable Normal Break lifecycle facts.
+
+        Storage preserves the authority's identity and timestamps verbatim.  It
+        does not validate duration policy or decide ownership transfer.
+        """
+
+        batch = tuple(facts)
+        if not batch:
+            return True
+
+        def write(connection):
+            for fact in batch:
+                connection.execute(
+                    "INSERT INTO normal_break_events(event_id, session_id, "
+                    "break_id, generation, sequence, episode_uid, candidate_uid, "
+                    "kind, occurred_monotonic_ns, payload_json, created_at_utc, "
+                    "schema_version) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(_field(fact, "event_id", "")),
+                        _field(fact, "session_id"),
+                        str(_field(fact, "break_id", "")),
+                        int(_field(fact, "generation", 0) or 0),
+                        int(_field(fact, "sequence", 0) or 0),
+                        str(_field(fact, "episode_uid", "")),
+                        str(_field(fact, "candidate_uid", "")),
+                        str(_enum_value(_field(fact, "kind", ""))),
+                        int(_field(fact, "occurred_monotonic_ns", 0) or 0),
+                        _json_text(fact),
+                        _utc_now(),
+                        str(_field(fact, "schema_version", "")),
+                    ),
+                )
+            return TransactionResult()
+
+        receipt = _terminal(
+            self._lane,
+            self._submit("append Normal Break fact batch", write),
+        )
+        return receipt.state is ReceiptState.COMMITTED
+
     def append_cosecant_facts(self, *, session_id: int | None, facts) -> bool:
         batch = tuple(facts)
         if not batch:

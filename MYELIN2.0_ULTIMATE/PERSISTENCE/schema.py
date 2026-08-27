@@ -8,13 +8,14 @@ from typing import Final
 from PERSISTENCE.database import connect_database
 
 
-SCHEMA_VERSION: Final = 2
+SCHEMA_VERSION: Final = 3
 MANAGED_TABLES: Final = frozenset(
     {
         "myelin_meta",
         "sessions",
         "triggers",
         "sine_facts",
+        "normal_break_events",
         "mirl_events",
         "cosine_events",
         "study_events",
@@ -65,6 +66,24 @@ CREATE TABLE IF NOT EXISTS sine_facts (
 );
 CREATE INDEX IF NOT EXISTS ix_sine_facts_session_time
     ON sine_facts(session_id, occurred_monotonic_ns, id);
+
+CREATE TABLE IF NOT EXISTS normal_break_events (
+    event_id TEXT PRIMARY KEY,
+    session_id INTEGER REFERENCES sessions(id),
+    break_id TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation > 0),
+    sequence INTEGER NOT NULL CHECK (sequence > 0),
+    episode_uid TEXT NOT NULL,
+    candidate_uid TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    occurred_monotonic_ns INTEGER NOT NULL CHECK (occurred_monotonic_ns >= 0),
+    payload_json TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    schema_version TEXT NOT NULL,
+    UNIQUE(break_id, sequence)
+);
+CREATE INDEX IF NOT EXISTS ix_normal_break_events_session_time
+    ON normal_break_events(session_id, occurred_monotonic_ns, event_id);
 
 CREATE TABLE IF NOT EXISTS mirl_events (
     event_id TEXT PRIMARY KEY,

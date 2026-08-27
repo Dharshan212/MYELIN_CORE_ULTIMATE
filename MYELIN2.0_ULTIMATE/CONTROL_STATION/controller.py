@@ -68,6 +68,7 @@ TERMINAL_KINDS: Final = frozenset(
         "trigger_processing_failed",
         "emergency_completed",
         "sine_fact",
+        "normal_break_fact",
         "resource_intent_fact",
         "cosine_effect",
         "cosecant_fact",
@@ -209,6 +210,7 @@ class ControlStationController(QObject):
     sine_watch_status_changed = pyqtSignal(object)
     mine_watch_status_changed = pyqtSignal(object)
     mirl_health_status_changed = pyqtSignal(object)
+    normal_break_fact_changed = pyqtSignal(object)
     protected_red_changed = pyqtSignal(bool)
 
     # Emergency is requested here, but lifecycle.py decides application exit.
@@ -264,6 +266,7 @@ class ControlStationController(QObject):
         self._elapsed_timer.timeout.connect(self._update_elapsed_time)
 
         self._sine_presenter = None
+        self._normal_break_presenter = None
         self._study_confirmation_presenter = None
         self._popup_dispatchers_installed = False
 
@@ -301,7 +304,7 @@ class ControlStationController(QObject):
         )
 
     def install_popup_dispatchers(self, app, *, owner=None) -> None:
-        """Install the three presentation bridges after QApplication exists.
+        """Install the presentation bridges after QApplication exists.
 
         SINE intentionally has no global compatibility dispatcher.  Its
         presenter is owned here and sends factual callbacks through the same
@@ -315,7 +318,7 @@ class ControlStationController(QObject):
             install_popup_dispatcher as install_study,
         )
         from COSINE.popup import install_cosine_dispatcher
-        from SINE.popup import SinePopupPresenter
+        from SINE.popup import NormalBreakPresenter, SinePopupPresenter
 
         install_cosine_dispatcher(app)
         install_study(app)
@@ -337,6 +340,17 @@ class ControlStationController(QObject):
             )
         )
         self._sine_presenter = presenter
+        normal_break = NormalBreakPresenter(parent=self)
+        normal_break.start_requested.connect(
+            lambda payload: self._submit_normal_break_command("start", payload)
+        )
+        normal_break.cancel_requested.connect(
+            lambda payload: self._submit_normal_break_command("cancel", payload)
+        )
+        normal_break.stop_requested.connect(
+            lambda payload: self._submit_normal_break_command("stop", payload)
+        )
+        self._normal_break_presenter = normal_break
         study_confirmation = StudyConfirmationPresenter(owner=owner, parent=self)
         study_confirmation.popup_shown.connect(
             lambda request_id, occurred_ns, hwnd: self._send_study_confirmation_callback(
@@ -416,6 +430,48 @@ class ControlStationController(QObject):
         presenter = self._sine_presenter
         if presenter is not None:
             presenter.show_action_rejection(str(request_id), str(message))
+
+    def _submit_normal_break_command(self, action: str, payload: object) -> bool:
+        """Transport one exact Normal Break action and wait for backend admission."""
+
+        presenter = self._normal_break_presenter
+        if action not in {"start", "cancel", "stop"} or not isinstance(payload, dict):
+            if presenter is not None:
+                presenter.show_command_result(
+                    payload,
+                    action=action,
+                    accepted=False,
+                    message="INVALID NORMAL BREAK ACTION",
+                )
+            return False
+
+        acknowledgement: queue.Queue = queue.Queue(maxsize=1)
+        accepted = self._enqueue_command(
+            f"normal_break_{action}",
+            dict(payload),
+            acknowledgement,
+        )
+        message = "NORMAL BREAK ACTION NOT SENT · ENGINE BUSY · TRY AGAIN"
+        if accepted:
+            try:
+                accepted = bool(acknowledgement.get(timeout=1.5))
+                message = "NORMAL BREAK ACTION NOT ACCEPTED · TRY AGAIN"
+            except queue.Empty:
+                accepted = False
+                message = "ACCEPTANCE NOT CONFIRMED · TRY AGAIN"
+        if presenter is not None:
+            presenter.show_command_result(
+                payload,
+                action=action,
+                accepted=bool(accepted),
+                message=message,
+            )
+        return bool(accepted)
+
+    def request_normal_break_stop(self, payload: object) -> bool:
+        """Expose the existing exact STOP transport to the Control Station card."""
+
+        return self._submit_normal_break_command("stop", payload)
 
     def _send_study_confirmation_callback(
         self,
@@ -700,6 +756,8 @@ class ControlStationController(QObject):
         self.mirl_health_status_changed.emit(None)
         if self._study_confirmation_presenter is not None:
             self._study_confirmation_presenter.reset_presentation_epoch()
+        if self._normal_break_presenter is not None:
+            self._normal_break_presenter.reset_presentation_epoch()
         # C11-A-L5.  The Study surface keeps a generation-ordering baseline so a
         # stale snapshot cannot repaint over a newer one.  A new session builds
         # fresh Study and COSECANT authorities whose generations legitimately
@@ -904,6 +962,16 @@ class ControlStationController(QObject):
             # swallow that prepared row at the presentation bridge.
             return not bool(str(raw.get("badge", "") or "").strip())
 
+        if kind == "normal_break_fact":
+            presenter = self._normal_break_presenter
+            fact = raw.get("fact")
+            if presenter is not None:
+                presenter.apply_fact(fact)
+            self.normal_break_fact_changed.emit(fact)
+            # Preserve the pre-Phase-3 append-only telemetry row while also
+            # delivering the same immutable fact to its presentation surface.
+            return False
+
         if kind == "resource_intent_fact":
             presenter = self._study_confirmation_presenter
             if presenter is not None:
@@ -1001,6 +1069,11 @@ class ControlStationController(QObject):
         if self._study_confirmation_presenter is not None:
             try:
                 self._study_confirmation_presenter.close_all("controller_shutdown")
+            except Exception:
+                pass
+        if self._normal_break_presenter is not None:
+            try:
+                self._normal_break_presenter.close_all()
             except Exception:
                 pass
         try:

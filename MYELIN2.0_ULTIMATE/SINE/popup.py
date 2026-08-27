@@ -87,12 +87,14 @@ from PyQt6.QtWidgets import (
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from SINE.sine import SineFact, SinePopupRequest, SineResponse, SineStage
+from SINE.normal_break import NormalBreakFact, NormalBreakFactKind
 
 
 POPUP_SCHEMA_VERSION: Final = "myelin-sine-popup-v1"
@@ -100,6 +102,9 @@ COUNTDOWN_REFRESH_MS: Final = 250
 POPUP_WIDTH: Final = 620
 STANDARD_HEIGHT: Final = 460
 PROTECTED_RED_HEIGHT: Final = 360
+NORMAL_BREAK_WIDTH: Final = 520
+NORMAL_BREAK_SELECTOR_HEIGHT: Final = 330
+NORMAL_BREAK_ACTIVE_HEIGHT: Final = 310
 ENTRANCE_DURATION_MS: Final = 320
 ENTRANCE_DRIFT_PX: Final = 14
 ENTRANCE_START_OPACITY: Final = 0.88
@@ -851,6 +856,478 @@ class SinePopupWindow(QWidget):
         )
 
 
+def _normal_break_identity(fact: NormalBreakFact) -> dict[str, object]:
+    """Copy one exact backend identity without coercion or interpretation."""
+
+    return {
+        "break_id": fact.break_id,
+        "generation": fact.generation,
+        "episode_uid": fact.episode_uid,
+        "candidate_uid": fact.candidate_uid,
+        "source_sine_popup_request_id": fact.source_sine_popup_request_id,
+    }
+
+
+class _NormalBreakSurface(QWidget):
+    """Shared mechanics for fact-driven Normal Break presentation surfaces."""
+
+    def __init__(self, fact: NormalBreakFact, *, height: int) -> None:
+        super().__init__(None)
+        self.fact = fact
+        self.identity = _normal_break_identity(fact)
+        self._authority_close_allowed = False
+        self._native_hwnd = 0
+        self._status: QLabel | None = None
+        self._action_buttons: tuple[QPushButton, ...] = ()
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setFixedSize(NORMAL_BREAK_WIDTH, height)
+
+    def present(self) -> None:
+        app = QApplication.instance()
+        if app is None:
+            raise RuntimeError("QApplication is required for Normal Break presentation")
+        screen = QApplication.screenAt(QCursor.pos()) or app.primaryScreen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            self.move(
+                area.x() + max(12, (area.width() - self.width()) // 2),
+                area.y() + max(12, (area.height() - self.height()) // 2),
+            )
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        QTimer.singleShot(0, self._register_visible_hwnd)
+
+    def _register_visible_hwnd(self) -> None:
+        if not self.isVisible():
+            return
+        try:
+            self._native_hwnd = int(self.winId())
+        except Exception:
+            self._native_hwnd = 0
+        if self._native_hwnd > 0:
+            _register_hwnd(self._native_hwnd)
+
+    def set_authority_result(self, message: str, *, allow_retry: bool) -> None:
+        if self._status is not None:
+            self._status.setText(str(message or "WAITING FOR NORMAL BREAK AUTHORITY").upper())
+        for button in self._action_buttons:
+            button.setEnabled(bool(allow_retry))
+
+    def close_from_authority(self) -> None:
+        self._authority_close_allowed = True
+        self.close()
+
+    def force_close(self) -> None:
+        self._authority_close_allowed = True
+        self.close()
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override
+        if not self._authority_close_allowed:
+            event.ignore()
+            if self._status is not None:
+                self._status.setText(
+                    "MANUAL CLOSE BLOCKED · USE THE AUTHORITATIVE ACTION BELOW"
+                )
+            return
+        _unregister_hwnd(self._native_hwnd)
+        event.accept()
+        super().closeEvent(event)
+
+    @staticmethod
+    def _shell(parent: QWidget, *, title: str, subtitle: str) -> tuple[QFrame, QVBoxLayout]:
+        root = QVBoxLayout(parent)
+        root.setContentsMargins(3, 3, 3, 3)
+        shell = QFrame(parent)
+        shell.setObjectName("normalBreakShell")
+        root.addWidget(shell)
+        body = QVBoxLayout(shell)
+        body.setContentsMargins(28, 24, 28, 22)
+        body.setSpacing(14)
+
+        eyebrow = QLabel("MYELIN · NORMAL BREAK", shell)
+        eyebrow.setObjectName("breakEyebrow")
+        eyebrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        eyebrow.setFont(_font(11, weight=QFont.Weight.DemiBold, spacing=1.2))
+        body.addWidget(eyebrow)
+
+        headline = QLabel(title, shell)
+        headline.setObjectName("breakHeadline")
+        headline.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        headline.setFont(_font(25, weight=QFont.Weight.ExtraBold))
+        body.addWidget(headline)
+
+        message = QLabel(subtitle, shell)
+        message.setObjectName("breakMessage")
+        message.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        message.setWordWrap(True)
+        message.setFont(_font(12.5))
+        body.addWidget(message)
+        return shell, body
+
+    def _apply_break_style(self) -> None:
+        palette = PALETTES["amber"]
+        hover = QColor(palette.accent).lighter(114).name()
+        pressed = QColor(palette.accent).darker(114).name()
+        self.setStyleSheet(
+            f"""
+            QWidget {{ background: {palette.halo}; }}
+            QFrame#normalBreakShell {{
+                background: {palette.panel};
+                border: 1.5px solid {palette.accent};
+                border-radius: 16px;
+            }}
+            QLabel#breakEyebrow, QLabel#breakFooter {{ color: {palette.muted}; background: transparent; }}
+            QLabel#breakHeadline {{ color: {palette.accent}; background: transparent; }}
+            QLabel#breakMessage {{ color: {palette.text}; background: transparent; }}
+            QLabel#breakStatus, QLabel#breakCountdown {{ color: {palette.accent}; background: transparent; }}
+            QLineEdit#breakMinutes {{
+                color: {palette.text}; background: {palette.halo};
+                border: 1.5px solid {palette.accent}; border-radius: 9px;
+                padding: 8px 12px;
+            }}
+            QLineEdit#breakMinutes:focus {{ border: 2px solid {palette.text}; }}
+            QPushButton#breakPrimary {{
+                color: {palette.button_text_on_accent}; background: {palette.accent};
+                border: none; border-radius: 10px; padding: 7px 18px;
+            }}
+            QPushButton#breakPrimary:hover {{ background: {hover}; }}
+            QPushButton#breakPrimary:pressed {{ background: {pressed}; }}
+            QPushButton#breakSecondary {{
+                color: {palette.accent}; background: transparent;
+                border: 1.5px solid {palette.accent}; border-radius: 10px;
+                padding: 7px 18px;
+            }}
+            QPushButton#breakSecondary:hover {{ background: {palette.halo}; }}
+            QPushButton:disabled {{ color: {palette.muted}; background: {palette.accent_dim}; }}
+            """
+        )
+
+
+class NormalBreakSelectorWindow(_NormalBreakSurface):
+    """Duration selector for one factual AWAITING_DURATION branch."""
+
+    start_requested = pyqtSignal(object)
+    cancel_requested = pyqtSignal(object)
+
+    def __init__(self, fact: NormalBreakFact) -> None:
+        super().__init__(fact, height=NORMAL_BREAK_SELECTOR_HEIGHT)
+        self._action_in_flight = False
+        self.setWindowTitle("MYELIN — TAKE A BREAK")
+        self.setAccessibleName("MYELIN Normal Break duration selector")
+        shell, body = self._shell(
+            self,
+            title="TAKE A BREAK",
+            subtitle="Choose a whole-minute break. No duration is selected by default.",
+        )
+
+        duration_row = QHBoxLayout()
+        duration_row.addStretch(1)
+        self._minutes = QLineEdit(shell)
+        self._minutes.setObjectName("breakMinutes")
+        self._minutes.setPlaceholderText("5–30")
+        self._minutes.setMaxLength(2)
+        self._minutes.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._minutes.setFixedWidth(110)
+        self._minutes.setFont(_font(18, weight=QFont.Weight.Bold, mono=True))
+        self._minutes.setAccessibleName("Break duration in whole minutes")
+        duration_row.addWidget(self._minutes)
+        unit = QLabel("MIN", shell)
+        unit.setObjectName("breakMessage")
+        unit.setFont(_font(13, weight=QFont.Weight.Bold, mono=True))
+        duration_row.addWidget(unit)
+        duration_row.addStretch(1)
+        body.addLayout(duration_row)
+
+        self._status = QLabel("5–30 WHOLE MINUTES", shell)
+        self._status.setObjectName("breakStatus")
+        self._status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._status.setFont(_font(10.5, weight=QFont.Weight.DemiBold, mono=True))
+        body.addWidget(self._status)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        self._start = QPushButton("START BREAK", shell)
+        self._start.setObjectName("breakPrimary")
+        self._cancel = QPushButton("CANCEL", shell)
+        self._cancel.setObjectName("breakSecondary")
+        for button in (self._start, self._cancel):
+            button.setMinimumHeight(44)
+            button.setMinimumWidth(170)
+            button.setFont(_font(12, weight=QFont.Weight.Bold, spacing=0.5))
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            actions.addWidget(button)
+        actions.addStretch(1)
+        body.addLayout(actions)
+        self._action_buttons = (self._start, self._cancel)
+        self._start.clicked.connect(self._request_start)
+        self._cancel.clicked.connect(self._request_cancel)
+        self._minutes.returnPressed.connect(self._request_start)
+        self._apply_break_style()
+
+    def set_authority_result(self, message: str, *, allow_retry: bool) -> None:
+        self._action_in_flight = not bool(allow_retry)
+        self._minutes.setEnabled(bool(allow_retry))
+        super().set_authority_result(message, allow_retry=allow_retry)
+
+    def _request_start(self) -> None:
+        if self._action_in_flight:
+            return
+        text = self._minutes.text().strip()
+        if not text or not text.isascii() or not text.isdigit():
+            self._status.setText("ENTER ONE WHOLE NUMBER FROM 5 TO 30")
+            return
+        minutes = int(text)
+        if minutes < 5 or minutes > 30:
+            self._status.setText("BREAK MUST BE BETWEEN 5 AND 30 WHOLE MINUTES")
+            return
+        payload = dict(self.identity)
+        payload["selected_minutes"] = minutes
+        self._action_in_flight = True
+        self._minutes.setEnabled(False)
+        self.set_authority_result(
+            "START SENT · WAITING FOR FACTUAL BREAK START",
+            allow_retry=False,
+        )
+        self.start_requested.emit(payload)
+
+    def _request_cancel(self) -> None:
+        if self._action_in_flight:
+            return
+        self._action_in_flight = True
+        self._minutes.setEnabled(False)
+        self.set_authority_result(
+            "CANCEL SENT · WAITING FOR AUTHORITY",
+            allow_retry=False,
+        )
+        self.cancel_requested.emit(dict(self.identity))
+
+
+class NormalBreakActiveWindow(_NormalBreakSurface):
+    """Presentation-only countdown projected from the backend STARTED deadline."""
+
+    presentation_timed_out = pyqtSignal()
+
+    def __init__(self, fact: NormalBreakFact) -> None:
+        if type(fact.deadline_monotonic_ns) is not int:
+            raise ValueError("NORMAL_BREAK_STARTED requires an exact backend deadline")
+        super().__init__(fact, height=NORMAL_BREAK_ACTIVE_HEIGHT)
+        self._deadline_ns = fact.deadline_monotonic_ns
+        self.setWindowTitle("MYELIN — BREAK ACTIVE")
+        self.setAccessibleName("MYELIN active Normal Break")
+        shell, body = self._shell(
+            self,
+            title="BREAK ACTIVE",
+            subtitle="The break clock is owned by MYELIN's Normal Break authority.",
+        )
+        self._countdown = QLabel("--:--", shell)
+        self._countdown.setObjectName("breakCountdown")
+        self._countdown.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._countdown.setFont(_font(30, weight=QFont.Weight.ExtraBold, mono=True))
+        body.addWidget(self._countdown)
+
+        self._status = QLabel("SAME SINE EPISODE HELD", shell)
+        self._status.setObjectName("breakStatus")
+        self._status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._status.setFont(_font(10.5, weight=QFont.Weight.DemiBold, mono=True))
+        body.addWidget(self._status)
+
+        self._enjoy = QLabel("ENJOY YOUR BREAK", shell)
+        self._enjoy.setObjectName("breakStatus")
+        self._enjoy.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._enjoy.setFont(_font(13, weight=QFont.Weight.Bold, spacing=0.8))
+        body.addWidget(self._enjoy)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(COUNTDOWN_REFRESH_MS)
+        self._timer.timeout.connect(self._refresh_countdown)
+        self._presentation_timer = QTimer(self)
+        self._presentation_timer.setSingleShot(True)
+        self._presentation_timer.setInterval(3_000)
+        self._presentation_timer.timeout.connect(self._presentation_timeout_reached)
+        self._apply_break_style()
+        self._refresh_countdown()
+
+    def present(self) -> None:
+        super().present()
+        self._timer.start()
+        self._presentation_timer.start()
+
+    def _refresh_countdown(self) -> None:
+        remaining_ns = max(0, self._deadline_ns - time.monotonic_ns())
+        remaining_seconds = (remaining_ns + 999_999_999) // 1_000_000_000
+        minutes, seconds = divmod(int(remaining_seconds), 60)
+        self._countdown.setText(f"{minutes:02d}:{seconds:02d}")
+        if remaining_ns == 0:
+            self._status.setText("DEADLINE REACHED · WAITING FOR AUTHORITY FACT")
+
+    def _presentation_timeout_reached(self) -> None:
+        self.presentation_timed_out.emit()
+        self.force_close()
+
+    def close_from_authority(self) -> None:
+        self._timer.stop()
+        self._presentation_timer.stop()
+        super().close_from_authority()
+
+    def force_close(self) -> None:
+        self._timer.stop()
+        self._presentation_timer.stop()
+        super().force_close()
+
+
+class NormalBreakPresenter(QObject):
+    """Fact-driven Normal Break UI bridge with no lifecycle or clock authority."""
+
+    start_requested = pyqtSignal(object)
+    cancel_requested = pyqtSignal(object)
+    stop_requested = pyqtSignal(object)
+    _fact_queued = pyqtSignal(object)
+    _close_all_queued = pyqtSignal()
+
+    def __init__(self, *, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._selector: NormalBreakSelectorWindow | None = None
+        self._active: NormalBreakActiveWindow | None = None
+        self._accepting_facts = True
+        self._fact_queued.connect(
+            self._apply_normal_break_fact_on_gui_thread,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._close_all_queued.connect(self._close_all_on_gui_thread, Qt.ConnectionType.QueuedConnection)
+
+    def apply_fact(self, fact: NormalBreakFact) -> None:
+        if QThread.currentThread() == self.thread():
+            self._apply_normal_break_fact_on_gui_thread(fact)
+        else:
+            self._fact_queued.emit(fact)
+
+    @pyqtSlot(object)
+    def _apply_normal_break_fact_on_gui_thread(self, fact: object) -> None:
+        if not self._accepting_facts or not isinstance(fact, NormalBreakFact):
+            return
+        kind = fact.kind
+        if kind is NormalBreakFactKind.DURATION_REQUESTED:
+            self._close_selector()
+            selector = NormalBreakSelectorWindow(fact)
+            selector.start_requested.connect(self.start_requested)
+            selector.cancel_requested.connect(self.cancel_requested)
+            selector.destroyed.connect(lambda _obj=None: self._forget_selector(selector))
+            self._selector = selector
+            selector.present()
+            return
+        if kind is NormalBreakFactKind.STARTED:
+            self._close_selector_if_matching(fact)
+            self._close_active()
+            try:
+                active = NormalBreakActiveWindow(fact)
+            except (TypeError, ValueError):
+                return
+            active.presentation_timed_out.connect(
+                lambda: self._forget_active(active)
+            )
+            active.destroyed.connect(lambda _obj=None: self._forget_active(active))
+            self._active = active
+            active.present()
+            return
+        if kind is NormalBreakFactKind.STOP_REQUESTED:
+            return
+        if kind in {
+            NormalBreakFactKind.CANCELLED,
+            NormalBreakFactKind.START_ROLLED_BACK,
+        }:
+            self._close_selector_if_matching(fact)
+            self._close_active_if_matching(fact)
+            return
+        if kind in {
+            NormalBreakFactKind.STOPPED,
+            NormalBreakFactKind.COMPLETED,
+            NormalBreakFactKind.TERMINATED,
+        }:
+            self._close_active_if_matching(fact)
+            self._close_selector_if_matching(fact)
+
+    def show_command_result(
+        self,
+        payload: object,
+        *,
+        action: str,
+        accepted: bool,
+        message: str,
+    ) -> None:
+        if action == "stop":
+            return
+        target = self._selector
+        if target is None or not self._matches_payload(target, payload):
+            return
+        if accepted:
+            waiting = {
+                "start": "START ACCEPTED · WAITING FOR FACTUAL BREAK START",
+                "cancel": "CANCEL ACCEPTED · WAITING FOR AUTHORITY FACT",
+                "stop": "STOP ACCEPTED · WAITING FOR FACTUAL BREAK END",
+            }[action]
+            target.set_authority_result(waiting, allow_retry=False)
+        else:
+            target.set_authority_result(message, allow_retry=True)
+
+    def reset_presentation_epoch(self) -> None:
+        self.close_all()
+        self._accepting_facts = True
+
+    def close_all(self) -> None:
+        if QThread.currentThread() == self.thread():
+            self._close_all_on_gui_thread()
+        else:
+            self._close_all_queued.emit()
+
+    @pyqtSlot()
+    def _close_all_on_gui_thread(self) -> None:
+        self._accepting_facts = False
+        self._close_selector()
+        self._close_active()
+
+    @staticmethod
+    def _matches(window: _NormalBreakSurface | None, fact: NormalBreakFact) -> bool:
+        return bool(window is not None and window.identity == _normal_break_identity(fact))
+
+    @staticmethod
+    def _matches_payload(window: _NormalBreakSurface, payload: object) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        return all(payload.get(key) == value for key, value in window.identity.items())
+
+    def _close_selector_if_matching(self, fact: NormalBreakFact) -> None:
+        if self._matches(self._selector, fact):
+            self._close_selector()
+
+    def _close_active_if_matching(self, fact: NormalBreakFact) -> None:
+        if self._matches(self._active, fact):
+            self._close_active()
+
+    def _close_selector(self) -> None:
+        selector, self._selector = self._selector, None
+        if selector is not None:
+            selector.close_from_authority()
+
+    def _close_active(self) -> None:
+        active, self._active = self._active, None
+        if active is not None:
+            active.close_from_authority()
+
+    def _forget_selector(self, selector: NormalBreakSelectorWindow) -> None:
+        if self._selector is selector:
+            self._selector = None
+
+    def _forget_active(self, active: NormalBreakActiveWindow) -> None:
+        if self._active is active:
+            self._active = None
+
+
 class SinePopupPresenter(QObject):
     """Qt-main-thread presenter and lifecycle bridge for SINE popup windows."""
 
@@ -1085,6 +1562,9 @@ class SinePopupPresenter(QObject):
 
 __all__ = (
     "POPUP_SCHEMA_VERSION",
+    "NormalBreakActiveWindow",
+    "NormalBreakPresenter",
+    "NormalBreakSelectorWindow",
     "PopupPalette",
     "SinePopupPresenter",
     "SinePopupWindow",

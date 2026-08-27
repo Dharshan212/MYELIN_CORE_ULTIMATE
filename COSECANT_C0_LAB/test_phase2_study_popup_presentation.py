@@ -136,14 +136,13 @@ def test_p2_10_return_to_study_button_is_intent_only(app):
         app.processEvents()
 
 
-def test_p2_11_normal_sine_action_policy_is_unchanged():
+def test_p2_11_normal_sine_action_policy_preserves_sine1_and_phase3_finalizes_sine2():
     assert _presentation(SineStage.SINE_1, study_mode=False).allowed_responses == (
         SineResponse.RETURN_TO_FOCUS,
         SineResponse.REQUEST_BREAK,
     )
     assert _presentation(SineStage.SINE_2, study_mode=False).allowed_responses == (
         SineResponse.RETURN_TO_FOCUS,
-        SineResponse.CONTINUE_SINE,
     )
     assert _presentation(SineStage.SINE_3, study_mode=False).allowed_responses == ()
 
@@ -293,4 +292,3 @@ def test_p2_17_continuity_popup_contains_no_timer_or_return_verifier():
     assert "QTimer" not in calls
     assert "CosecantRuntime" not in calls
     assert "StudyReturnObservation" not in calls
-

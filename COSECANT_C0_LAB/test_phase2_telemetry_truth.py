@@ -442,7 +442,13 @@ def test_p2_study_a_b_study_precedence_survives_transport_and_rendering():
 
 def test_p2_16_phase1_gate_is_still_present_and_precedes_no_observer():
     route = inspect.getsource(WindowsMonitorCoordinator._route_context)
-    assert "self.services.mirl.observe(context)" in route
+    mirl_route = inspect.getsource(
+        WindowsMonitorCoordinator._observe_mirl_for_context
+    )
+    assert "self._observe_mirl_for_context(context)" in route
+    assert "self.services.mirl.observe(context)" in mirl_route
+    assert "record_recovery_observation" in mirl_route
+    assert "self._normal_break_owns_pause()" in mirl_route
     assert "self.services.sine.observe(context)" in route
     assert "self.services.blacklist.observe(context)" in route
     assert "self.services.study.advance()" in route

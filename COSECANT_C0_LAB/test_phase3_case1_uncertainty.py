@@ -410,7 +410,9 @@ def test_c1_15_ebbinghaus_and_sine_timing_authorities_are_byte_exact():
     # MIRL's verified recovery entry, including Normal Protected Red. The
     # timing authority remains byte-pinned at this reviewed implementation and
     # its policy values below stay independently explicit.
-    assert _sha256("SINE/sine.py") == "CC8EDF0243236A3FC9860BCE2352AF97C9EA4553F6EF5DB9C55B66936EAE76B3"
+    # The reviewed Normal Break Phase-2 integration adds same-episode hold and
+    # immediate SINE-2 resume sockets without changing the timing policy below.
+    assert _sha256("SINE/sine.py") == "9BD349C98C183F14331130C3F78DAC54018679C9D50C72E6DDC79379FAE8BF12"
     assert _sha256("CORE_ENGINE/trigger.py") == "161BB48E6ACBD15A2754A15E1F41540AAE289EB6CA1D0E880B81BC8120B4FC7A"
     assert SinePolicy().stage_2_delay_seconds == 600.0
     assert SinePolicy().stage_3_delay_seconds == 795.0

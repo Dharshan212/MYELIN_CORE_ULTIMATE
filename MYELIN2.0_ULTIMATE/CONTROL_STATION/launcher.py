@@ -2536,6 +2536,9 @@ class ControlPage(QWidget):
         self._last_sine_console_signature: tuple[object, ...] | None = None
         self._latest_blacklist_live_view = None
         self._latest_sine_live_view = None
+        self._active_normal_break_fact = None
+        self._normal_break_source = "\u2014"
+        self._normal_break_stop_in_flight = False
         self._session_elapsed = QElapsedTimer()
         self._session_tick = QTimer(self)
         self._session_tick.setInterval(1000)
@@ -2621,6 +2624,49 @@ class ControlPage(QWidget):
         current_body.addWidget(self._resource_reason)
         left.addWidget(current)
 
+        # --------------------------------------- Normal Break Continuity
+        normal_break, normal_break_body = make_card()
+        self._normal_break_card = normal_break
+        head, self._normal_break_hint = card_head(
+            "Normal Break Continuity", "Inactive"
+        )
+        normal_break_body.addWidget(head)
+        normal_break_body.addSpacing(16)
+        break_row = QHBoxLayout()
+        break_row.setSpacing(14)
+        source, self._normal_break_source_value = stat_box(
+            "Source", "\u2014", "text", 16.0
+        )
+        elapsed, self._normal_break_elapsed = stat_box(
+            "Elapsed / Duration", "\u2014 / \u2014", "text", 16.0
+        )
+        state, self._normal_break_state = stat_box(
+            "State", "Inactive", "text", 16.0
+        )
+        for widget in (source, elapsed, state):
+            break_row.addWidget(widget, 1)
+        normal_break_body.addLayout(break_row)
+        normal_break_body.addSpacing(12)
+        progress_row, self._normal_break_track, self._normal_break_progress = bar_row(
+            "Break progress", "cyan", 118
+        )
+        normal_break_body.addWidget(progress_row)
+        normal_break_body.addSpacing(12)
+        self._normal_break_stop = QPushButton("STOP BREAK", normal_break)
+        self._normal_break_stop.setObjectName("btnStop")
+        self._normal_break_stop.setFont(make_font(12, 700, spacing=0.8))
+        self._normal_break_stop.setCursor(
+            QCursor(Qt.CursorShape.PointingHandCursor)
+        )
+        self._normal_break_stop.setMinimumHeight(44)
+        self._normal_break_stop.setAccessibleName("Stop the active Normal Break")
+        self._normal_break_stop.clicked.connect(self._request_normal_break_stop)
+        normal_break_body.addWidget(
+            self._normal_break_stop, 0, Qt.AlignmentFlag.AlignHCenter
+        )
+        self._normal_break_stop.hide()
+        left.addWidget(normal_break)
+
         # -------------------------------------------- SINE Escalation Stage
         sine, sine_body = make_card()
         head, _ = card_head("SINE Escalation Stage", "Authoritative runtime state")
@@ -2700,11 +2746,12 @@ class ControlPage(QWidget):
         left.addWidget(research)
         left.addStretch(1)
 
-        for card in (health, current, sine, mine, research):
+        for card in (health, current, normal_break, sine, mine, research):
             card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         # --------------------------------------------------- Live Telemetry
         feed_card, feed_body = make_card()
+        self._feed_card = feed_card
         head, self._feed_count = card_head("Live Telemetry", "Awaiting events")
         feed_body.addWidget(head)
         feed_body.addSpacing(16)
@@ -2769,6 +2816,8 @@ class ControlPage(QWidget):
         """Reflect engine status in the pill, the buttons and the ring clock."""
 
         text = str(getattr(status, "name", status)).replace("_", " ").upper()
+        if text in {"IDLE", "STOPPING", "STOPPED", "EMERGENCY", "ERROR"}:
+            self._clear_normal_break_presentation()
         active = text == "ACTIVE"
         paused = text == "PAUSED"
         running = active or paused
@@ -2808,6 +2857,121 @@ class ControlPage(QWidget):
 
         self._feed.append(time_text=time_text, text=text, tag=tag, tone=tone)
         self._feed_count.setText(f"{self._feed.count} events")
+
+    def render_normal_break_fact(self, fact: object) -> None:
+        """Project immutable Normal Break facts without owning their lifecycle."""
+
+        if fact is None:
+            self._clear_normal_break_presentation()
+            return
+        kind_value = self._value(fact, "kind")
+        kind = str(getattr(kind_value, "value", kind_value) or "").replace(
+            "_", " "
+        ).upper()
+        if kind == "NORMAL BREAK STARTED":
+            self._active_normal_break_fact = fact
+            source = str(
+                self._value(
+                    self._latest_blacklist_live_view,
+                    "resource_label",
+                    "",
+                )
+                or ""
+            ).strip()
+            self._normal_break_source = source or "\u2014"
+            self._normal_break_stop_in_flight = False
+            self.refresh_normal_break()
+            return
+        if kind == "NORMAL BREAK STOP REQUESTED":
+            if self._normal_break_matches(fact):
+                self._normal_break_stop_in_flight = True
+                self.refresh_normal_break()
+            return
+        if kind in {
+            "NORMAL BREAK STOPPED",
+            "NORMAL BREAK COMPLETED",
+            "NORMAL BREAK TERMINATED",
+            "NORMAL BREAK START ROLLED BACK",
+        } and self._normal_break_matches(fact):
+            self._clear_normal_break_presentation()
+
+    def refresh_normal_break(self, _elapsed_seconds: object = None) -> None:
+        """Redraw elapsed/progress from the factual STARTED timestamps."""
+
+        del _elapsed_seconds
+        fact = self._active_normal_break_fact
+        if fact is None:
+            self._render_normal_break_inactive()
+            return
+        started_ns = self._value(fact, "started_monotonic_ns")
+        deadline_ns = self._value(fact, "deadline_monotonic_ns")
+        if type(started_ns) is not int or type(deadline_ns) is not int:
+            self._clear_normal_break_presentation()
+            return
+        duration_ns = max(0, deadline_ns - started_ns)
+        elapsed_ns = min(duration_ns, max(0, time.monotonic_ns() - started_ns))
+        duration_seconds = duration_ns // 1_000_000_000
+        elapsed_seconds = elapsed_ns // 1_000_000_000
+        ratio = 0.0 if duration_ns <= 0 else elapsed_ns / duration_ns
+
+        self._normal_break_hint.setText(
+            "Stopping\u2026" if self._normal_break_stop_in_flight else "Active"
+        )
+        self._normal_break_source_value.setText(self._normal_break_source)
+        self._normal_break_elapsed.setText(
+            f"{self._format_seconds(elapsed_seconds)} / "
+            f"{self._format_seconds(duration_seconds)}"
+        )
+        self._normal_break_state.setText("Active")
+        self._normal_break_track.set_progress(ratio)
+        self._normal_break_progress.setText(f"{int(round(ratio * 100))}%")
+        self._normal_break_stop.show()
+        self._normal_break_stop.setEnabled(
+            not self._normal_break_stop_in_flight
+        )
+
+    def _request_normal_break_stop(self) -> None:
+        fact = self._active_normal_break_fact
+        if fact is None or self._normal_break_stop_in_flight:
+            return
+        payload = {
+            "break_id": self._value(fact, "break_id"),
+            "generation": self._value(fact, "generation"),
+            "episode_uid": self._value(fact, "episode_uid"),
+            "candidate_uid": self._value(fact, "candidate_uid"),
+        }
+        self._normal_break_stop_in_flight = True
+        self._normal_break_stop.setEnabled(False)
+        if not self._engine.request_normal_break_stop(payload):
+            if self._active_normal_break_fact is fact:
+                self._normal_break_stop_in_flight = False
+                self._normal_break_stop.setEnabled(True)
+
+    def _normal_break_matches(self, fact: object) -> bool:
+        current = self._active_normal_break_fact
+        if current is None:
+            return False
+        fields = ("break_id", "generation", "episode_uid", "candidate_uid")
+        return all(
+            self._value(current, field) == self._value(fact, field)
+            for field in fields
+        )
+
+    def _clear_normal_break_presentation(self) -> None:
+        self._active_normal_break_fact = None
+        self._normal_break_source = "\u2014"
+        self._normal_break_stop_in_flight = False
+        self._render_normal_break_inactive()
+
+    def _render_normal_break_inactive(self) -> None:
+        self._normal_break_hint.setText("Inactive")
+        self._normal_break_source_value.setText("\u2014")
+        self._normal_break_elapsed.setText("\u2014 / \u2014")
+        self._normal_break_state.setText("Inactive")
+        self._normal_break_track.set_progress(0.0)
+        self._normal_break_progress.setText("\u2014")
+        self._normal_break_stop.hide()
+        self._normal_break_stop.setEnabled(False)
 
     # -------------------------------------------------------------- render
     def render(self, payload: object) -> None:
@@ -3196,6 +3360,12 @@ class ControlStationWindow(QMainWindow):
         # interpret or recalculate any telemetry value.
         self.engine.control_view_changed.connect(self.pages.control.render)
         self.engine.sine_watch_status_changed.connect(self.pages.control.render_sine)
+        self.engine.normal_break_fact_changed.connect(
+            self.pages.control.render_normal_break_fact
+        )
+        self.engine.session_time_changed.connect(
+            self.pages.control.refresh_normal_break
+        )
         self.engine.study_view_changed.connect(self.pages.study.render)
         self.engine.telemetry_received.connect(self._print_telemetry_event)
         self.engine.engine_status_changed.connect(self._engine_status_changed)
