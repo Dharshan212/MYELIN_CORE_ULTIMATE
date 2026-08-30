@@ -1177,7 +1177,15 @@ class ContinuityPopup(QDialog):
             int(snapshot.study_generation),
         )
 
-    def present_snapshot(self, snapshot: CosecantSnapshot) -> None:
+    def present_snapshot(self, snapshot: CosecantSnapshot) -> bool:
+        """Render (or hide) the popup; return whether it is now factually visible.
+
+        Presentation evidence only -- this changes no COSECANT state and no
+        timing.  ``True`` means this exact snapshot actually reached
+        ``show()``/``raise_()``/``activateWindow()``, which the dispatcher
+        uses to emit a factual "popup was presented" receipt.
+        """
+
         if not isinstance(snapshot, CosecantSnapshot):
             raise TypeError("continuity popup requires a CosecantSnapshot")
         # Fail closed on presentation order.  ``request_continuity_popup`` is a
@@ -1185,11 +1193,11 @@ class ContinuityPopup(QDialog):
         # snapshot can arrive after a newer one; it must not repaint over it or
         # reopen a notice a terminal generation has already closed.
         if not _cosecant_supersedes(snapshot, self._snapshot):
-            return
+            return False
         self._snapshot = snapshot
         if not snapshot.popup_required:
             self.hide()
-            return
+            return False
         headline = {
             CosecantState.BREAK_COMPLETE: "BREAK COMPLETE",
             CosecantState.BREAK_ALREADY_OVER: "BREAK ALREADY OVER",
@@ -1244,6 +1252,7 @@ class ContinuityPopup(QDialog):
         self.show()
         self.raise_()
         self.activateWindow()
+        return bool(self.isVisible())
 
     def reset_presentation_epoch(self) -> None:
         """Clear the ordering baseline for a NEW Core Engine session.
@@ -1287,6 +1296,11 @@ class _ContinuityPopupDispatcher(QObject):
     popup_requested = pyqtSignal(object)
     reset_requested = pyqtSignal()
     return_intent_requested = pyqtSignal(str, int, str, int)
+    #: Emitted only when ``present_snapshot`` actually returned True -- a
+    #: factual "this exact snapshot was visibly presented" receipt, not a
+    #: request.  Presentation coordinators (e.g. the common theme's Green
+    #: claim) use this instead of guessing from a break timer or state text.
+    popup_presented = pyqtSignal(object)
 
     def __init__(self, app: QApplication) -> None:
         super().__init__(app)
@@ -1306,7 +1320,8 @@ class _ContinuityPopupDispatcher(QObject):
     @pyqtSlot(object)
     def _present(self, snapshot: object) -> None:
         if isinstance(snapshot, CosecantSnapshot):
-            self._popup.present_snapshot(snapshot)
+            if self._popup.present_snapshot(snapshot):
+                self.popup_presented.emit(snapshot)
 
     @pyqtSlot()
     def _reset(self) -> None:
@@ -1374,15 +1389,16 @@ class StudyPlannerPanel(QWidget):
     timer_requested = pyqtSignal(object)
 
 
-    #: Local dark styling for the Planner's input and list widgets.
+    #: Local widget-specific styling for the Planner's input and list widgets.
     #:
     #: view.py normally expresses visual identity through object names alone so
-    #: UI_THEMES.theme stays the single design authority.  The theme currently
-    #: carries no rule for a generic QListWidget / QComboBox / QDateEdit, so
-    #: without this the Planner list paints white against the dark Study page.
-    #: theme.py is not an authorized C11-B file, so the rules live here for now
-    #: and should be folded into the theme authority when that file is opened.
-    #: They set colour only -- no rule here decides any Planner fact.
+    #: UI_THEMES.theme stays the single design authority.  The theme carries no
+    #: rule for a generic QListWidget / QComboBox / QDateEdit, so this template
+    #: fills that one gap with rules scoped to this panel only.  The colour
+    #: VALUES are never frozen here: apply_theme() feeds this template the
+    #: current active ThemeTokens supplied by the common MYELIN body, so the
+    #: Planner follows every base theme and every atmosphere claim exactly
+    #: like the rest of the Study page.  No rule here decides any Planner fact.
     PANEL_STYLE: Final = """
     QListWidget#plannerBlockList {
         background: %(raised)s; color: %(text)s;
@@ -1404,20 +1420,27 @@ class StudyPlannerPanel(QWidget):
     }
     """
 
-    def _apply_panel_style(self) -> None:
-        from UI_THEMES.theme import DEFAULT_THEME
-
+    def _apply_panel_style(self, theme) -> None:
         self.setStyleSheet(
             self.PANEL_STYLE
             % {
-                "base": DEFAULT_THEME.window_background,
-                "surface": DEFAULT_THEME.surface,
-                "raised": DEFAULT_THEME.surface_soft,
-                "border": DEFAULT_THEME.border,
-                "text": DEFAULT_THEME.text_primary,
-                "cyan": DEFAULT_THEME.cyan,
+                "base": theme.window_background,
+                "surface": theme.surface,
+                "raised": theme.surface_soft,
+                "border": theme.border,
+                "text": theme.text_primary,
+                "cyan": theme.cyan,
             }
         )
+
+    def apply_theme(self, theme) -> None:
+        """Repaint from the common MYELIN body's current ThemeTokens.
+
+        Pure presentation: never touches Planner state, selection, or form
+        values.
+        """
+
+        self._apply_panel_style(theme)
     RECURRENCE_LABELS: Final = (
         ("Does not repeat", RecurrenceKind.NONE),
         ("Every day", RecurrenceKind.DAILY),
@@ -1450,7 +1473,6 @@ class StudyPlannerPanel(QWidget):
         layout.addWidget(self._build_actions())
 
         self._install_timezones(timezone_choices, configured_timezone)
-        self._apply_panel_style()
         self._sync_actions()
 
     # -- composition ------------------------------------------------------
@@ -2044,7 +2066,6 @@ class StudyNotesPanel(QWidget):
         split.addWidget(self._build_editor_host(), 13)
         layout.addLayout(split, 1)
 
-        self._apply_panel_style()
         self._sync_actions()
 
     # -- composition ------------------------------------------------------
@@ -2140,6 +2161,16 @@ class StudyNotesPanel(QWidget):
         root.addWidget(self._workspace, 1)
         return host
 
+    #: Local widget-specific styling for the Notes list and text widgets.
+    #:
+    #: view.py normally expresses visual identity through object names alone so
+    #: UI_THEMES.theme stays the single design authority.  The theme carries no
+    #: rule for a generic QListWidget / QLineEdit / QTextEdit, so this template
+    #: fills that one gap with rules scoped to this panel only.  The colour
+    #: VALUES are never frozen here: apply_theme() feeds this template the
+    #: current active ThemeTokens supplied by the common MYELIN body, so Notes
+    #: follows every base theme and every atmosphere claim exactly like the
+    #: rest of the Study page.  No rule here decides any Notes fact.
     PANEL_STYLE: Final = """
     QListWidget#studyNoteList {
         background: %(raised)s; color: %(text)s;
@@ -2159,19 +2190,26 @@ class StudyNotesPanel(QWidget):
     }
     """
 
-    def _apply_panel_style(self) -> None:
-        from UI_THEMES.theme import DEFAULT_THEME
-
+    def _apply_panel_style(self, theme) -> None:
         self.setStyleSheet(
             self.PANEL_STYLE
             % {
-                "base": DEFAULT_THEME.window_background,
-                "raised": DEFAULT_THEME.surface_soft,
-                "border": DEFAULT_THEME.border,
-                "text": DEFAULT_THEME.text_primary,
-                "cyan": DEFAULT_THEME.cyan,
+                "base": theme.window_background,
+                "raised": theme.surface_soft,
+                "border": theme.border,
+                "text": theme.text_primary,
+                "cyan": theme.cyan,
             }
         )
+
+    def apply_theme(self, theme) -> None:
+        """Repaint from the common MYELIN body's current ThemeTokens.
+
+        Pure presentation: never touches Notes content, selection, saving, or
+        workspace state.
+        """
+
+        self._apply_panel_style(theme)
 
     # -- browser ----------------------------------------------------------
 
@@ -2387,6 +2425,10 @@ class StudyView(QWidget):
     break_requested = pyqtSignal(int, str, int)
     #: break_id, COSECANT generation, Study block_id, Study generation.
     return_intent_requested = pyqtSignal(str, int, str, int)
+    #: Factual receipt only: this exact CosecantSnapshot was actually shown by
+    #: the continuity popup.  Never emitted for a rejected/stale/hidden
+    #: presentation.  StudyView reports this; it does not decide Green.
+    continuity_popup_presented = pyqtSignal(object)
     planner_requested = pyqtSignal()
     menu_action_requested = pyqtSignal(str)
 
@@ -2810,6 +2852,20 @@ class StudyView(QWidget):
             dispatcher.return_intent_requested.connect(
                 self.return_intent_requested.emit
             )
+            dispatcher.popup_presented.connect(
+                self.continuity_popup_presented.emit
+            )
+
+    def apply_theme(self, theme) -> None:
+        """Fan the common MYELIN body's current ThemeTokens out to Planner
+        and Notes.  Presentation only: never rerenders Study state, requests
+        engine data, or touches a child surface's own selection or content.
+        """
+
+        if self.planner_panel is not None:
+            self.planner_panel.apply_theme(theme)
+        if self.notes_panel is not None:
+            self.notes_panel.apply_theme(theme)
 
     @pyqtSlot(object)
     def _on_study_payload(self, payload: object) -> None:

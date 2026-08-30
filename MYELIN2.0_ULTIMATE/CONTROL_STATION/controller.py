@@ -72,6 +72,9 @@ TERMINAL_KINDS: Final = frozenset(
         "resource_intent_fact",
         "cosine_effect",
         "cosecant_fact",
+        # Final MIRL closure must survive queue pressure: losing it could
+        # leave the common theme's Amber/Red warning stuck forever.
+        "mirl_episode_closed",
     }
 )
 
@@ -211,6 +214,14 @@ class ControlStationController(QObject):
     mine_watch_status_changed = pyqtSignal(object)
     mirl_health_status_changed = pyqtSignal(object)
     normal_break_fact_changed = pyqtSignal(object)
+    # Raw SineFact transport for presentation coordinators (e.g. the common
+    # theme's Normal-SINE atmosphere claims).  Transport only: this signal
+    # carries whatever SINE already published and decides nothing itself.
+    sine_fact_received = pyqtSignal(object)
+    # raw MirlEvent transport only -- same contract as sine_fact_received.
+    mirl_fact_received = pyqtSignal(object)
+    # raw CosecantFact transport only -- same contract as sine_fact_received.
+    cosecant_fact_received = pyqtSignal(object)
     protected_red_changed = pyqtSignal(bool)
 
     # Emergency is requested here, but lifecycle.py decides application exit.
@@ -955,6 +966,7 @@ class ControlStationController(QObject):
             presenter = self._sine_presenter
             if presenter is not None:
                 presenter.apply_fact(raw.get("fact"))
+            self.sine_fact_received.emit(raw.get("fact"))
             # Every SINE fact still reaches the popup presenter, but Phase 2
             # semantic facts also belong in the append-only Live Telemetry
             # feed.  Monitor is the meaning authority: a non-empty badge says
@@ -970,6 +982,20 @@ class ControlStationController(QObject):
             self.normal_break_fact_changed.emit(fact)
             # Preserve the pre-Phase-3 append-only telemetry row while also
             # delivering the same immutable fact to its presentation surface.
+            return False
+
+        if kind == "mirl_episode_closed":
+            self.mirl_fact_received.emit(raw.get("fact"))
+            # Transport only: no MIRL success/failure decision is made here.
+            # Preserve the existing (pre-Phase-2E) Live Telemetry row exactly
+            # as before -- this kind was never swallowed here previously.
+            return False
+
+        if kind == "cosecant_fact":
+            self.cosecant_fact_received.emit(raw.get("fact"))
+            # Transport only: no Green/base decision is made here.  Preserve
+            # the existing Live Telemetry row exactly as before -- this kind
+            # was never swallowed here previously.
             return False
 
         if kind == "resource_intent_fact":

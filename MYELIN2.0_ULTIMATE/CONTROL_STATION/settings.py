@@ -53,9 +53,10 @@ from PyQt6.QtWidgets import (
 )
 
 
-SCHEMA_VERSION: Final = 3
+SCHEMA_VERSION: Final = 4
 DEFAULT_TIMEZONE: Final = "local"
 DEFAULT_PAGE: Final = "control"
+DEFAULT_BASE_THEME: Final = "neon"
 
 VALID_PAGES: Final = frozenset(
     {
@@ -68,7 +69,19 @@ VALID_PAGES: Final = frozenset(
         "cosine",
     }
 )
-VALID_APPEARANCES: Final = frozenset({"dark", "light", "system"})
+# Ordinary user preference: MYELIN's everyday body.  A temporary organ
+# atmosphere (Amber/Red/Green) is runtime-only truth and is never a member of
+# this set -- see FORBIDDEN_RUNTIME_KEYS below.
+VALID_BASE_THEMES: Final = frozenset({"neon", "white", "black", "purple"})
+# Legacy schema-3 "appearance" migration, applied only while repairing an
+# old document.  "system" never actually drove a system-dependent body in
+# this launcher, so it migrates to Neon rather than inventing a history that
+# never existed.
+_LEGACY_APPEARANCE_TO_BASE_THEME: Final = {
+    "dark": "neon",
+    "light": "white",
+    "system": "neon",
+}
 VALID_MINIMIZE_BEHAVIORS: Final = frozenset({"adaptive", "taskbar", "tray"})
 
 # INSTRUCTION: These names are not preferences.  Keeping the deny-list close
@@ -99,6 +112,13 @@ FORBIDDEN_RUNTIME_KEYS: Final = frozenset(
         "idle_seconds",
         "trigger_state",
         "mirl_state",
+        # Temporary body atmospheres are runtime facts, not user preferences.
+        # ``base_theme`` (the ordinary preference) is deliberately absent here.
+        "atmosphere",
+        "active_atmosphere",
+        "amber_alert",
+        "red_alert",
+        "green_return",
     }
 )
 
@@ -151,7 +171,7 @@ class SettingsSnapshot:
     """Immutable settings truth supplied to UI consumers."""
 
     schema_version: int = SCHEMA_VERSION
-    appearance: str = "dark"
+    base_theme: str = DEFAULT_BASE_THEME
     reduced_motion: bool = False
     clock_visible: bool = True
     clock_timezone: str = DEFAULT_TIMEZONE
@@ -380,7 +400,7 @@ def _validate_timezone(value: object) -> str:
 def _default_document() -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
-        "appearance": "dark",
+        "base_theme": DEFAULT_BASE_THEME,
         "reduced_motion": False,
         "clock_visible": True,
         "clock_timezone": DEFAULT_TIMEZONE,
@@ -399,8 +419,8 @@ def _validate_field(name: str, value: object) -> object:
 
     if name in FORBIDDEN_RUNTIME_KEYS or name.startswith("sine_"):
         raise ValueError(f"{name} is runtime truth and cannot be stored")
-    if name == "appearance":
-        return _strict_text_choice(value, name, VALID_APPEARANCES)
+    if name == "base_theme":
+        return _strict_text_choice(value, name, VALID_BASE_THEMES)
     if name in {"reduced_motion", "clock_visible", "clock_collapsed"}:
         return _strict_bool(value, name)
     if name == "clock_timezone":
@@ -492,6 +512,19 @@ def _repair_loaded_document(document: dict[str, object] | None) -> dict[str, obj
                 continue
         repaired["mini_controller"] = mini
 
+    # Schema-3 documents carried an "appearance" preference that no production
+    # consumer ever read.  A document already repaired above (i.e. one that
+    # already had "base_theme") keeps its own validated value; only a
+    # genuinely old document falls through to this migration.
+    if "base_theme" not in document and "appearance" in document:
+        mapped = _LEGACY_APPEARANCE_TO_BASE_THEME.get(
+            str(document["appearance"]), DEFAULT_BASE_THEME
+        )
+        try:
+            repaired["base_theme"] = _validate_field("base_theme", mapped)
+        except (TypeError, ValueError):
+            pass
+
     repaired["schema_version"] = SCHEMA_VERSION
     return repaired
 
@@ -499,7 +532,7 @@ def _repair_loaded_document(document: dict[str, object] | None) -> dict[str, obj
 def _snapshot_from_document(document: dict[str, object]) -> SettingsSnapshot:
     mini = _validate_mini_controller(document["mini_controller"])
     return SettingsSnapshot(
-        appearance=str(document["appearance"]),
+        base_theme=str(document["base_theme"]),
         reduced_motion=bool(document["reduced_motion"]),
         clock_visible=bool(document["clock_visible"]),
         clock_timezone=str(document["clock_timezone"]),
@@ -581,6 +614,82 @@ class TimezoneDialog(QDialog):
         if key not in TIMEZONE_BY_KEY:
             return
         self.timezone_selected.emit(key)
+        self.accept()
+
+
+BASE_THEME_CHOICES: Final = (
+    ("neon", "Neon"),
+    ("white", "White"),
+    ("black", "Black"),
+    ("purple", "Purple"),
+)
+
+
+class ThemePreferenceDialog(QDialog):
+    """Non-blocking base-theme chooser.
+
+    This changes the ordinary MYELIN body only.  A live SINE or break
+    atmosphere claim still takes over the visible body until it clears --
+    picking a base theme here never touches that runtime truth.
+    """
+
+    theme_selected = pyqtSignal(str)
+
+    def __init__(self, current_key: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("themePreferenceDialog")
+        self.setWindowTitle("MYELIN theme")
+        self.setModal(True)
+        self.resize(360, 380)
+
+        from UI_THEMES.theme import label as themed_label
+
+        title = themed_label("SELECT BASE THEME", 13, 700, "text", spacing=1.2, upper=True)
+        title.setObjectName("dialogTitle")
+        explanation = themed_label(
+            "This changes MYELIN's everyday appearance only. A live SINE or "
+            "break alert still takes over the screen until it clears.",
+            11.5, 400, "muted", wrap=True,
+        )
+
+        self.list_widget = QListWidget()
+        self.list_widget.setObjectName("timezoneList")
+        for key, choice_label in BASE_THEME_CHOICES:
+            item = QListWidgetItem(choice_label)
+            item.setData(Qt.ItemDataRole.UserRole, key)
+            self.list_widget.addItem(item)
+            if key == current_key:
+                self.list_widget.setCurrentItem(item)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Apply
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Apply).setText("APPLY")
+        buttons.button(QDialogButtonBox.StandardButton.Apply).setObjectName("btnStart")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setObjectName("btnStop")
+        buttons.button(
+            QDialogButtonBox.StandardButton.Apply
+        ).clicked.connect(self._accept_selection)
+        buttons.rejected.connect(self.reject)
+        self.list_widget.itemDoubleClicked.connect(self._accept_selection)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(14)
+        layout.addWidget(title)
+        layout.addWidget(explanation)
+        layout.addWidget(self.list_widget, 1)
+        layout.addWidget(buttons)
+
+    def _accept_selection(self, *_args) -> None:
+        item = self.list_widget.currentItem()
+        if item is None:
+            return
+        key = str(item.data(Qt.ItemDataRole.UserRole))
+        if key not in VALID_BASE_THEMES:
+            return
+        self.theme_selected.emit(key)
         self.accept()
 
 

@@ -77,21 +77,25 @@ from PyQt6.QtGui import (
     QCloseEvent,
     QColor,
     QCursor,
-    QGuiApplication,
+    QIcon,
     QKeyEvent,
     QPainter,
     QPainterPath,
     QPen,
+    QPixmap,
     QRadialGradient,
     QResizeEvent,
     QShowEvent,
 )
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
+    QButtonGroup,
     QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QMainWindow,
     QProgressBar,
@@ -99,6 +103,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
+    QTableWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -106,29 +111,33 @@ from PyQt6.QtWidgets import (
 from .analytics import AnalyticsController
 from .controller import ControlStationController, EngineStatus
 from .lifecycle import LifecycleController, StartupGateResult
+from .myelin_loading_screen import MyelinLoadingScreen
 from .navigation import NavigationController
-from .settings import TIMEZONE_CHOICES, SettingsController
+from .settings import TIMEZONE_CHOICES, SettingsController, ThemePreferenceDialog
 from .tray import TrayController
+from COSECANT_STUDY_MODE.cosecant import CosecantFactKind, CosecantState
 from COSECANT_STUDY_MODE.notes import NoteSession, NotesWorkspace
 from COSECANT_STUDY_MODE.planner import StudyPlanner
 from COSECANT_STUDY_MODE.view import StudyView
 from PERSISTENCE.storage import EngineStorage, bootstrap_production_schema
 from PROFILES.profiles import ProfileController
 from UI_THEMES.animation import (
+    AlertBorderOverlay,
     AxonCanvas,
     BarTrack,
     BrandMark,
     CircuitTrace,
     Dot,
     EngineRing,
-    LoadingBackdrop,
-    LoadingCornerTrace,
-    LoadingLogoBadge,
-    LoadingSweepBar,
     NavIcon,
+    StudyRing,
+    set_active_theme,
 )
 from UI_THEMES.theme import (
+    AMBER_ALERT_THEME,
+    Atmosphere,
     DEFAULT_THEME,
+    RED_ALERT_THEME,
     qalpha,
     RADIUS_LG,
     RADIUS_MD,
@@ -166,13 +175,6 @@ PAGE_ORDER: Final = (
     PAGE_LIVE_MIRL,
     PAGE_MINE,
     PAGE_COSINE,
-)
-
-STARTUP_MESSAGES: Final = (
-    "Initializing Control Station",
-    "Loading behavioral model",
-    "Calibrating SINE stages",
-    "Connecting telemetry feed",
 )
 
 
@@ -220,11 +222,13 @@ class ControlStationSidebar(QFrame):
     built as a QFrame rather than a button so it has no ``clicked`` signal to
     connect at all, and it is kept out of ``_buttons`` and ``_rows`` so
     ``select`` and ``set_navigation_enabled`` cannot reach it.  The mockup's
-    Settings and About rows stay removed.
+    About row stays removed; Settings now carries the one real preference
+    MYELIN exposes today -- the base theme -- via ``settings_requested``.
     """
 
     page_requested = pyqtSignal(str)
     open_changed = pyqtSignal(bool)
+    settings_requested = pyqtSignal()
     WIDTH: Final = 290
 
     LABELS: Final = {
@@ -249,6 +253,8 @@ class ControlStationSidebar(QFrame):
         self._rows: dict[str, tuple[NavIcon, QLabel]] = {}
         self._selected = PAGE_CONTROL
         self._is_open = False
+        self._theme = DEFAULT_THEME
+        self._coming_soon_icon: NavIcon | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 20, 0, 14)
@@ -294,7 +300,7 @@ class ControlStationSidebar(QFrame):
         row = QHBoxLayout(head)
         row.setContentsMargins(20, 0, 20, 18)
         row.setSpacing(10)
-        row.addWidget(BrandMark(26))
+        row.addWidget(self._brand_icon(26))
 
         wordmark = QWidget(head)
         wordmark.setObjectName("plainBox")
@@ -311,24 +317,70 @@ class ControlStationSidebar(QFrame):
         row.addStretch(1)
         return head
 
-    def _build_foot(self) -> QWidget:
-        """``.sidebar-foot`` -- the closing hairline and a quiet identity line.
+    @staticmethod
+    def _brand_icon(height: int) -> QLabel:
+        """The sidebar's own brand glyph -- the approved raster artwork.
 
-        The mockup's light/dark toggle is intentionally absent: MYELIN ships
-        one canonical dark theme, and a control that cannot change anything
-        would be a dead affordance.
+        Renders ``ASSETS/images/Myelin_Loading_Screen.png`` (the same source
+        art as the taskbar icon) in place of the donor's hand-drawn
+        ``BrandMark`` vector approximation, scaled to the row's height with
+        its own aspect ratio preserved.
+        """
+
+        from PERSISTENCE.database import resource_path
+
+        icon = QLabel()
+        icon.setObjectName("plainBox")
+        pixmap = QPixmap(str(resource_path("images/Myelin_Loading_Screen.png")))
+        if not pixmap.isNull():
+            scaled = pixmap.scaledToHeight(
+                height, Qt.TransformationMode.SmoothTransformation
+            )
+            icon.setPixmap(scaled)
+            icon.setFixedSize(scaled.size())
+        else:
+            icon.setFixedSize(height, height)
+        return icon
+
+    def _build_foot(self) -> QWidget:
+        """``.sidebar-foot`` -- Settings, the closing hairline, an identity line.
+
+        Settings currently opens the base-theme picker directly: MYELIN has
+        exactly one ordinary preference to expose today.  It is a real
+        ``QPushButton`` with its own ``clicked`` handler, not a page --
+        opening it does not go through ``page_requested``/``select`` and does
+        not touch ``_buttons``/``_rows``.
         """
 
         foot = QWidget(self)
         foot.setObjectName("sidebarFoot")
         row = QVBoxLayout(foot)
         row.setContentsMargins(20, 14, 20, 2)
-        row.setSpacing(0)
+        row.setSpacing(4)
+        row.addWidget(self._settings_row())
+        row.addSpacing(10)
         note = label("CONTROL STATION v2.0", 9.5, 600, "muted", mono=True, spacing=1.4)
         note.setObjectName("sidebarFootNote")
         note.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         row.addWidget(note)
         return foot
+
+    def _settings_row(self) -> QPushButton:
+        """``MENU -> SETTINGS -> THEME`` -- the one entry point to base themes."""
+
+        button = QPushButton(self)
+        button.setObjectName("sidebarNavigationButton")
+        button.setAccessibleName("Open MYELIN settings")
+        # QPushButton sizes itself from its own (empty) text; see _nav_row.
+        button.setMinimumHeight(42)
+        button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        row = QHBoxLayout(button)
+        row.setContentsMargins(12, 11, 12, 11)
+        row.setSpacing(13)
+        row.addWidget(label("Settings", 13.5, 400, "text"))
+        row.addStretch(1)
+        button.clicked.connect(self.settings_requested.emit)
+        return button
 
     def _coming_soon_row(self, key: str, text: str) -> QFrame:
         """An approved, deliberately inert COMING SOON marker.
@@ -354,9 +406,10 @@ class ControlStationSidebar(QFrame):
         line.setContentsMargins(12, 11, 12, 11)
         line.setSpacing(13)
 
-        dim = mix(DEFAULT_THEME.muted, 55, DEFAULT_THEME.surface_soft)
+        dim = mix(self._theme.muted, 55, self._theme.surface_soft)
         icon = NavIcon(key, row)
         icon.set_colour(dim)
+        self._coming_soon_icon = icon
         line.addWidget(icon)
 
         name = label(text, 13.5, 400, "muted")
@@ -432,11 +485,11 @@ class ControlStationSidebar(QFrame):
 
         icon, row_label = self._rows[page_name]
         if not self._buttons[page_name].isEnabled():
-            colour, role = mix(DEFAULT_THEME.muted, 55, DEFAULT_THEME.surface_soft), "muted"
+            colour, role = mix(self._theme.muted, 55, self._theme.surface_soft), "muted"
         elif active:
-            colour, role = DEFAULT_THEME.cyan, "cyan"
+            colour, role = self._theme.cyan, "cyan"
         else:
-            colour, role = DEFAULT_THEME.muted, "text"
+            colour, role = self._theme.muted, "text"
         icon.set_colour(colour)
         if row_label.property("role") != role:
             row_label.setProperty("role", role)
@@ -447,6 +500,17 @@ class ControlStationSidebar(QFrame):
     @property
     def is_open(self) -> bool:
         return self._is_open
+
+    def apply_theme(self, tokens) -> None:
+        """Refresh every row's colour for the newly active world."""
+
+        self._theme = tokens
+        for name, button in self._buttons.items():
+            self._paint_row(name, button.isChecked())
+        if self._coming_soon_icon is not None:
+            self._coming_soon_icon.set_colour(
+                mix(tokens.muted, 55, tokens.surface_soft)
+            )
 
     def select(self, page_name: str) -> None:
         self._selected = page_name
@@ -490,202 +554,6 @@ class ControlStationSidebar(QFrame):
     def _animation_finished(self) -> None:
         if not self._is_open:
             self.hide()
-
-
-class StartupLoadingScreen(QWidget):
-    """The real startup screen shown before the main window.
-
-    The visual drawing and animation classes are shared through
-    ``UI_THEMES.animation``.  This launcher owns their arrangement, timer
-    lifecycle and the handoff to the Control Station.
-
-    The loading screen is presentation only.  It never reads telemetry or
-    changes MYELIN state.
-    """
-
-    DEFAULT_SIZE: Final = QSize(1000, 720)
-    DOT_INTERVAL_MS: Final = 350
-    MESSAGE_INTERVAL_MS: Final = 1800
-
-    def __init__(
-        self,
-        *,
-        logo_path: str,
-        messages: Sequence[str] = STARTUP_MESSAGES,
-        parent: QWidget | None = None,
-    ) -> None:
-        flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
-        super().__init__(parent, flags)
-
-        self.setObjectName("myelinStartupLoadingScreen")
-        self.setWindowTitle("MYELIN — Loading")
-        self.resize(self.DEFAULT_SIZE)
-
-        self._messages = tuple(messages) or ("Initializing Control Station",)
-        self._message_index = 0
-        self._dot_step = 0
-        self._status_is_pinned = False
-        self._base_status = self._messages[0]
-
-        # These widgets preserve the original loading-screen design.  They
-        # contain decoration only and have no authority over the engine.
-        self._backdrop = LoadingBackdrop(self)
-        self._top_trace = LoadingCornerTrace(rotated=False, delay_ms=0, parent=self)
-        self._bottom_trace = LoadingCornerTrace(
-            rotated=True,
-            delay_ms=1400,
-            parent=self,
-        )
-
-        self._panel = QWidget(self)
-        self._panel.setObjectName("loadingPanel")
-        panel_layout = QVBoxLayout(self._panel)
-        panel_layout.setContentsMargins(0, 0, 0, 0)
-        panel_layout.setSpacing(0)
-        panel_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-
-        self._logo = LoadingLogoBadge(logo_path=logo_path)
-        panel_layout.addWidget(self._logo, 0, Qt.AlignmentFlag.AlignHCenter)
-        panel_layout.addSpacing(14)
-
-        wordmark = QLabel("MYELIN")
-        wordmark.setObjectName("loadingWordmark")
-        wordmark.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        wordmark.setFont(make_font(44, 800, spacing=14.0))
-        wordmark.setContentsMargins(0, 0, 14, 0)
-        panel_layout.addWidget(wordmark, 0, Qt.AlignmentFlag.AlignHCenter)
-        panel_layout.addSpacing(14)
-
-        tagline = QLabel("GUIDE – RECOVER – FOCUS")
-        tagline.setObjectName("loadingTagline")
-        tagline.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        tagline.setFont(make_font(13, 400, mono=True, spacing=5.0))
-        tagline.setContentsMargins(0, 0, 5, 0)
-        panel_layout.addWidget(tagline, 0, Qt.AlignmentFlag.AlignHCenter)
-        panel_layout.addSpacing(46)
-
-        self._status = QLabel(self._base_status)
-        self._status.setObjectName("loadingStatus")
-        self._status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._status.setFont(make_font(13, 400))
-        panel_layout.addWidget(self._status, 0, Qt.AlignmentFlag.AlignHCenter)
-        panel_layout.addSpacing(18)
-
-        self._progress = LoadingSweepBar()
-        panel_layout.addWidget(self._progress, 0, Qt.AlignmentFlag.AlignHCenter)
-
-        self._version = QLabel(
-            "MYELIN Core v2.0  ·  Behavioral Telemetry Interface",
-            self,
-        )
-        self._version.setObjectName("loadingVersion")
-        self._version.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._version.setFont(make_font(10.5, 400, mono=True, spacing=1.0))
-
-        self._dot_timer = QTimer(self)
-        self._dot_timer.timeout.connect(self._advance_dots)
-
-        self._message_timer = QTimer(self)
-        self._message_timer.timeout.connect(self._advance_message)
-
-    def start(self) -> None:
-        """Show the loading screen and start every decorative timer."""
-
-        self._centre_on_active_screen()
-        self.show()
-
-        for animation in self._animations():
-            animation.start()
-
-        self._dot_timer.start(self.DOT_INTERVAL_MS)
-        self._message_timer.start(self.MESSAGE_INTERVAL_MS)
-        self.raise_()
-        self.activateWindow()
-
-    def stop(self) -> None:
-        """Stop all loading-screen activity. Safe to call more than once."""
-
-        for animation in self._animations():
-            animation.stop()
-
-        self._dot_timer.stop()
-        self._message_timer.stop()
-
-    def set_status(self, text: str) -> None:
-        """Show a factual startup stage instead of the rotating text."""
-
-        self._status_is_pinned = True
-        self._message_timer.stop()
-        self._base_status = str(text)
-        self._render_status()
-
-    def finish(self, window: QWidget) -> None:
-        """Stop the splash before showing the completed Control Station."""
-
-        self.stop()
-        self.close()
-        window.show()
-        window.raise_()
-        window.activateWindow()
-
-    def _animations(self) -> tuple[object, ...]:
-        return (
-            self._backdrop,
-            self._top_trace,
-            self._bottom_trace,
-            self._logo,
-            self._progress,
-        )
-
-    def _centre_on_active_screen(self) -> None:
-        # Open on the monitor the user is actively using. This preserves the
-        # old multi-monitor behavior instead of always choosing monitor one.
-        screen = QGuiApplication.screenAt(QCursor.pos())
-        screen = screen or QGuiApplication.primaryScreen()
-        if screen is None:
-            return
-
-        available = screen.availableGeometry()
-        size = self.DEFAULT_SIZE.boundedTo(available.size() * 0.9)
-        self.resize(size)
-        self.move(available.center() - self.rect().center())
-
-    def _advance_dots(self) -> None:
-        self._dot_step = (self._dot_step + 1) % 4
-        self._render_status()
-
-    def _advance_message(self) -> None:
-        if self._status_is_pinned:
-            return
-
-        self._message_index = (self._message_index + 1) % len(self._messages)
-        self._base_status = self._messages[self._message_index]
-        self._render_status()
-
-    def _render_status(self) -> None:
-        self._status.setText(self._base_status + "." * self._dot_step)
-
-    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        self._backdrop.setGeometry(self.rect())
-        self._top_trace.move(26, 26)
-        self._bottom_trace.move(
-            self.width() - self._bottom_trace.width() - 26,
-            self.height() - self._bottom_trace.height() - 26,
-        )
-
-        panel_size = self._panel.sizeHint()
-        self._panel.setGeometry(
-            int((self.width() - panel_size.width()) / 2),
-            int((self.height() - panel_size.height()) / 2),
-            panel_size.width(),
-            panel_size.height(),
-        )
-        self._version.setGeometry(0, self.height() - 36, self.width(), 16)
-
-    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
-        self.stop()
-        super().closeEvent(event)
 
 
 class BrandConsole(QWidget):
@@ -807,16 +675,25 @@ class NeonTopBar(QWidget):
         (0.88, -0.08, 950.0, 600.0, 0.08),
     )
 
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._theme = DEFAULT_THEME
+
+    def apply_theme(self, tokens) -> None:
+        self._theme = tokens
+        self.update()
+
     def paintEvent(self, event) -> None:  # noqa: N802
         del event
+        t = self._theme
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         rect = QRectF(self.rect())
-        painter.fillRect(rect, QColor(DEFAULT_THEME.window_background))
+        painter.fillRect(rect, QColor(t.window_background))
 
         window = self.window()
         page_height = float(max(self.height(), window.height() if window else 0))
-        cyan = QColor(DEFAULT_THEME.cyan)
+        cyan = QColor(t.cyan)
 
         painter.setPen(Qt.PenStyle.NoPen)
         for cx, cy, radius_x, radius_y, strength in self.GLOWS:
@@ -833,7 +710,7 @@ class NeonTopBar(QWidget):
         # Settle the wash back into the page colour before the bottom edge, so
         # the strip meets the page below without a visible seam at whatever
         # height the clock happens to give it.
-        base = QColor(DEFAULT_THEME.window_background)
+        base = QColor(t.window_background)
         fade = QLinearGradient(
             QPointF(0.0, rect.height() * 0.52),
             QPointF(0.0, rect.height()),
@@ -908,6 +785,7 @@ class ControlStationShell(QWidget):
 
         top_bar = NeonTopBar(self)
         top_bar.setObjectName("topBar")
+        self.top_bar = top_bar
         top_layout = QHBoxLayout(top_bar)
         top_layout.setContentsMargins(34, 24, 34, 10)
         top_layout.setSpacing(16)
@@ -966,9 +844,16 @@ class ControlStationShell(QWidget):
 
         self.sidebar.setParent(self)
         self.loading_overlay.setParent(self)
+
+        # Common presentation infrastructure: shows only when a caller (the
+        # future SINE/MIRL presentation coordinator) calls ``set_alert``.  It
+        # sits above everything else so a warning border is never occluded.
+        self.alert_border = AlertBorderOverlay(self)
+
         self.sidebar_backdrop.raise_()
         self.sidebar.raise_()
         self.loading_overlay.raise_()
+        self.alert_border.raise_()
 
         opened = getattr(self.sidebar, "open_changed", None)
         if opened is not None:
@@ -987,12 +872,16 @@ class ControlStationShell(QWidget):
         self.clock.setVisible(bool(visible))
         self.clock_button.setText("Hide Clock" if visible else "Show Clock")
 
+    def apply_theme(self, tokens) -> None:
+        self.top_bar.apply_theme(tokens)
+
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
         bounds = self.rect()
         self.sidebar.setFixedHeight(bounds.height())
         self.sidebar_backdrop.setGeometry(bounds)
         self.loading_overlay.setGeometry(bounds)
+        self.alert_border.setGeometry(bounds)
         self._fit_topbar()
 
     def _fit_topbar(self) -> None:
@@ -1105,6 +994,7 @@ class HeroCard(QFrame):
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setMinimumHeight(300)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._theme = DEFAULT_THEME
 
         self.canvas = AxonCanvas(self)
         self.canvas.lower()
@@ -1205,9 +1095,13 @@ class HeroCard(QFrame):
         super().resizeEvent(event)
         self.canvas.setGeometry(self.rect())
 
+    def apply_theme(self, tokens) -> None:
+        self._theme = tokens
+        self.update()
+
     def paintEvent(self, event) -> None:  # noqa: N802
         del event
-        from UI_THEMES.theme import DEFAULT_THEME as t
+        t = self._theme
 
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -1389,20 +1283,119 @@ _SHOWCASE_METRIC_DONUT: Final = (
 )
 
 
-def _showcase_colour(role: str) -> QColor:
-    """Resolve one mockup palette name against the live theme."""
+def _remember_retheme(widget: QWidget, retheme: Callable[[object], None]) -> None:
+    """Attach a per-widget theme-refresh closure for the launcher's sweep.
+
+    Several showcase fixtures are plain ``QFrame``/``QLabel``/``QPushButton``
+    instances that build one literal stylesheet string at construction time
+    instead of going through a custom painter class.  Rather than inventing a
+    QSS attribute-selector for every one-off conditional, each such fixture
+    keeps the exact styling code it always had, wrapped in a small closure
+    over ``tokens`` that ``ControlStationWindow._apply_theme`` re-invokes on
+    every world change.
+    """
+
+    widget._retheme = retheme  # noqa: SLF001 -- deliberate, see docstring
+
+
+def _showcase_colour(role: str, tokens=DEFAULT_THEME) -> QColor:
+    """Resolve one mockup palette name against the given (or default) theme."""
 
     table = {
-        "cyan": DEFAULT_THEME.cyan,
-        "green": DEFAULT_THEME.green,
-        "amber": DEFAULT_THEME.amber,
-        "red": DEFAULT_THEME.red,
-        "muted": DEFAULT_THEME.muted,
-        "text": DEFAULT_THEME.text_primary,
+        "cyan": tokens.cyan,
+        "green": tokens.green,
+        "amber": tokens.amber,
+        "red": tokens.red,
+        "muted": tokens.muted,
+        "text": tokens.text_primary,
         "rose": "#FB7185",
         "blue": "#60A5FA",
     }
     return QColor(table.get(role, role))
+
+
+def _white_alpha(a: float) -> str:
+    """A theme-neutral ``rgba(255,255,255,a)`` overlay, ported 1:1 from CSS."""
+
+    return qalpha(QColor(255, 255, 255), a).name(QColor.NameFormat.HexArgb)
+
+
+class _GlassPanel(QFrame):
+    """``.glass-panel`` -- rounded, translucent surface, mockup CSS ported 1:1.
+
+    The mockup's panel is ``color-mix(in srgb, var(--surface) 55%,
+    transparent)`` with ``backdrop-filter: blur(22px)`` as a progressive
+    enhancement on top -- browsers without ``backdrop-filter`` support fall
+    back to that flat translucent colour alone, still a correct glass panel,
+    just without the live blur.  Qt has no live backdrop-filter and no
+    reliable way to fake one from a static grab (see prior attempts in git
+    history), so this paints that same standards-sanctioned fallback
+    directly: the translucent surface tint plus the 14%-white border, no
+    screenshot/blur step at all.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("plainBox")
+        self._tint = QColor(DEFAULT_THEME.surface)
+        self._border = QColor(_white_alpha(0.14))
+
+    def apply_tint(self, tokens) -> None:
+        self._tint = QColor(tokens.surface)
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(rect, RADIUS_LG, RADIUS_LG)
+
+        tint = QColor(self._tint)
+        tint.setAlphaF(0.55)
+        painter.fillPath(path, tint)
+
+        pen = QPen(self._border)
+        pen.setWidthF(1.0)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+        painter.end()
+
+
+def _glass_gstat(caption: str, value: str, value_size: float = 22.0) -> QFrame:
+    """``.gstat`` -- translucent left-aligned tile over a glass panel."""
+
+    box = QFrame()
+    box.setObjectName("glassGstat")
+    box.setStyleSheet(
+        f"QFrame#glassGstat {{ background: {_white_alpha(0.03)};"
+        f" border: 1px solid {_white_alpha(0.09)}; border-radius: {RADIUS_MD}px; }}"
+    )
+    lay = QVBoxLayout(box)
+    lay.setContentsMargins(16, 16, 16, 16)
+    lay.setSpacing(6)
+    lay.addWidget(label(caption, 11, 400, "muted"))
+    value_label = label(value, value_size, 700, "text", mono=True)
+    value_label.setWordWrap(True)
+    lay.addWidget(value_label)
+    return box
+
+
+def _glass_gcard(padding: int = 20) -> tuple[QFrame, QVBoxLayout]:
+    """``.gcard`` -- translucent card over a glass panel."""
+
+    card = QFrame()
+    card.setObjectName("glassGcard")
+    card.setStyleSheet(
+        f"QFrame#glassGcard {{ background: {_white_alpha(0.03)};"
+        f" border: 1px solid {_white_alpha(0.09)}; border-radius: {RADIUS_LG}px; }}"
+    )
+    lay = QVBoxLayout(card)
+    lay.setContentsMargins(padding, padding, padding, padding)
+    lay.setSpacing(0)
+    return card, lay
 
 
 class ShowcaseBarChart(QWidget):
@@ -1428,14 +1421,20 @@ class ShowcaseBarChart(QWidget):
         self._maximum = max(1, int(maximum))
         self._target = int(target)
         self._average = int(average)
+        self._theme = DEFAULT_THEME
+
+    def apply_theme(self, tokens) -> None:
+        self._theme = tokens
+        self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802
         del event
+        t = self._theme
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         rect = QRectF(self.rect())
 
-        axis = QPen(QColor(DEFAULT_THEME.border))
+        axis = QPen(QColor(t.border))
         axis.setWidthF(1.0)
         p.setPen(axis)
         p.drawLine(QPointF(0.5, 0.0), QPointF(0.5, rect.height() - 0.5))
@@ -1450,8 +1449,8 @@ class ShowcaseBarChart(QWidget):
         if count:
             gap = 5.0
             width = max(5.0, (inner.width() - gap * (count - 1)) / count)
-            cyan = _showcase_colour("cyan")
-            red = _showcase_colour("red")
+            cyan = _showcase_colour("cyan", t)
+            red = _showcase_colour("red", t)
             p.setPen(Qt.PenStyle.NoPen)
             for index, value in enumerate(self._values):
                 height = inner.height() * (float(value) / self._maximum)
@@ -1464,7 +1463,7 @@ class ShowcaseBarChart(QWidget):
         # ``.avg-line`` -- dashed cyan rule with its own inset caption.
         if self._maximum:
             y = inner.bottom() - inner.height() * (float(self._average) / self._maximum)
-            dashed = QPen(QColor(DEFAULT_THEME.cyan_dim))
+            dashed = QPen(QColor(t.cyan_dim))
             dashed.setWidthF(1.0)
             dashed.setStyle(Qt.PenStyle.DashLine)
             p.setPen(dashed)
@@ -1478,8 +1477,8 @@ class ShowcaseBarChart(QWidget):
             box = QRectF(
                 rect.width() - text_width - 10.0, y - 15.0, text_width + 6.0, 13.0
             )
-            p.fillRect(box, QColor(DEFAULT_THEME.surface))
-            p.setPen(QColor(DEFAULT_THEME.cyan))
+            p.fillRect(box, QColor(t.surface))
+            p.setPen(QColor(t.cyan))
             p.drawText(box, Qt.AlignmentFlag.AlignCenter, caption)
         p.end()
 
@@ -1495,9 +1494,15 @@ class ShowcaseDonut(QWidget):
         self.setObjectName("plainBox")
         self.setFixedSize(self.SIZE, self.SIZE)
         self._segments = tuple(segments)
+        self._theme = DEFAULT_THEME
+
+    def apply_theme(self, tokens) -> None:
+        self._theme = tokens
+        self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802
         del event
+        t = self._theme
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         box = QRectF(0.0, 0.0, float(self.SIZE), float(self.SIZE))
@@ -1506,12 +1511,12 @@ class ShowcaseDonut(QWidget):
         p.setPen(Qt.PenStyle.NoPen)
         for _name, _count, percent, role in self._segments:
             span = -(float(percent) / 100.0) * 360.0 * 16.0
-            p.setBrush(_showcase_colour(role))
+            p.setBrush(_showcase_colour(role, t))
             p.drawPie(box, int(round(start)), int(round(span)))
             start += span
 
         hole = box.adjusted(self.HOLE, self.HOLE, -self.HOLE, -self.HOLE)
-        p.setBrush(QColor(DEFAULT_THEME.surface))
+        p.setBrush(QColor(t.surface))
         p.drawEllipse(hole)
         p.end()
 
@@ -1527,14 +1532,20 @@ class ShowcaseScatter(QWidget):
         self.setFixedHeight(190)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._points = tuple(points)
+        self._theme = DEFAULT_THEME
+
+    def apply_theme(self, tokens) -> None:
+        self._theme = tokens
+        self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802
         del event
+        t = self._theme
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         rect = QRectF(self.rect())
 
-        axis = QPen(QColor(DEFAULT_THEME.border))
+        axis = QPen(QColor(t.border))
         axis.setWidthF(1.0)
         p.setPen(axis)
         p.drawLine(QPointF(0.5, 0.0), QPointF(0.5, rect.height() - 0.5))
@@ -1543,7 +1554,7 @@ class ShowcaseScatter(QWidget):
             QPointF(rect.width(), rect.height() - 0.5),
         )
 
-        cyan = _showcase_colour("cyan")
+        cyan = _showcase_colour("cyan", t)
         glow_colour = qalpha(cyan, 0.45)
         p.setPen(Qt.PenStyle.NoPen)
         for x_percent, y_percent in self._points:
@@ -1578,21 +1589,9 @@ def showcase_metric_stat(
     ``size``.
     """
 
-    accent = _showcase_colour(role).name() if role else DEFAULT_THEME.border
-    if number_role:
-        figure_colour = _showcase_colour(number_role).name()
-    elif role:
-        figure_colour = _showcase_colour(role).name()
-    else:
-        figure_colour = DEFAULT_THEME.text_primary
-
     box = QFrame()
     box.setObjectName("showcaseMetricStat")
     box.setFrameShape(QFrame.Shape.NoFrame)
-    box.setStyleSheet(
-        f"QFrame#showcaseMetricStat {{ background: {DEFAULT_THEME.surface};"
-        f" border: 1px solid {accent}; border-radius: {RADIUS_LG}px; }}"
-    )
     card_shadow(box)
     lay = QVBoxLayout(box)
     lay.setContentsMargins(14, 22, 14, 22)
@@ -1601,7 +1600,6 @@ def showcase_metric_stat(
     figure = QLabel(number)
     figure.setObjectName("plainBox")
     figure.setFont(make_font(size, 700, mono=True))
-    figure.setStyleSheet(f"color: {figure_colour}; background: transparent;")
     figure.setAlignment(Qt.AlignmentFlag.AlignCenter)
     lay.addWidget(figure)
 
@@ -1615,23 +1613,45 @@ def showcase_metric_stat(
         note = label(sub, 10.5, 400, "muted")
         note.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(note)
+
+    def _retheme(tokens) -> None:
+        accent = _showcase_colour(role, tokens).name() if role else tokens.border
+        if number_role:
+            figure_colour = _showcase_colour(number_role, tokens).name()
+        elif role:
+            figure_colour = _showcase_colour(role, tokens).name()
+        else:
+            figure_colour = tokens.text_primary
+        box.setStyleSheet(
+            f"QFrame#showcaseMetricStat {{ background: {tokens.surface};"
+            f" border: 1px solid {accent}; border-radius: {RADIUS_LG}px; }}"
+        )
+        figure.setStyleSheet(f"color: {figure_colour}; background: transparent;")
+
+    _retheme(DEFAULT_THEME)
+    _remember_retheme(box, _retheme)
     return box
 
 
 def showcase_status_badge(text: str, role: str = "red") -> QLabel:
     """``.status-badge`` -- 12% tint, 45% border, uppercase."""
 
-    colour = _showcase_colour(role)
     badge = QLabel(text)
     badge.setObjectName("showcaseStatusBadge")
     badge.setFont(make_font(12, 800, spacing=1.5))
-    badge.setStyleSheet(
-        f"QLabel#showcaseStatusBadge {{ color: {colour.name()};"
-        f" background: {qalpha(colour, 0.12).name(QColor.NameFormat.HexArgb)};"
-        f" border: 1px solid {qalpha(colour, 0.45).name(QColor.NameFormat.HexArgb)};"
-        f" border-radius: {RADIUS_SM}px; padding: 9px 18px; }}"
-    )
     badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    def _retheme(tokens) -> None:
+        colour = _showcase_colour(role, tokens)
+        badge.setStyleSheet(
+            f"QLabel#showcaseStatusBadge {{ color: {colour.name()};"
+            f" background: {qalpha(colour, 0.12).name(QColor.NameFormat.HexArgb)};"
+            f" border: 1px solid {qalpha(colour, 0.45).name(QColor.NameFormat.HexArgb)};"
+            f" border-radius: {RADIUS_SM}px; padding: 9px 18px; }}"
+        )
+
+    _retheme(DEFAULT_THEME)
+    _remember_retheme(badge, _retheme)
     return badge
 
 
@@ -1788,9 +1808,15 @@ class MetricHubShowcasePage(QWidget):
             cell_row.setSpacing(6)
             swatch = QLabel()
             swatch.setFixedSize(10, 10)
-            swatch.setStyleSheet(
-                f"background: {_showcase_colour(role).name()}; border-radius: 2px;"
-            )
+
+            def _retheme_swatch(tokens, swatch=swatch, role=role) -> None:
+                swatch.setStyleSheet(
+                    f"background: {_showcase_colour(role, tokens).name()};"
+                    " border-radius: 2px;"
+                )
+
+            _retheme_swatch(DEFAULT_THEME)
+            _remember_retheme(swatch, _retheme_swatch)
             cell_row.addWidget(swatch)
             cell_row.addWidget(label(name, 11, 400, "muted"))
             legend.addWidget(cell)
@@ -1818,9 +1844,9 @@ class MetricHubShowcasePage(QWidget):
             distraction_body.addSpacing(10)
 
         rule = QFrame()
+        rule.setObjectName("showcaseDivider")
         rule.setFrameShape(QFrame.Shape.NoFrame)
         rule.setFixedHeight(1)
-        rule.setStyleSheet(f"background: {DEFAULT_THEME.border};")
         distraction_body.addSpacing(4)
         distraction_body.addWidget(rule)
         total = label("Total Triggers: 71", 11, 400, "muted")
@@ -1847,7 +1873,7 @@ class MetricHubShowcasePage(QWidget):
         for column, name in enumerate(headers):
             cell = label(name, 10, 700, "muted", spacing=1.2, upper=True)
             cell.setContentsMargins(0, 8, 0, 8)
-            cell.setStyleSheet(f"border-bottom: 1px solid {DEFAULT_THEME.border};")
+            cell.setProperty("divider", True)
             table.addWidget(cell, 0, column)
         for line, entry in enumerate(_SHOWCASE_METRIC_DRIFT, start=1):
             last = line == len(_SHOWCASE_METRIC_DRIFT)
@@ -1860,9 +1886,7 @@ class MetricHubShowcasePage(QWidget):
                     cell = label(value, 12.5, 400, "text")
                 cell.setContentsMargins(0, 11, 0, 11)
                 if not last:
-                    cell.setStyleSheet(
-                        f"border-bottom: 1px solid {DEFAULT_THEME.border};"
-                    )
+                    cell.setProperty("divider", True)
                 table.addWidget(cell, line, column)
         table.setColumnStretch(4, 1)
         drift_body.addLayout(table)
@@ -1946,20 +1970,25 @@ _JOURNEY_PILL_ROLES: Final = {
 def showcase_journey_pill(role: str, text: str) -> QLabel:
     """``.journey-pill`` -- 10px uppercase chip, colour keyed by step kind."""
 
-    colour = _showcase_colour(_JOURNEY_PILL_ROLES.get(role, "muted"))
-    border = (
-        DEFAULT_THEME.border
-        if role in ("", "terminal")
-        else qalpha(colour, 0.50).name(QColor.NameFormat.HexArgb)
-    )
     pill = QLabel(text)
     pill.setObjectName("showcaseJourneyPill")
     pill.setFont(make_font(10, 700, spacing=0.5))
-    pill.setStyleSheet(
-        f"QLabel#showcaseJourneyPill {{ color: {colour.name()};"
-        f" background: transparent; border: 1px solid {border};"
-        f" border-radius: {RADIUS_SM}px; padding: 4px 10px; }}"
-    )
+
+    def _retheme(tokens) -> None:
+        colour = _showcase_colour(_JOURNEY_PILL_ROLES.get(role, "muted"), tokens)
+        border = (
+            tokens.border
+            if role in ("", "terminal")
+            else qalpha(colour, 0.50).name(QColor.NameFormat.HexArgb)
+        )
+        pill.setStyleSheet(
+            f"QLabel#showcaseJourneyPill {{ color: {colour.name()};"
+            f" background: transparent; border: 1px solid {border};"
+            f" border-radius: {RADIUS_SM}px; padding: 4px 10px; }}"
+        )
+
+    _retheme(DEFAULT_THEME)
+    _remember_retheme(pill, _retheme)
     return pill
 
 
@@ -1971,15 +2000,21 @@ def showcase_journey_step(entry: tuple) -> QFrame:
     box.setObjectName("showcaseJourneyStep")
     box.setFrameShape(QFrame.Shape.NoFrame)
     box.setFixedWidth(150)
-    edge = (
-        qalpha(_showcase_colour("#A78BFA"), 0.50).name(QColor.NameFormat.HexArgb)
-        if pill_role == "evidence"
-        else DEFAULT_THEME.border
-    )
-    box.setStyleSheet(
-        f"QFrame#showcaseJourneyStep {{ background: {DEFAULT_THEME.surface_soft};"
-        f" border: 1px solid {edge}; border-radius: {RADIUS_MD}px; }}"
-    )
+
+    def _retheme(tokens) -> None:
+        edge = (
+            qalpha(_showcase_colour("#A78BFA", tokens), 0.50).name(QColor.NameFormat.HexArgb)
+            if pill_role == "evidence"
+            else tokens.border
+        )
+        box.setStyleSheet(
+            f"QFrame#showcaseJourneyStep {{ background: {tokens.surface_soft};"
+            f" border: 1px solid {edge}; border-radius: {RADIUS_MD}px; }}"
+        )
+
+    _retheme(DEFAULT_THEME)
+    _remember_retheme(box, _retheme)
+
     lay = QVBoxLayout(box)
     lay.setContentsMargins(12, 12, 12, 12)
     lay.setSpacing(0)
@@ -2006,30 +2041,36 @@ def showcase_journey_step(entry: tuple) -> QFrame:
 def showcase_flow_outcome(text: str, sub: str, kind: str = "returned") -> QFrame:
     """``.jflow-outcome`` -- the coloured terminal node closing a strip."""
 
-    colour = _showcase_colour("green" if kind == "returned" else "red")
     box = QFrame()
     box.setObjectName("showcaseFlowOutcome")
     box.setFrameShape(QFrame.Shape.NoFrame)
     box.setFixedWidth(150)
-    box.setStyleSheet(
-        f"QFrame#showcaseFlowOutcome {{"
-        f" background: {qalpha(colour, 0.12).name(QColor.NameFormat.HexArgb)};"
-        f" border: 1px solid {qalpha(colour, 0.50).name(QColor.NameFormat.HexArgb)};"
-        f" border-radius: {RADIUS_MD}px; }}"
-    )
     lay = QVBoxLayout(box)
     lay.setContentsMargins(12, 12, 12, 12)
     lay.setSpacing(4)
     head = QLabel(text)
     head.setFont(make_font(12, 700))
-    head.setStyleSheet(f"color: {colour.name()}; background: transparent;")
     head.setWordWrap(True)
     lay.addWidget(head)
     note = QLabel(sub)
     note.setFont(make_font(10, 400, mono=True))
-    note.setStyleSheet(f"color: {colour.name()}; background: transparent;")
     note.setWordWrap(True)
     lay.addWidget(note)
+
+    def _retheme(tokens) -> None:
+        colour = _showcase_colour("green" if kind == "returned" else "red", tokens)
+        box.setStyleSheet(
+            f"QFrame#showcaseFlowOutcome {{"
+            f" background: {qalpha(colour, 0.12).name(QColor.NameFormat.HexArgb)};"
+            f" border: 1px solid {qalpha(colour, 0.50).name(QColor.NameFormat.HexArgb)};"
+            f" border-radius: {RADIUS_MD}px; }}"
+        )
+        text_style = f"color: {colour.name()}; background: transparent;"
+        head.setStyleSheet(text_style)
+        note.setStyleSheet(text_style)
+
+    _retheme(DEFAULT_THEME)
+    _remember_retheme(box, _retheme)
     return box
 
 
@@ -2059,19 +2100,24 @@ class _ShowcaseArrow(QWidget):
         super().__init__(parent)
         self.setObjectName("plainBox")
         self.setFixedSize(22, 8)
+        self._theme = DEFAULT_THEME
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def apply_theme(self, tokens) -> None:
+        self._theme = tokens
+        self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802
         del event
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.setOpacity(0.6)
-        pen = QPen(QColor(DEFAULT_THEME.muted))
+        pen = QPen(QColor(self._theme.muted))
         pen.setWidthF(1.4)
         pen.setStyle(Qt.PenStyle.DashLine)
         p.setPen(pen)
         p.drawLine(QPointF(1.0, 4.0), QPointF(17.0, 4.0))
-        solid = QPen(QColor(DEFAULT_THEME.muted))
+        solid = QPen(QColor(self._theme.muted))
         solid.setWidthF(1.4)
         p.setPen(solid)
         p.setBrush(Qt.BrushStyle.NoBrush)
@@ -2091,6 +2137,7 @@ def showcase_episode_banner(
     *,
     ok: bool = False,
     outcome_muted: bool = False,
+    status_size: float = 19.0,
 ) -> QFrame:
     """``.episode-banner`` -- 8% tint, 30% border, status left, outcome right."""
 
@@ -2098,12 +2145,6 @@ def showcase_episode_banner(
     banner = QFrame()
     banner.setObjectName("showcaseEpisodeBanner")
     banner.setFrameShape(QFrame.Shape.NoFrame)
-    banner.setStyleSheet(
-        f"QFrame#showcaseEpisodeBanner {{"
-        f" background: {mix(tone.name(), 8, DEFAULT_THEME.surface)};"
-        f" border: 1px solid {mix(tone.name(), 30, DEFAULT_THEME.border)};"
-        f" border-radius: {RADIUS_LG}px; }}"
-    )
     lay = QHBoxLayout(banner)
     lay.setContentsMargins(22, 18, 22, 18)
     lay.setSpacing(14)
@@ -2117,10 +2158,11 @@ def showcase_episode_banner(
     status_row.addWidget(label(status_label, 10.5, 400, "muted", spacing=1.5, upper=True))
     status_row.addStretch(1)
     left.addLayout(status_row)
+    value: QLabel | None = None
     if status_value:
         value = QLabel(status_value)
-        value.setFont(make_font(19, 700))
-        value.setStyleSheet(f"color: {tone.name()}; background: transparent;")
+        value.setFont(make_font(status_size, 700))
+        value.setWordWrap(True)
         left.addWidget(value)
     lay.addLayout(left)
     lay.addStretch(1)
@@ -2140,6 +2182,19 @@ def showcase_episode_banner(
         outcome.setAlignment(Qt.AlignmentFlag.AlignRight)
     right.addWidget(outcome)
     lay.addLayout(right)
+
+    def _retheme(tokens) -> None:
+        banner.setStyleSheet(
+            f"QFrame#showcaseEpisodeBanner {{"
+            f" background: {mix(tone.name(), 8, tokens.surface)};"
+            f" border: 1px solid {mix(tone.name(), 30, tokens.border)};"
+            f" border-radius: {RADIUS_LG}px; }}"
+        )
+        if value is not None:
+            value.setStyleSheet(f"color: {tone.name()}; background: transparent;")
+
+    _retheme(DEFAULT_THEME)
+    _remember_retheme(banner, _retheme)
     return banner
 
 
@@ -2183,13 +2238,90 @@ def showcase_cta(text: str) -> QPushButton:
     button.setObjectName("showcaseCta")
     button.setFont(make_font(12, 700, spacing=0.8))
     button.setEnabled(False)
-    button.setStyleSheet(
-        f"QPushButton#showcaseCta {{ background: transparent;"
-        f" color: {DEFAULT_THEME.cyan}; border: 1px solid {DEFAULT_THEME.cyan_dim};"
-        f" border-radius: {RADIUS_SM}px; padding: 11px 20px; }}"
-        f"QPushButton#showcaseCta:disabled {{ color: {DEFAULT_THEME.cyan};"
-        f" border-color: {DEFAULT_THEME.cyan_dim}; }}"
-    )
+
+    def _retheme(tokens) -> None:
+        hover_bg = qalpha(QColor(tokens.cyan), 0.10).name(QColor.NameFormat.HexArgb)
+        pressed_bg = qalpha(QColor(tokens.cyan), 0.18).name(QColor.NameFormat.HexArgb)
+        button.setStyleSheet(
+            f"QPushButton#showcaseCta {{ background: transparent;"
+            f" color: {tokens.cyan}; border: 1px solid {tokens.cyan_dim};"
+            f" border-radius: {RADIUS_SM}px; padding: 11px 20px; }}"
+            f"QPushButton#showcaseCta:disabled {{ color: {tokens.cyan};"
+            f" border-color: {tokens.cyan_dim}; }}"
+            f"QPushButton#showcaseCta:enabled:hover {{ background: {hover_bg};"
+            f" color: {tokens.cyan}; border-color: {tokens.cyan}; }}"
+            f"QPushButton#showcaseCta:enabled:pressed {{ background: {pressed_bg}; }}"
+        )
+
+    _retheme(DEFAULT_THEME)
+    _remember_retheme(button, _retheme)
+    return button
+
+
+def showcase_chip_pill(text: str, role: str | None = None) -> QLabel:
+    """``.chip-pill`` -- neutral-background status chip, coloured text/border."""
+
+    chip = QLabel(text.upper())
+    chip.setObjectName("showcaseChipPill")
+    chip.setFont(make_font(10.5, 700, spacing=0.8))
+
+    def _retheme(tokens) -> None:
+        colour = _showcase_colour(role, tokens) if role else None
+        text_colour = colour.name() if colour else tokens.muted
+        border_colour = (
+            qalpha(colour, 0.45).name(QColor.NameFormat.HexArgb) if colour else tokens.border
+        )
+        chip.setStyleSheet(
+            f"QLabel#showcaseChipPill {{ color: {text_colour};"
+            f" background: {_white_alpha(0.03)}; border: 1px solid {border_colour};"
+            f" border-radius: {RADIUS_SM}px; padding: 6px 12px; }}"
+        )
+
+    _retheme(DEFAULT_THEME)
+    _remember_retheme(chip, _retheme)
+    return chip
+
+
+def showcase_kv_block(text: str) -> QLabel:
+    """``.gkv`` -- pre-wrapped monospace key/value block."""
+
+    block = QLabel(text)
+    block.setObjectName("showcaseKvBlock")
+    block.setFont(make_font(12, 400, mono=True))
+    block.setWordWrap(True)
+    block.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+    def _retheme(tokens) -> None:
+        block.setStyleSheet(
+            f"QLabel#showcaseKvBlock {{ color: {tokens.text_primary};"
+            f" background: {_white_alpha(0.02)}; border: 1px solid {_white_alpha(0.08)};"
+            f" border-radius: {RADIUS_SM}px; padding: 14px 16px; }}"
+        )
+
+    _retheme(DEFAULT_THEME)
+    _remember_retheme(block, _retheme)
+    return block
+
+
+def showcase_outline_button(text: str, *, small: bool = False) -> QPushButton:
+    """``.btn-block.outline`` -- bordered neutral action, unconnected by default."""
+
+    button = QPushButton(text.upper())
+    button.setObjectName("showcaseOutlineButton")
+    button.setFont(make_font(10.5 if small else 12, 700, spacing=1.0))
+    padding = "7px 14px" if small else "11px 20px"
+
+    def _retheme(tokens) -> None:
+        button.setStyleSheet(
+            f"QPushButton#showcaseOutlineButton {{ background: transparent;"
+            f" color: {tokens.text_primary}; border: 1px solid {tokens.border};"
+            f" border-radius: {RADIUS_SM}px; padding: {padding}; }}"
+            f"QPushButton#showcaseOutlineButton:hover {{ color: {tokens.cyan};"
+            f" border-color: {tokens.cyan_dim}; }}"
+        )
+
+    _retheme(DEFAULT_THEME)
+    _remember_retheme(button, _retheme)
     return button
 
 
@@ -2204,6 +2336,7 @@ class LiveMirlShowcasePage(QWidget):
         super().__init__(parent)
         self.setObjectName("showcasePage")
         self.setAccessibleName("Live MIRL showcase")
+        self._dashboard_dialog: LiveMirlDashboardDialog | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -2226,6 +2359,17 @@ class LiveMirlShowcasePage(QWidget):
                 "All committed evidence  |  3 Exclusions",
             )
         )
+
+        cta_row = QHBoxLayout()
+        cta_row.addStretch(1)
+        open_dashboard_button = showcase_cta("Open Full Dashboard")
+        open_dashboard_button.setEnabled(True)
+        open_dashboard_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        open_dashboard_button.clicked.connect(self._open_full_dashboard)
+        cta_row.addWidget(open_dashboard_button)
+        cta_row.addStretch(1)
+        wrap.addLayout(cta_row)
+
         wrap.addWidget(
             showcase_episode_banner(
                 "Episode Status", "No Active Episode", "Latest Outcome", "Break"
@@ -2261,11 +2405,23 @@ class LiveMirlShowcasePage(QWidget):
             outcomes.setColumnStretch(column, 1)
         wrap.addLayout(outcomes)
 
-        cta_row = QHBoxLayout()
-        cta_row.addStretch(1)
-        cta_row.addWidget(showcase_cta("Open Full Dashboard"))
-        wrap.addLayout(cta_row)
         wrap.addStretch(1)
+
+    def _open_full_dashboard(self) -> None:
+        """``#openFullDashboard`` -- open the dummy Live MIRL Dashboard.
+
+        Lazily created once and reused on every later click, matching how
+        ``AnalyticsController.open_composer`` keeps ``AnalyticsSheetDialog``
+        alive across opens instead of rebuilding it.  It opens as a glass
+        overlay above the whole Control Station window, not a separate
+        top-level window, so it is parented to ``self.window()`` rather than
+        to this page.
+        """
+
+        host = self.window()
+        if self._dashboard_dialog is None:
+            self._dashboard_dialog = LiveMirlDashboardDialog(host)
+        self._dashboard_dialog.open_over(host)
 
     def _build_journey(self) -> QFrame:
         card, body = make_card()
@@ -2329,6 +2485,510 @@ def _showcase_delta(first: str, second: str) -> str:
     if gap < 0:
         gap += 24 * 3600
     return f"+{gap // 60:02d}:{gap % 60:02d}"
+
+
+class LiveMirlDashboardDialog(QWidget):
+    """Dummy Live MIRL Dashboard, reproduced from the mockup's glass overlay.
+
+    Showcase surface opened from ``LiveMirlShowcasePage``'s "Open Full
+    Dashboard" button: no ``read_model.py``, no ``MIRL/``, no live episode
+    state, no SQL. Every value below is the same fixed fixture the showcase
+    page already shows. Wiring this to real read-model data is separate,
+    later work.
+
+    The mockup's ``.glass-overlay`` is a ``position:fixed; inset:0`` layer
+    inside the SAME page, not a second browser window -- so this is a plain
+    ``QWidget`` raised above the rest of the Control Station window, never a
+    top-level ``QDialog``.  It has no OS titlebar and no taskbar/alt-tab
+    entry, matching that.  The panel itself paints the mockup's own
+    ``backdrop-filter``-unsupported fallback (see ``_GlassPanel``) rather
+    than attempting to fake a live blur, which Qt has no reliable way to do.
+    """
+
+    TAB_TITLES: Final = (
+        "Current Episode",
+        "Episode History",
+        "Event Timeline",
+        "History Evidence",
+        "Data Quality",
+    )
+
+    PANEL_MARGIN: Final = 16
+    # DEFAULT_WINDOW_SIZE is 1460x960 and MINIMUM_WINDOW_SIZE is 1024x700
+    # (see module top) -- this cap only binds once the host grows past
+    # those, e.g. maximized on a large monitor, so it's set generously
+    # above the default rather than pinned to it. It still stops well short
+    # of covering a huge/ultrawide/4K display edge-to-edge, since
+    # ``_layout_panel`` clamps to whichever is smaller: this cap, or the
+    # host's own size minus margin.
+    PANEL_MAX_SIZE: Final = QSize(1800, 1100)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("liveMirlDashboardOverlay")
+        self.hide()
+        self._host: QWidget | None = None
+
+        # The panel is positioned by hand in ``_layout_panel`` rather than
+        # through a layout with an alignment flag: an aligned QBoxLayout item
+        # is only ever given its children's sizeHint (here, whatever height
+        # the header/subline/tabbar/footer naturally add up to) and centred
+        # at THAT size, ignoring its Expanding size policy and maximumSize --
+        # so it never actually grows to fill a larger window.
+        self._panel = _GlassPanel(self)
+        self._panel.setMaximumSize(self.PANEL_MAX_SIZE)
+
+        panel_root = QVBoxLayout(self._panel)
+        panel_root.setContentsMargins(0, 0, 0, 0)
+        panel_root.setSpacing(0)
+
+        panel_root.addWidget(self._build_header())
+        panel_root.addWidget(self._build_subline())
+
+        body = QWidget(self._panel)
+        body.setObjectName("plainBox")
+        body_row = QHBoxLayout(body)
+        body_row.setContentsMargins(0, 0, 0, 0)
+        body_row.setSpacing(0)
+        body_row.addWidget(self._build_tabbar())
+        self._stack = QStackedWidget(body)
+        self._stack.setStyleSheet("QStackedWidget { background: transparent; }")
+        for page in (
+            self._build_current_tab(),
+            self._build_history_tab(),
+            self._build_timeline_tab(),
+            self._build_evidence_tab(),
+            self._build_quality_tab(),
+        ):
+            self._stack.addWidget(self._wrap_scroll(page))
+        body_row.addWidget(self._stack, 1)
+        panel_root.addWidget(body, 1)
+
+        self._footer_time = label("Refreshed —", 11, 400, "muted", mono=True)
+        panel_root.addWidget(self._build_footer())
+
+        def _retheme(tokens) -> None:
+            self._panel.apply_tint(tokens)
+
+        _retheme(DEFAULT_THEME)
+        _remember_retheme(self, _retheme)
+
+        self._clock = QTimer(self)
+        self._clock.setInterval(1000)
+        self._clock.timeout.connect(self._refresh_footer_time)
+        self._clock.start()
+        self._refresh_footer_time()
+
+    # -- open/close -----------------------------------------------------------
+
+    def open_over(self, host: QWidget) -> None:
+        """Raise this overlay above ``host``'s full client area.
+
+        ``host`` is normally the top-level Control Station window.
+        """
+
+        if self.parent() is not host:
+            self.setParent(host)
+            self._host = None
+        if self._host is not host:
+            if self._host is not None:
+                self._host.removeEventFilter(self)
+            host.installEventFilter(self)
+            self._host = host
+        self.setGeometry(host.rect())
+        self._layout_panel()
+        self.show()
+        self.raise_()
+
+    def _layout_panel(self) -> None:
+        """Centre ``self._panel``, filling up to ``PANEL_MAX_SIZE``.
+
+        Positioned by hand rather than through a layout -- see the
+        ``__init__`` note on why an aligned layout item won't do this.
+        """
+
+        margin = self.PANEL_MARGIN
+        width = min(max(0, self.width() - 2 * margin), self.PANEL_MAX_SIZE.width())
+        height = min(max(0, self.height() - 2 * margin), self.PANEL_MAX_SIZE.height())
+        x = (self.width() - width) // 2
+        y = (self.height() - height) // 2
+        self._panel.setGeometry(x, y, width, height)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._layout_panel()
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        if (
+            watched is self._host
+            and event.type() == QEvent.Type.Resize
+            and self.isVisible()
+        ):
+            self.setGeometry(self._host.rect())
+        return super().eventFilter(watched, event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        del event
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(4, 8, 16, round(0.55 * 255)))
+        painter.end()
+
+    # -- chrome -----------------------------------------------------------
+
+    def _refresh_footer_time(self) -> None:
+        self._footer_time.setText(f"Refreshed {time.strftime('%H:%M:%S')}")
+        self._resync_if_stale()
+
+    def _resync_if_stale(self) -> None:
+        """Recover if this overlay's geometry ever drifts from the host's.
+
+        The ``eventFilter`` below re-syncs on a plain resize, but some host
+        size changes (a maximize/restore window-state transition) are not
+        guaranteed to arrive as a plain ``QEvent.Resize``. The footer clock
+        already ticks every second while the overlay is open, so this
+        piggybacks on it rather than adding a second timer.
+        """
+
+        if not self.isVisible() or self._host is None:
+            return
+        if self.size() == self._host.size():
+            return
+        self.setGeometry(self._host.rect())
+        self._layout_panel()
+
+    def _build_header(self) -> QWidget:
+        header = QFrame()
+        header.setObjectName("mirlDashboardHeader")
+        header.setFrameShape(QFrame.Shape.NoFrame)
+        row = QHBoxLayout(header)
+        row.setContentsMargins(26, 18, 26, 18)
+        row.setSpacing(16)
+
+        left = QHBoxLayout()
+        left.setSpacing(10)
+        left.addWidget(BrandMark(20))
+        left.addWidget(label("MYELIN", 13, 700, "text", mono=True, spacing=2.0))
+        row.addLayout(left)
+
+        title = label("Live MIRL Dashboard", 15, 800, "text", spacing=3.0, upper=True)
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row.addWidget(title, 1)
+
+        right = QHBoxLayout()
+        right.setSpacing(10)
+        right.addWidget(showcase_chip_pill("MIRL: No Open Episode", "red"))
+        right.addWidget(showcase_chip_pill("Source: Read Model", "green"))
+        right.addWidget(showcase_chip_pill("Projection: Authoritative", "cyan"))
+        right.addWidget(self._build_close_button())
+        row.addLayout(right)
+
+        header.setStyleSheet(
+            f"QFrame#mirlDashboardHeader {{ background: {_white_alpha(0.02)};"
+            f" border-bottom: 1px solid {_white_alpha(0.1)}; }}"
+        )
+        return header
+
+    def _build_close_button(self) -> QPushButton:
+        button = QPushButton("✕")
+        button.setObjectName("mirlDashboardClose")
+        button.setFixedSize(32, 32)
+        button.setFont(make_font(12, 700))
+        button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        button.clicked.connect(self.hide)
+
+        def _retheme(tokens) -> None:
+            hover_border = qalpha(QColor(tokens.red), 0.5).name(QColor.NameFormat.HexArgb)
+            button.setStyleSheet(
+                f"QPushButton#mirlDashboardClose {{ background: transparent;"
+                f" color: {tokens.muted}; border: 1px solid {tokens.border};"
+                f" border-radius: 16px; }}"
+                f"QPushButton#mirlDashboardClose:hover {{ color: {tokens.red};"
+                f" border-color: {hover_border}; }}"
+            )
+
+        _retheme(DEFAULT_THEME)
+        _remember_retheme(button, _retheme)
+        return button
+
+    def _build_subline(self) -> QWidget:
+        sub = QFrame()
+        sub.setObjectName("mirlDashboardSubline")
+        sub.setFrameShape(QFrame.Shape.NoFrame)
+        row = QHBoxLayout(sub)
+        row.setContentsMargins(26, 10, 26, 10)
+        row.setSpacing(14)
+        row.addWidget(label("Authoritative Native MIRL Episode Evidence", 11, 400, "muted"))
+        row.addWidget(label("Exclusions: 3", 11, 400, "muted"))
+        row.addStretch(1)
+        row.addWidget(showcase_outline_button("Export MIRL Report", small=True))
+
+        sub.setStyleSheet(
+            f"QFrame#mirlDashboardSubline {{ background: transparent;"
+            f" border-bottom: 1px solid {_white_alpha(0.07)}; }}"
+        )
+        return sub
+
+    def _build_tabbar(self) -> QWidget:
+        bar = QFrame()
+        bar.setObjectName("mirlDashboardTabbar")
+        bar.setFrameShape(QFrame.Shape.NoFrame)
+        bar.setFixedWidth(206)
+        lay = QVBoxLayout(bar)
+        lay.setContentsMargins(10, 14, 10, 14)
+        lay.setSpacing(4)
+
+        self._tab_group = QButtonGroup(self)
+        self._tab_group.setExclusive(True)
+        # A single trailing stretch pins the 5 buttons to the top and dumps
+        # all of the tab bar's leftover height into one void below Data
+        # Quality -- next to the content column, which fills its own height
+        # with actual panel content, that reads as a mismatched, half-empty
+        # column. A stretch on both ends centres the button group instead,
+        # so the tab bar's used-vs-empty proportions track the content
+        # column's more evenly at any panel height.
+        lay.addStretch(1)
+        for index, title in enumerate(self.TAB_TITLES):
+            button = self._build_tab_button(title)
+            self._tab_group.addButton(button, index)
+            lay.addWidget(button)
+        lay.addStretch(1)
+        self._tab_group.idClicked.connect(self._set_current_tab)
+        self._tab_group.buttons()[0].setChecked(True)
+
+        bar.setStyleSheet(
+            f"QFrame#mirlDashboardTabbar {{ background: transparent;"
+            f" border-right: 1px solid {_white_alpha(0.08)}; }}"
+        )
+        return bar
+
+    def _build_tab_button(self, text: str) -> QPushButton:
+        button = QPushButton(text)
+        button.setObjectName("mirlDashboardTab")
+        button.setCheckable(True)
+        button.setFont(make_font(13.5, 400))
+        button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        button.setMinimumHeight(46)
+
+        def _retheme(tokens) -> None:
+            active_bg = qalpha(QColor(tokens.cyan), 0.10).name(QColor.NameFormat.HexArgb)
+            active_border = qalpha(QColor(tokens.cyan), 0.35).name(QColor.NameFormat.HexArgb)
+            hover_bg = qalpha(QColor(tokens.text_primary), 0.05).name(QColor.NameFormat.HexArgb)
+            button.setStyleSheet(
+                f"QPushButton#mirlDashboardTab {{ text-align: left; background: transparent;"
+                f" color: {tokens.muted}; border: 1px solid transparent;"
+                f" border-radius: {RADIUS_SM}px; padding: 12px 14px; }}"
+                f"QPushButton#mirlDashboardTab:hover {{ background: {hover_bg};"
+                f" color: {tokens.text_primary}; }}"
+                f"QPushButton#mirlDashboardTab:checked {{ background: {active_bg};"
+                f" border: 1px solid {active_border}; color: {tokens.cyan}; font-weight: 700; }}"
+            )
+
+        _retheme(DEFAULT_THEME)
+        _remember_retheme(button, _retheme)
+        return button
+
+    def _set_current_tab(self, index: int) -> None:
+        self._stack.setCurrentIndex(index)
+
+    @staticmethod
+    def _wrap_scroll(page: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setObjectName("showcaseScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        # QAbstractScrollArea always paints its viewport with an opaque
+        # QPalette.Base fill; toggling autoFillBackground off does not stop
+        # it, only an explicit stylesheet on the viewport itself does -- see
+        # https://doc.qt.io/qt-6/qabstractscrollarea.html#autoFillBackground
+        # behaviour of the viewport widget.  Without this the viewport paints
+        # solid over the glass panel's translucent backdrop instead of
+        # letting it show through.
+        scroll.viewport().setStyleSheet("background: transparent;")
+        scroll.setWidget(page)
+        return scroll
+
+    def _build_footer(self) -> QWidget:
+        footer = QFrame()
+        footer.setObjectName("mirlDashboardFooter")
+        footer.setFrameShape(QFrame.Shape.NoFrame)
+        row = QHBoxLayout(footer)
+        row.setContentsMargins(26, 12, 26, 12)
+        row.addWidget(label("MYELIN v2.0 · Corrected Design Preview", 11, 400, "muted"))
+        row.addStretch(1)
+        row.addWidget(self._footer_time)
+
+        footer.setStyleSheet(
+            f"QFrame#mirlDashboardFooter {{ background: transparent;"
+            f" border-top: 1px solid {_white_alpha(0.08)}; }}"
+        )
+        return footer
+
+    # -- tab content ----------------------------------------------------------
+
+    def _build_current_tab(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("plainBox")
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(26, 22, 26, 22)
+        lay.setSpacing(0)
+
+        lay.addWidget(
+            showcase_episode_banner(
+                "Episode Status",
+                "No Active Episode — Inspecting Closed Episode",
+                "Latest Outcome",
+                "Break",
+                status_size=16.0,
+            )
+        )
+        lay.addSpacing(18)
+
+        stats = QGridLayout()
+        stats.setHorizontalSpacing(14)
+        for column, (caption, value, size) in enumerate(
+            (
+                ("Trigger", "71", 22.0),
+                ("SINE Stage", "Not Recorded", 16.0),
+                ("Elapsed Time", "Not Available in Projection", 14.0),
+            )
+        ):
+            stats.addWidget(_glass_gstat(caption, value, size), 0, column)
+            stats.setColumnStretch(column, 1)
+        lay.addLayout(stats)
+        lay.addSpacing(18)
+
+        lay.addWidget(
+            showcase_kv_block(
+                "Episode: EPI104-24072026-02\n"
+                "State: Closed\n"
+                "Latest Outcome: Break\n"
+                "Source Event: 71\n"
+                "Opened: 2026-07-24T06:41:51.596176Z\n"
+                "Closed: 2026-07-24T06:41:59.176Z\n"
+                "Latest Event: episode_closed"
+            )
+        )
+        lay.addStretch(1)
+        return page
+
+    def _build_history_tab(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("plainBox")
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(26, 22, 26, 22)
+        lay.setSpacing(0)
+        lay.addWidget(
+            label(
+                "No Active Episode — 13 historical episode(s) below.", 12, 400, "muted"
+            )
+        )
+        lay.addStretch(1)
+        return page
+
+    def _build_timeline_tab(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("plainBox")
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(26, 22, 26, 22)
+        lay.setSpacing(0)
+        lay.addWidget(
+            label(
+                "EPI104-24072026-02 · 7 authoritative event(s) — episode_seq order",
+                12,
+                400,
+                "muted",
+            )
+        )
+        lay.addStretch(1)
+        return page
+
+    def _build_evidence_tab(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("plainBox")
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(26, 22, 26, 22)
+        lay.setSpacing(0)
+
+        headers = (
+            "#",
+            "Episode ID",
+            "Time Distracted",
+            "Time Recovered",
+            "Highest SINE",
+            "Trigger Time",
+            "Application",
+            "Return Latency",
+        )
+        table = QTableWidget(0, len(headers))
+        table.setObjectName("mirlDashboardEvidenceTable")
+        table.setHorizontalHeaderLabels(list(headers))
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        table.setMinimumHeight(320)
+
+        def _retheme(tokens) -> None:
+            table.setStyleSheet(
+                f"QTableWidget#mirlDashboardEvidenceTable {{ background: transparent;"
+                f" color: {tokens.text_primary}; border: 1px solid {_white_alpha(0.08)};"
+                f" border-radius: {RADIUS_SM}px; gridline-color: {_white_alpha(0.06)}; }}"
+                f"QTableWidget#mirlDashboardEvidenceTable QHeaderView::section {{"
+                f" background: transparent; color: {tokens.muted};"
+                f" border: none; border-bottom: 1px solid {_white_alpha(0.1)};"
+                f" padding: 8px 10px; font-weight: 700; }}"
+            )
+
+        _retheme(DEFAULT_THEME)
+        _remember_retheme(table, _retheme)
+
+        lay.addWidget(table)
+        lay.addStretch(1)
+        return page
+
+    def _build_quality_tab(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("plainBox")
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(26, 22, 26, 22)
+        lay.setSpacing(18)
+
+        first, first_body = _glass_gcard(padding=20)
+        first_body.addWidget(label("Authoritative Evidence Boundary", 14, 700, "text"))
+        first_body.addSpacing(6)
+        first_body.addWidget(label("Read-model source available", 12, 600, "green"))
+        first_body.addSpacing(8)
+        first_body.addWidget(
+            showcase_kv_block(
+                "Presentation mode: Design preview with sample data\n"
+                "Production rule: Every journey node must be projected from a "
+                "committed MIRL event\n"
+                "Missing evidence: Display as unavailable; never paint as completed\n"
+                "Episode ordering: episode_seq\n"
+                "Scientific boundary: Behavioral and software evidence only"
+            )
+        )
+        lay.addWidget(first)
+
+        second, second_body = _glass_gcard(padding=20)
+        second_body.addWidget(label("Preview Integrity Notice", 14, 700, "text"))
+        second_body.addSpacing(6)
+        second_body.addWidget(
+            label(
+                "The values in this dialog demonstrate layout only. They are not "
+                "production evidence and must not be written to MYELIN databases, "
+                "telemetry, or reports.",
+                12,
+                400,
+                "muted",
+                wrap=True,
+            )
+        )
+        lay.addWidget(second)
+
+        lay.addStretch(1)
+        return page
 
 
 class CosineShowcasePage(QWidget):
@@ -2484,10 +3144,6 @@ def _showcase_content_node(platform: str, title: str, stamp: str) -> QFrame:
     box.setObjectName("showcaseJourneyStep")
     box.setFrameShape(QFrame.Shape.NoFrame)
     box.setFixedWidth(150)
-    box.setStyleSheet(
-        f"QFrame#showcaseJourneyStep {{ background: {DEFAULT_THEME.surface_soft};"
-        f" border: 1px solid {DEFAULT_THEME.border}; border-radius: {RADIUS_MD}px; }}"
-    )
     lay = QVBoxLayout(box)
     lay.setContentsMargins(12, 12, 12, 12)
     lay.setSpacing(0)
@@ -2499,6 +3155,15 @@ def _showcase_content_node(platform: str, title: str, stamp: str) -> QFrame:
     lay.addWidget(name)
     lay.addSpacing(10)
     lay.addWidget(label(stamp, 10, 400, "muted", mono=True))
+
+    def _retheme(tokens) -> None:
+        box.setStyleSheet(
+            f"QFrame#showcaseJourneyStep {{ background: {tokens.surface_soft};"
+            f" border: 1px solid {tokens.border}; border-radius: {RADIUS_MD}px; }}"
+        )
+
+    _retheme(DEFAULT_THEME)
+    _remember_retheme(box, _retheme)
     return box
 
 
@@ -3287,6 +3952,422 @@ class ControlPage(QWidget):
             restyle(chip)
 
 
+def _sine_owner_claim_id(fact: object) -> str | None:
+    """Build the opaque claim id from the frozen SINE<->MIRL shared owner.
+
+    ``(session_id, candidate_uid, operational_event_id)`` is the identity
+    MIRL's own final-closure fact will also expose once Phase 2E exists.
+    SINE's own ``episode_uid`` is NOT the same as MIRL's episode id -- see
+    the Phase 1.1 source-audit finding -- so ``episode_uid`` must never be
+    the cross-organ key ``ThemeController`` is handed.  All three fields are
+    required; a fact missing any of them cannot be safely owned.
+    """
+
+    session_id = getattr(fact, "session_id", None)
+    candidate_uid = str(getattr(fact, "candidate_uid", "") or "")
+    operational_event_id = getattr(fact, "operational_event_id", None)
+    if session_id is None or not candidate_uid or operational_event_id is None:
+        return None
+    return f"sine:{session_id}:{candidate_uid}:{operational_event_id}"
+
+
+# COSECANT states for which the continuity popup's own ``popup_required`` is
+# True -- BREAK_ACTIVE is deliberately excluded, matching the doc's Green
+# start law.  Kept in sync with ``CosecantSnapshot`` construction, not
+# re-derived from it, since a presentation coordinator must not guess.
+_COSECANT_GREEN_STATES: Final = frozenset(
+    {
+        CosecantState.BREAK_COMPLETE,
+        CosecantState.BREAK_ALREADY_OVER,
+        CosecantState.FINAL_LOCK,
+        CosecantState.RETURN_CONFIRMING,
+    }
+)
+
+
+def _cosecant_owner_claim_id(payload: object) -> str | None:
+    """Build the opaque Green claim id from the COSECANT break identity.
+
+    ``(study_block_id, break_id)`` together uniquely identify one approved
+    break: a fresh ``break_id`` is minted for every accepted break, and both
+    fields are present on both the ``CosecantSnapshot`` that presents Green
+    and the ``CosecantFact`` that releases it -- unlike COSECANT's own
+    generation counter, which a release fact does not carry.
+    """
+
+    study_block_id = str(getattr(payload, "study_block_id", "") or "")
+    break_id = str(getattr(payload, "break_id", "") or "")
+    if not study_block_id or not break_id:
+        return None
+    return f"cosecant:{study_block_id}:{break_id}"
+
+
+@dataclass
+class _PendingSineAtmosphere:
+    """One tracked Normal-SINE presentation window for one owner.
+
+    ``claim_id`` is the shared cross-organ owner identity handed to
+    ``ThemeController``.  ``episode_uid``/``popup_request_id`` are SINE's own
+    local identity, retained only so this coordinator can recognise a
+    duplicate ``SINE_DISPLAYED`` fact for the exact occurrence it is already
+    tracking -- they never reach ``theme.py``.
+
+    ``active_atmosphere`` and ``pending_atmosphere`` are deliberately
+    separate: SINE advancing an episode from stage 2 to stage 3 must replace
+    the pending target (Amber -> Red) on this same record without losing
+    track of the atmosphere that is already claimed, or a cancellation
+    arriving during that one-second handoff would have no address left to
+    release.
+    """
+
+    claim_id: str
+    episode_uid: str
+    popup_request_id: str
+    active_atmosphere: "Atmosphere | None" = None
+    pending_atmosphere: "Atmosphere | None" = None
+
+
+class _NormalSinePresentationCoordinator:
+    """Translates raw SINE and MIRL facts into common-theme atmosphere claims.
+
+    Phase 2B+2C+2D+2E scope: a factual ``SINE_DISPLAYED`` stage-2 fact,
+    anchored to its own ``occurred_monotonic_ns``, becomes an
+    ``AMBER_ALERT`` claim exactly one second later; stage 3 becomes
+    ``RED_ALERT`` the same way, replacing Amber on the very same owner claim
+    so there is no base/Neon flash between them.  A factual
+    ``SINE_POST_BREAK_RETURN_GATE_DISPLAYED`` (Welcome Back actually shown
+    -- not a stage, SINE says so explicitly) claims ``GREEN_RETURN``
+    immediately, no delay; the matching
+    ``SINE_POST_BREAK_RETURN_ACKNOWLEDGED`` (I'M BACK accepted) releases it
+    immediately, and only it -- never an active Amber/Red.  A factual
+    ``MIRL_EPISODE_CLOSED`` with reason ``RETURNED``, anchored to its own
+    ``occurred_monotonic_ns`` (never SINE's resolution timestamp -- that can
+    be tens of seconds stale by the time final closure happens), releases a
+    still-active matching Amber/Red exactly two seconds later -- never
+    Green, which only the Break acknowledgement releases.  All of this is
+    cancelled/resolved/reset exactly as Amber alone was in Phase 2B.
+
+    Phase 3A+3B: stage 2 and stage 3 both activate for a STUDY episode (a
+    non-empty ``study_context_token``) through the exact same path as a
+    Normal one -- Study SINE is still SINE, still the same organ, still the
+    same common body, with no separate Study identity in the claim.  Phase
+    3C/3D certified (with zero code required) that the same generic
+    MIRL-release and terminal-cancellation handling below already covers a
+    Study-owned Amber/Red claim, because neither ever inspects
+    ``study_context_token``.
+
+    Phase 3E: a factual "this exact COSECANT continuity-popup snapshot was
+    visibly presented" receipt for a popup-required state (BREAK_COMPLETE,
+    BREAK_ALREADY_OVER, FINAL_LOCK, RETURN_CONFIRMING -- never BREAK_ACTIVE)
+    claims ``GREEN_RETURN`` immediately, keyed by the COSECANT break's own
+    ``(study_block_id, break_id)`` identity -- a second, independent owner
+    namespace from the SINE/MIRL one above, tracked in two plain attributes
+    rather than a second dictionary.  A factual ``RETURN_INTENT_RECORDED``
+    (RETURN TO STUDY accepted) or ``RETURN_CONFIRMED`` (the FINAL_LOCK
+    fallback) releases that exact Green claim immediately and permanently
+    suppresses it, so a later queued popup projection for the same
+    already-released break cannot re-claim Green.
+
+    This coordinator owns no SINE timing, no MIRL truth, no COSECANT timing
+    and no stage/break state of its own: it only reacts to facts SINE, MIRL
+    and COSECANT already publish and to the engine's existing lifecycle
+    signal, and it tracks only what it needs to keep a delayed
+    activation/release from firing -- or a suppressed claim from
+    re-activating -- after its owner is no longer current.
+    """
+
+    _ONE_SECOND_NS = 1_000_000_000
+    _TWO_SECOND_NS = 2_000_000_000
+
+    def __init__(self, theme: ThemeController) -> None:
+        self._theme = theme
+        # COSECANT Green ownership: a second, independent claim namespace
+        # from the SINE/MIRL ``_pending`` dict above.  Exactly two pointers,
+        # not a second dictionary -- one active break can hold Green.
+        self._cosecant_green_claim_id: str | None = None
+        self._cosecant_green_suppressed_claim_id: str | None = None
+        self._pending: dict[str, _PendingSineAtmosphere] = {}
+
+    def handle_sine_fact(self, fact: object) -> None:
+        kind = str(getattr(fact, "kind", ""))
+        if kind == "SINE_DISPLAYED":
+            self._handle_displayed(fact)
+        elif kind == "SINE_POST_BREAK_RETURN_GATE_DISPLAYED":
+            self._handle_return_gate_displayed(fact)
+        elif kind == "SINE_POST_BREAK_RETURN_ACKNOWLEDGED":
+            self._handle_return_acknowledged(fact)
+        elif kind == "SINE_EPISODE_CANCELLED":
+            self._invalidate_matching(fact, release_if_active=True)
+        elif kind == "SINE_EPISODE_RESOLVED":
+            # Phase 2E owns the final MIRL +2s release for an already-active
+            # claim; resolution only stops a still-pending one from firing.
+            self._invalidate_matching(fact, release_if_active=False)
+
+    def handle_mirl_fact(self, event: object) -> None:
+        """Factual MIRL recovery closure: release a matching warning at +2s.
+
+        Only ``MIRL_EPISODE_CLOSED`` with ``reason == "RETURNED"`` matters
+        here; every other MIRL event (return verification, closure
+        confirmation, a non-RETURNED closure) is ignored.  The owner is the
+        same shared ``(session_id, candidate_uid, operational_event_id)``
+        identity SINE facts use -- MIRL's own ``episode_id`` is never
+        compared against SINE's ``episode_uid``; they are different
+        namespaces and this coordinator does not bridge them.
+        """
+
+        if str(getattr(event, "kind", "")) != "MIRL_EPISODE_CLOSED":
+            return
+        if str(getattr(event, "reason", "")) != "RETURNED":
+            return
+
+        claim_id = _sine_owner_claim_id(event)
+        if claim_id is None:
+            return
+        record = self._pending.get(claim_id)
+        if record is None or record.active_atmosphere not in (
+            Atmosphere.AMBER_ALERT,
+            Atmosphere.RED_ALERT,
+        ):
+            return  # nothing to release, or the active claim is Green -- never touch that
+
+        anchor_ns = int(getattr(event, "occurred_monotonic_ns", 0) or 0)
+        if anchor_ns <= 0:
+            return  # no safe factual timestamp to anchor a release to
+
+        remaining_ns = (anchor_ns + self._TWO_SECOND_NS) - time.monotonic_ns()
+        remaining_ms = (remaining_ns + 999_999) // 1_000_000 if remaining_ns > 0 else 0
+
+        QTimer.singleShot(
+            remaining_ms,
+            lambda record=record, claim_id=claim_id: self._release_after_mirl(record, claim_id),
+        )
+
+    def _release_after_mirl(self, record: _PendingSineAtmosphere, claim_id: str) -> None:
+        if self._pending.get(claim_id) is not record:
+            return  # invalidated (cancelled/resolved/session reset) before firing
+        if record.active_atmosphere not in (Atmosphere.AMBER_ALERT, Atmosphere.RED_ALERT):
+            return  # no longer a warning to release (e.g. became Green meanwhile)
+        del self._pending[claim_id]
+        self._theme.release_atmosphere(claim_id)
+
+    def handle_engine_status(self, status: object) -> None:
+        """Reset at a new-session/stop/emergency presentation boundary.
+
+        ``STOPPING`` resets immediately rather than waiting for ``STOPPED``:
+        the presentation is already invalid the moment a normal stop begins,
+        and waiting for backend cleanup to finish would leave a window where
+        an old +1s callback could still fire and show Amber for a session
+        that is already on its way out.
+        """
+
+        if str(getattr(status, "value", status)) in (
+            "STARTING",
+            "STOPPING",
+            "STOPPED",
+            "EMERGENCY",
+        ):
+            self.reset()
+
+    def reset(self) -> None:
+        """Invalidate every pending callback and release only our claims.
+
+        Never calls ``theme.clear_runtime_atmospheres()``: one common theme
+        depends on all organs, and another organ may own a claim this SINE
+        presentation layer has no business touching.
+        """
+
+        for record in self._pending.values():
+            if record.active_atmosphere is not None:
+                self._theme.release_atmosphere(record.claim_id)
+        self._pending.clear()
+
+        if self._cosecant_green_claim_id is not None:
+            self._theme.release_atmosphere(self._cosecant_green_claim_id)
+        self._cosecant_green_claim_id = None
+        self._cosecant_green_suppressed_claim_id = None
+
+    def handle_cosecant_popup_presented(self, snapshot: object) -> None:
+        """A COSECANT continuity popup was factually shown: claim Green.
+
+        The Green start law is the presentation receipt itself, not the
+        break clock: this is called only when ``ContinuityPopup.present_
+        snapshot`` actually returned True for this exact snapshot.
+        """
+
+        if not bool(getattr(snapshot, "popup_required", False)):
+            return
+        if getattr(snapshot, "state", None) not in _COSECANT_GREEN_STATES:
+            return
+        claim_id = _cosecant_owner_claim_id(snapshot)
+        if claim_id is None:
+            return
+        if claim_id == self._cosecant_green_suppressed_claim_id:
+            return  # this exact break's Green was already authoritatively released
+
+        if (
+            self._cosecant_green_claim_id is not None
+            and self._cosecant_green_claim_id != claim_id
+        ):
+            # COSECANT owns only one approved break at a time.  Release the
+            # old break's Green claim before claiming the new one; never
+            # touch a SINE/MIRL claim from here.
+            self._theme.release_atmosphere(self._cosecant_green_claim_id)
+
+        self._cosecant_green_claim_id = claim_id
+        self._theme.claim_atmosphere(claim_id, Atmosphere.GREEN_RETURN)
+
+    def handle_cosecant_fact(self, fact: object) -> None:
+        """Factual RETURN_INTENT_RECORDED/RETURN_CONFIRMED: release Green now.
+
+        Both releases are immediate -- no timer, no MIRL-style delay.  The
+        claim is also permanently suppressed here (even if Green was never
+        actually claimed yet), so a delayed ``popup_presented`` receipt for
+        this exact already-released break cannot re-claim Green later.
+        """
+
+        kind = getattr(fact, "kind", None)
+        if kind not in (
+            CosecantFactKind.RETURN_INTENT_RECORDED,
+            CosecantFactKind.RETURN_CONFIRMED,
+        ):
+            return
+        claim_id = _cosecant_owner_claim_id(fact)
+        if claim_id is None:
+            return
+
+        self._cosecant_green_suppressed_claim_id = claim_id
+        if self._cosecant_green_claim_id == claim_id:
+            self._theme.release_atmosphere(claim_id)
+            self._cosecant_green_claim_id = None
+
+    def _handle_displayed(self, fact: object) -> None:
+        stage = int(getattr(fact, "stage", 0) or 0)
+        if stage == 2:
+            target = Atmosphere.AMBER_ALERT
+        elif stage == 3:
+            target = Atmosphere.RED_ALERT
+        else:
+            return  # stage 2/3 claim Amber/Red for Normal AND Study; stage 1 claims nothing.
+
+        claim_id = _sine_owner_claim_id(fact)
+        episode_uid = str(getattr(fact, "episode_uid", "") or "")
+        if claim_id is None or not episode_uid:
+            return
+
+        record = self._pending.get(claim_id)
+        if record is not None and record.episode_uid == episode_uid:
+            if record.pending_atmosphere is target or record.active_atmosphere is target:
+                return  # duplicate DISPLAYED fact -- already scheduled or already this world
+        else:
+            record = _PendingSineAtmosphere(
+                claim_id=claim_id,
+                episode_uid=episode_uid,
+                popup_request_id=str(getattr(fact, "popup_request_id", "") or ""),
+            )
+            self._pending[claim_id] = record
+
+        record.popup_request_id = str(getattr(fact, "popup_request_id", "") or "")
+        record.pending_atmosphere = target
+
+        # Anchor to the fact's own display time, not to when it happened to
+        # reach this GUI callback, so queue/transport delay cannot shorten or
+        # lengthen the approved one-second delay.  Ceiling (never floor) the
+        # remaining duration so presentation cannot land fractionally before
+        # the +1s boundary.
+        anchor_ns = int(getattr(fact, "occurred_monotonic_ns", 0) or 0)
+        remaining_ns = (anchor_ns + self._ONE_SECOND_NS) - time.monotonic_ns()
+        remaining_ms = (remaining_ns + 999_999) // 1_000_000 if remaining_ns > 0 else 0
+
+        QTimer.singleShot(
+            remaining_ms,
+            lambda record=record, target=target: self._activate(record, target),
+        )
+
+    def _activate(self, record: _PendingSineAtmosphere, target: "Atmosphere") -> None:
+        if self._pending.get(record.claim_id) is not record:
+            return  # invalidated (cancelled/resolved/session reset) before firing
+        if record.pending_atmosphere is not target:
+            return  # superseded by a later stage's own scheduled activation
+        record.pending_atmosphere = None
+        record.active_atmosphere = target
+        self._theme.claim_atmosphere(record.claim_id, target)
+
+    def _handle_return_gate_displayed(self, fact: object) -> None:
+        """Welcome Back is factually visible: claim Green -- no +1s delay.
+
+        This is not a stage escalation (SINE says so explicitly: "SINE 2
+        does not exist yet"), so it uses the same record but never goes
+        through the pending/+1s machinery ``_handle_displayed`` uses.
+        """
+
+        if str(getattr(fact, "study_context_token", "") or "").strip():
+            return  # Study Break Green is Phase 3, not Phase 2D.
+
+        claim_id = _sine_owner_claim_id(fact)
+        episode_uid = str(getattr(fact, "episode_uid", "") or "")
+        if claim_id is None or not episode_uid:
+            return
+
+        record = self._pending.get(claim_id)
+        if record is None or record.episode_uid != episode_uid:
+            record = _PendingSineAtmosphere(
+                claim_id=claim_id,
+                episode_uid=episode_uid,
+                popup_request_id=str(getattr(fact, "popup_request_id", "") or ""),
+            )
+            self._pending[claim_id] = record
+
+        # A still-pending Amber/Red activation for this owner must not fire
+        # after Green has been claimed; Green itself is immediate truth, not
+        # a scheduled one.
+        record.popup_request_id = str(getattr(fact, "popup_request_id", "") or "")
+        record.pending_atmosphere = None
+        record.active_atmosphere = Atmosphere.GREEN_RETURN
+        self._theme.claim_atmosphere(claim_id, Atmosphere.GREEN_RETURN)
+
+    def _handle_return_acknowledged(self, fact: object) -> None:
+        """I'M BACK was accepted: release Green immediately, nothing else.
+
+        Must never release Amber/Red -- only a matching, currently-active
+        Green claim for the exact tracked owner and episode.
+        """
+
+        claim_id = _sine_owner_claim_id(fact)
+        if claim_id is None:
+            return
+        episode_uid = str(getattr(fact, "episode_uid", "") or "")
+        record = self._pending.get(claim_id)
+        if record is None or record.episode_uid != episode_uid:
+            return  # wrong owner or wrong episode -- an active Green stays untouched
+        if record.active_atmosphere is not Atmosphere.GREEN_RETURN:
+            return  # guard: never release Amber/Red from this acknowledgement
+        del self._pending[claim_id]
+        self._theme.release_atmosphere(claim_id)
+
+    def _invalidate_matching(self, fact: object, *, release_if_active: bool) -> None:
+        claim_id = _sine_owner_claim_id(fact)
+        if claim_id is None:
+            return
+        episode_uid = str(getattr(fact, "episode_uid", "") or "")
+        record = self._pending.get(claim_id)
+        if record is None or record.episode_uid != episode_uid:
+            return  # not a match for the exact occurrence this coordinator tracks
+
+        if record.active_atmosphere is not None and not release_if_active:
+            # Resolution: the active world (Amber or Red) stays claimed and
+            # stays tracked, so a later STOPPING/EMERGENCY reset (or Phase
+            # 2E's own release) still has this claim's address instead of
+            # losing it the moment SINE resolves the episode.  A still-
+            # pending (not yet fired) activation is cancelled either way --
+            # nothing should activate for an episode that just resolved.
+            record.pending_atmosphere = None
+            return
+
+        del self._pending[claim_id]
+        if record.active_atmosphere is not None and release_if_active:
+            self._theme.release_atmosphere(claim_id)
+
+
 class ControlStationWindow(QMainWindow):
     """The main MYELIN window and composition root.
 
@@ -3316,7 +4397,7 @@ class ControlStationWindow(QMainWindow):
         )
         self.setWindowFlags(native_flags)
         self.setWindowTitle(APP_NAME)
-        self.setWindowIcon(resource_icon("icons/Myelin_Loading_Screen.ico"))
+        self.setWindowIcon(_canonical_application_icon())
         self.setMinimumSize(MINIMUM_WINDOW_SIZE)
         self.resize(DEFAULT_WINDOW_SIZE)
 
@@ -3331,7 +4412,8 @@ class ControlStationWindow(QMainWindow):
         """Create exactly one owner for every Control Station responsibility."""
 
         self.settings = SettingsController(parent=self)
-        self.theme = ThemeController(self.settings)
+        self.theme = ThemeController(parent=self)
+        self._sine_presentation = _NormalSinePresentationCoordinator(self.theme)
         self.profiles = ProfileController(self.settings)
         self.engine = ControlStationController(parent=self)
 
@@ -3441,6 +4523,8 @@ class ControlStationWindow(QMainWindow):
         self.shell.sidebar_dismiss_requested.connect(self.navigation.close_sidebar)
         self.shell.clock_visibility_requested.connect(self._toggle_clock)
         self.shell.analytics_requested.connect(self.analytics.open_composer)
+        self.sidebar.settings_requested.connect(self._open_settings)
+        self.settings.changed.connect(self._settings_changed)
 
         self.navigation.page_opened.connect(self.analytics.page_opened)
         self.navigation.page_opened.connect(self.settings.set_last_page)
@@ -3476,6 +4560,12 @@ class ControlStationWindow(QMainWindow):
         self.pages.study.return_intent_requested.connect(self.engine.request_cosecant_return_intent)
 
         self.theme.theme_changed.connect(self._apply_theme)
+        self.engine.sine_fact_received.connect(self._sine_presentation.handle_sine_fact)
+        self.engine.mirl_fact_received.connect(self._sine_presentation.handle_mirl_fact)
+        self.engine.cosecant_fact_received.connect(self._sine_presentation.handle_cosecant_fact)
+        self.pages.study.continuity_popup_presented.connect(
+            self._sine_presentation.handle_cosecant_popup_presented
+        )
 
         # After every signal connection exists, request one initial Today
         # Health read so the card cannot remain permanently at Loading when
@@ -3490,8 +4580,10 @@ class ControlStationWindow(QMainWindow):
 
         self.shell.set_clock_visible(preferences.clock_visible)
         self.navigation.restore_page(preferences.last_page, fallback=PAGE_CONTROL)
+        self.theme.set_base_theme(preferences.base_theme)
         self.theme.set_reduced_motion(preferences.reduced_motion)
         self.navigation.set_reduced_motion(preferences.reduced_motion)
+        self.shell.alert_border.set_reduced_motion(preferences.reduced_motion)
         self.tray.apply_minimize_behavior(preferences.minimize_behavior)
         self._apply_theme(self.theme.current_theme)
 
@@ -3500,8 +4592,23 @@ class ControlStationWindow(QMainWindow):
         self.shell.set_clock_visible(visible)
         self.settings.set_clock_visible(visible)
 
+    def _settings_changed(self, name: str, value: object) -> None:
+        """React to a validated preference change; never to organ truth."""
+
+        if name == "base_theme":
+            self.theme.set_base_theme(str(value))
+
+    def _open_settings(self) -> None:
+        """``MENU -> SETTINGS -> THEME``: the drawer's Settings row was pressed."""
+
+        self.navigation.close_sidebar()
+        dialog = ThemePreferenceDialog(self.theme.base_theme.value, parent=self)
+        dialog.theme_selected.connect(lambda key: self.settings.set("base_theme", key))
+        dialog.exec()
+
     def _engine_status_changed(self, status: EngineStatus) -> None:
         self.pages.study.set_monitoring_active(status is EngineStatus.ACTIVE)
+        self._sine_presentation.handle_engine_status(status)
         print(f"[MYELIN][ENGINE] status={status}", flush=True)
 
     @staticmethod
@@ -3616,13 +4723,54 @@ class ControlStationWindow(QMainWindow):
             flush=True,
         )
 
+    # Every custom painter this launcher can reach.  A widget of one of these
+    # classes anywhere under ``self.shell`` is refreshed automatically, so no
+    # per-page wiring is needed when a new card or chart is added later.
+    _THEME_AWARE_WIDGET_TYPES: Final = (
+        AxonCanvas,
+        EngineRing,
+        BarTrack,
+        Dot,
+        CircuitTrace,
+        BrandMark,
+        NavIcon,
+        HeroCard,
+        ShowcaseBarChart,
+        ShowcaseDonut,
+        ShowcaseScatter,
+        StudyRing,
+        _ShowcaseArrow,
+    )
+
     def _apply_theme(self, theme) -> None:
         """Apply visual truth, then refresh the native Windows caption."""
 
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(build_application_stylesheet(theme))
+        set_active_theme(theme)
         self.navigation.apply_theme(theme)
+        self.shell.apply_theme(theme)
+        self.pages.study.apply_theme(theme)
+        for widget_type in self._THEME_AWARE_WIDGET_TYPES:
+            for widget in self.shell.findChildren(widget_type):
+                widget.apply_theme(theme)
+
+        # One-off showcase fixtures (Metric Hub / Live MIRL / COSINE cards,
+        # journey pills/steps, the CTA button, table dividers, ...) that build
+        # a literal per-instance stylesheet instead of a custom painter class
+        # register a ``_retheme`` closure at construction time -- see
+        # ``_remember_retheme``.  This is the one place that closure is ever
+        # invoked again.
+        for widget in self.shell.findChildren(QWidget):
+            retheme = getattr(widget, "_retheme", None)
+            if callable(retheme):
+                retheme(theme)
+
+        self.shell.alert_border.set_alert(
+            theme.cyan if theme in (AMBER_ALERT_THEME, RED_ALERT_THEME) else None
+        )
+
         self.shell.setProperty("themeWorld", theme.world_name)
         self.shell.style().unpolish(self.shell)
         self.shell.style().polish(self.shell)
@@ -3745,16 +4893,25 @@ class StartupSequence:
         self._is_finished = False
         self._window: ControlStationWindow | None = None
 
-        self._splash = StartupLoadingScreen(
+        self._splash = MyelinLoadingScreen(
             logo_path=self._resolve_loading_logo(),
         )
+        # Volunteer the window icon up front rather than waiting to be asked.
+        # Qt holds it until the native window exists, so this is the icon the
+        # HWND created by start()'s show() is born with.
+        self._splash.setWindowIcon(_canonical_application_icon())
 
     @property
-    def splash(self) -> StartupLoadingScreen:
+    def splash(self) -> MyelinLoadingScreen:
         return self._splash
 
     def start(self) -> None:
         self._splash.start()
+        # The splash now owns a native window and the GUI thread is still
+        # free.  Push the icon again here so a real WM_SETICON goes out while
+        # nothing is blocking, instead of Explorer having to query for it
+        # later while ControlStationWindow() holds the thread.
+        self._splash.setWindowIcon(_canonical_application_icon())
         self._splash.set_status("Initializing Control Station")
         QTimer.singleShot(0, self._run_startup_gate)
 
@@ -3831,11 +4988,24 @@ class StartupSequence:
         return str(resource_path("images/Myelin_Loading_Screen.png"))
 
 
+def _canonical_application_icon() -> QIcon:
+    """Return THE MYELIN icon, for every window and for the application.
+
+    One asset, one loader.  Windows paints the *window* icon on the taskbar
+    button and falls back to the *application* icon only for windows that set
+    none -- in practice the frameless startup splash.  Two call sites loading
+    two different files therefore showed two different marks during startup.
+    Routing both through here keeps them from drifting apart again.
+    """
+
+    return resource_icon("icons/Myelin_2.ico")
+
+
 def _configure_application(app: QApplication) -> None:
     """Apply process-wide Qt settings before any main window is created."""
 
     app.setApplicationName("MYELIN Control Station")
-    app.setWindowIcon(resource_icon("icons/Myelin_Loading_Screen.ico"))
+    app.setWindowIcon(_canonical_application_icon())
     app.setQuitOnLastWindowClosed(False)
     app.setFont(make_font(13, 400))
     app.setStyleSheet(build_application_stylesheet())

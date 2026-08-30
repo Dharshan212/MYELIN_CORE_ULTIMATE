@@ -297,11 +297,11 @@ class MyelinLoadingOverlay(QWidget):
 
     def apply_theme(self, tokens) -> None:
         self.symbol.apply_theme(tokens)
-        self._base = QColor(_theme_role(tokens, "base", "#0B0F19"))
+        self._base = QColor(_theme_role(tokens, "window_background", "#0B0F19"))
         surface = QColor(_theme_role(tokens, "surface", "#111827"))
         surface.setAlphaF(0.94)
         border = _theme_role(tokens, "border", "#334155")
-        text = _theme_role(tokens, "text", "#F8FAFC")
+        text = _theme_role(tokens, "text_primary", "#F8FAFC")
         muted = _theme_role(tokens, "muted", "#94A3B8")
         self.panel.setStyleSheet(
             "QWidget#myelinLoadingPanel {"
@@ -423,6 +423,9 @@ class NavigationController(QObject):
 
     def apply_theme(self, tokens) -> None:
         self.loading_overlay.apply_theme(tokens)
+        sidebar_apply_theme = getattr(self.sidebar, "apply_theme", None)
+        if callable(sidebar_apply_theme):
+            sidebar_apply_theme(tokens)
 
     def set_reduced_motion(self, enabled: bool) -> None:
         self._reduced_motion = bool(enabled)

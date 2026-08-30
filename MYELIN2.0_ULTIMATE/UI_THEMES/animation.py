@@ -25,6 +25,27 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QLabel, QProgressBar, QSizePolicy, QVBoxLayout, QWidget
 
+from UI_THEMES.theme import DEFAULT_THEME
+
+# The default theme a newly constructed painter starts from.  Updated by
+# ``set_active_theme`` on every world change so a widget built after a theme
+# switch does not start one frame behind on the old world; it is a
+# presentation-only pointer to one of theme.py's own immutable token sets,
+# never mutated data and never organ-specific.
+_ACTIVE_THEME = DEFAULT_THEME
+
+
+def set_active_theme(tokens) -> None:
+    """Record the theme newly constructed painters should start from.
+
+    This does not repaint anything by itself.  ``ControlStationWindow``
+    still calls ``apply_theme(tokens)`` on every live painter it can reach.
+    """
+
+    global _ACTIVE_THEME
+    _ACTIVE_THEME = tokens
+
+
 class _AnimatedWidget(QWidget):
     """Frame-timer base.  ``start()``/``stop()`` keep their old meaning; the
     timer additionally pauses whenever the widget is not on screen, so a
@@ -48,7 +69,8 @@ class _AnimatedWidget(QWidget):
 
 class LoadingBackdrop(_AnimatedWidget):
     def paintEvent(self, event):
-        del event; p=QPainter(self); p.fillRect(self.rect(), QColor("#0B0F19")); p.end()
+        from UI_THEMES.theme import DEFAULT_THEME
+        del event; p=QPainter(self); p.fillRect(self.rect(), QColor(DEFAULT_THEME.window_background)); p.end()
 
 class LoadingCornerTrace(_AnimatedWidget):
     def __init__(self, *, rotated=False, delay_ms=0, parent=None):
@@ -91,6 +113,7 @@ class AxonCanvas(QWidget):
         # Static geometry is rebuilt on resize only, never per frame.
         self._edge_lines: list[QLineF] | None = None
         self._clip_path: QPainterPath | None = None
+        self._theme = _ACTIVE_THEME
         self._wanted = False
         self._frame = QTimer(self)
         self._frame.timeout.connect(self._tick)
@@ -130,6 +153,10 @@ class AxonCanvas(QWidget):
             self.update()
         else:
             self.start()
+
+    def apply_theme(self, tokens) -> None:
+        self._theme = tokens
+        self.update()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -212,7 +239,7 @@ class AxonCanvas(QWidget):
         del event
         if not self._nodes:
             return
-        from UI_THEMES.theme import DEFAULT_THEME, qalpha
+        from UI_THEMES.theme import qalpha
 
         if self._edge_lines is None:
             self._rebuild_static()
@@ -221,7 +248,7 @@ class AxonCanvas(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.setClipPath(self._clip_path)
         p.setOpacity(0.55)
-        line = QColor(DEFAULT_THEME.cyan)
+        line = QColor(self._theme.cyan)
 
         pen = QPen(qalpha(line, 0.16))
         pen.setWidthF(1.0)
@@ -257,6 +284,7 @@ class EngineRing(QWidget):
         self.setObjectName("plainBox")
         self.setFixedSize(self.SIZE, self.SIZE)
         self._progress = progress
+        self._theme = _ACTIVE_THEME
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -290,10 +318,15 @@ class EngineRing(QWidget):
             else "%02d:%02d" % (minutes, secs)
         )
 
+    def apply_theme(self, tokens) -> None:
+        self._theme = tokens
+        self.update()
+
     def paintEvent(self, event) -> None:  # noqa: N802
         del event
-        from UI_THEMES.theme import DEFAULT_THEME as t, qalpha
+        from UI_THEMES.theme import qalpha
 
+        t = self._theme
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         r = self.rect().adjusted(0, 0, -1, -1)
@@ -348,6 +381,7 @@ class BarTrack(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._pct = pct
         self._colour = colour
+        self._theme = _ACTIVE_THEME
 
     def set_progress(self, pct: float, colour: str | None = None) -> None:
         """Update an existing track in place; no widget is recreated."""
@@ -363,9 +397,13 @@ class BarTrack(QWidget):
         self._colour = new_colour
         self.update()
 
+    def apply_theme(self, tokens) -> None:
+        self._theme = tokens
+        self.update()
+
     def paintEvent(self, event) -> None:  # noqa: N802
         del event
-        from UI_THEMES.theme import DEFAULT_THEME as t
+        t = self._theme
 
         roles = {
             "cyan": t.cyan, "red": t.red, "amber": t.amber,
@@ -402,6 +440,7 @@ class Dot(QWidget):
         self._size = size
         self._colour = colour
         self._glow = glow
+        self._theme = _ACTIVE_THEME
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
     def set_colour(self, colour: str) -> None:
@@ -409,10 +448,15 @@ class Dot(QWidget):
             self._colour = colour
             self.update()
 
+    def apply_theme(self, tokens) -> None:
+        self._theme = tokens
+        self.update()
+
     def paintEvent(self, event) -> None:  # noqa: N802
         del event
-        from UI_THEMES.theme import DEFAULT_THEME as t, qalpha
+        from UI_THEMES.theme import qalpha
 
+        t = self._theme
         roles = {
             "cyan": t.cyan, "red": t.red, "amber": t.amber,
             "green": t.green, "violet": t.violet, "muted": t.muted,
@@ -454,6 +498,7 @@ class CircuitTrace(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._mirrored = mirrored
         self._t = -delay_ms / 3200.0
+        self._theme = _ACTIVE_THEME
         self._wanted = False
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -505,10 +550,15 @@ class CircuitTrace(QWidget):
             self._t -= 1.0
         self.update()
 
+    def apply_theme(self, tokens) -> None:
+        self._theme = tokens
+        self.update()
+
     def paintEvent(self, event) -> None:  # noqa: N802
         del event
-        from UI_THEMES.theme import DEFAULT_THEME as t, qalpha
+        from UI_THEMES.theme import qalpha
 
+        t = self._theme
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.setOpacity(0.8)
@@ -565,11 +615,16 @@ class BrandMark(QWidget):
     def __init__(self, size: int = 26, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedSize(size, size)
+        self._theme = _ACTIVE_THEME
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def apply_theme(self, tokens) -> None:
+        self._theme = tokens
+        self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802
         del event
-        from UI_THEMES.theme import DEFAULT_THEME as t
+        t = self._theme
 
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -624,13 +679,24 @@ class NavIcon(QWidget):
         self.setFixedSize(self.SIZE, self.SIZE)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._paths = self._glyph(str(name))
-        self._colour = QColor("#94A3B8")
+        self._colour = QColor(_ACTIVE_THEME.muted)
 
     def set_colour(self, colour) -> None:
         resolved = QColor(colour)
         if resolved != self._colour:
             self._colour = resolved
             self.update()
+
+    def apply_theme(self, tokens) -> None:
+        """Reset to the world's default muted colour.
+
+        The sidebar always re-asserts the correct checked/enabled colour with
+        ``set_colour`` right after a theme change, so this only prevents a
+        row that theme change happens to skip from being left on the old
+        world's muted tone.
+        """
+
+        self.set_colour(tokens.muted)
 
     @staticmethod
     def _glyph(name: str) -> list:
@@ -773,6 +839,7 @@ class StudyRing(QWidget):
         self.setObjectName("plainBox")
         self.setFixedSize(self.SIZE, self.SIZE)
         self._progress = 0.0
+        self._theme = _ACTIVE_THEME
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -797,10 +864,15 @@ class StudyRing(QWidget):
             self._progress = resolved
             self.update()
 
+    def apply_theme(self, tokens) -> None:
+        self._theme = tokens
+        self.update()
+
     def paintEvent(self, event) -> None:  # noqa: N802
         del event
-        from UI_THEMES.theme import DEFAULT_THEME as t, qalpha
+        from UI_THEMES.theme import qalpha
 
+        t = self._theme
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
@@ -833,8 +905,98 @@ class StudyRing(QWidget):
         p.end()
 
 
+class AlertBorderOverlay(QWidget):
+    """Soft warning border shown while an Amber or Red atmosphere is active.
+
+    Common presentation infrastructure only: it reacts to whatever accent
+    colour ``set_alert`` gives it and nothing else.  It never reads a SINE
+    stage, an episode id, MIRL state or any other organ fact -- the caller
+    (a presentation coordinator, not this widget) decides when an accent
+    applies.  Green and every base theme pass ``None`` and the border simply
+    is not shown; there is no warning pulse without an explicit Amber/Red
+    accent.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self._accent: QColor | None = None
+        self._reduced_motion = False
+        self._phase = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(33)
+        self._timer.timeout.connect(self._tick)
+        self.hide()
+
+    def set_alert(self, accent: str | None) -> None:
+        """Show a soft breathing glow in ``accent``, or clear it with ``None``."""
+
+        colour = QColor(accent) if accent else None
+        if colour == self._accent:
+            return
+        self._accent = colour
+        if colour is None:
+            self._timer.stop()
+            self.hide()
+            return
+        self.show()
+        self.raise_()
+        if not self._reduced_motion and not self._timer.isActive():
+            self._timer.start()
+        self.update()
+
+    def set_reduced_motion(self, enabled: bool) -> None:
+        self._reduced_motion = bool(enabled)
+        if enabled:
+            self._timer.stop()
+        elif self._accent is not None and not self._timer.isActive():
+            self._timer.start()
+        self.update()
+
+    def _tick(self) -> None:
+        self._phase = (self._phase + 0.02) % 1.0
+        self.update()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        self._timer.stop()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        del event
+        if self._accent is None:
+            return
+        from UI_THEMES.theme import qalpha
+
+        breathe = (
+            0.55
+            if self._reduced_motion
+            else 0.35 + 0.25 * (1.0 + math.sin(self._phase * 2 * math.pi)) / 2.0
+        )
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect())
+
+        pen = QPen(qalpha(self._accent, breathe))
+        pen.setWidthF(3.0)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(rect.adjusted(1.5, 1.5, -1.5, -1.5))
+
+        corner_radius = 90.0
+        p.setPen(Qt.PenStyle.NoPen)
+        for corner in (rect.topLeft(), rect.topRight(), rect.bottomLeft(), rect.bottomRight()):
+            glow = QRadialGradient(corner, corner_radius)
+            glow.setColorAt(0.0, qalpha(self._accent, breathe * 0.6))
+            glow.setColorAt(1.0, qalpha(self._accent, 0.0))
+            p.setBrush(QBrush(glow))
+            p.drawEllipse(corner, corner_radius, corner_radius)
+        p.end()
+
+
 __all__ = [
     "AxonCanvas",
+    "AlertBorderOverlay",
     "BrandMark",
     "CircuitTrace",
     "BarTrack",
@@ -846,4 +1008,5 @@ __all__ = [
     "LoadingSweepBar",
     "NavIcon",
     "StudyRing",
+    "set_active_theme",
 ]

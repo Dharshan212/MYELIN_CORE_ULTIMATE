@@ -5,6 +5,7 @@ SINE.sine; profiles/settings cannot choose Blue/Amber/Red intervention state.
 """
 from __future__ import annotations
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Final
 
@@ -31,9 +32,7 @@ class ThemeTokens:
     """MYELIN core design system, keyed to ``myelin_v2_mockup_2.html``.
 
     Names on the left are the historical launcher role names kept for existing
-    consumers; the values are the mockup's ``:root`` custom properties.  The
-    ``mix_*`` entries are the mockup's ``color-mix()`` results resolved ahead of
-    time, because Qt style sheets have no ``color-mix()``.
+    consumers; the values are the mockup's ``:root`` custom properties.
     """
 
     world_name: str = "MYELIN"
@@ -52,7 +51,6 @@ class ThemeTokens:
     red: str = "#F43F5E"
     red_dim: str = "#9F1239"
     amber: str = "#FBBF24"
-    amber_dim: str = "#92600A"
     green: str = "#22C55E"
     green_dim: str = "#15803D"
     # --violet (donor SINE BLUE chart_violet) -- brand-mark gradient only
@@ -60,38 +58,224 @@ class ThemeTokens:
     border: str = "#334155"
     is_dark: bool = True
 
-    # Resolved color-mix() results.
-    mix_card_border: str = "#34526C"     # cyan 14% over --border
-    mix_hero_border: str = "#345A76"     # cyan 20% over --border
-    mix_card_tint: str = "#203348"       # cyan  7% over --surface
-    mix_hero_tint: str = "#224159"       # cyan 16% over --surface
-    mix_toggle_bg: str = "#213B52"       # cyan 12% over --surface
-    mix_toggle_border: str = "#2B739A"   # cyan 50% over --surface
-    mix_pill_bg: str = "#1F3F40"         # green 14% over --surface
-    mix_pill_border: str = "#206749"     # green 40% over --surface
-    mix_stop_border: str = "#94354E"     # red 55% over --surface
-    mix_stage_bg: str = "#16293C"        # cyan 10% over --surface-soft
 
-    # --radius-sm / --radius-md / --radius-lg
-    radius_sm: int = 8
-    radius_md: int = 14
-    radius_lg: int = 22
+NEON_THEME: Final = ThemeTokens()
+DEFAULT_THEME: Final = NEON_THEME
+
+# Base themes differ only in background/surface/text/accent/border tokens.
+# The semantic fields (red/red_dim/amber/green/green_dim/violet) keep the
+# Neon defaults on every world: Start stays green, Pause stays amber, Stop
+# stays red regardless of which body is on screen.  Only ``cyan``/``cyan_dim``
+# -- the body's dominant accent slot -- changes per world.
+WHITE_THEME: Final = ThemeTokens(
+    world_name="MYELIN WHITE",
+    window_background="#F4F7FB",
+    surface="#FFFFFF",
+    surface_soft="#EEF3F8",
+    surface_2="#E5EDF5",
+    text_primary="#111827",
+    muted="#64748B",
+    cyan="#0284C7",
+    cyan_dim="#0E7490",
+    border="#CBD5E1",
+    is_dark=False,
+)
+
+BLACK_THEME: Final = ThemeTokens(
+    world_name="MYELIN BLACK",
+    window_background="#050607",
+    surface="#111315",
+    surface_soft="#0B0D0F",
+    surface_2="#171A1D",
+    text_primary="#F3F4F6",
+    muted="#9CA3AF",
+    cyan="#D1D5DB",
+    cyan_dim="#6B7280",
+    border="#2A2F35",
+    is_dark=True,
+)
+
+PURPLE_THEME: Final = ThemeTokens(
+    world_name="MYELIN PURPLE",
+    window_background="#100B1E",
+    surface="#1A1230",
+    surface_soft="#140D27",
+    surface_2="#24173E",
+    text_primary="#F2EFFF",
+    muted="#B7A9D6",
+    cyan="#A78BFA",
+    cyan_dim="#6D4CC2",
+    border="#3D2A59",
+    is_dark=True,
+)
+
+# Temporary atmosphere worlds.  These carry no organ-specific name: SINE,
+# MIRL, Normal Break and COSECANT all claim them through the same opaque
+# ``claim_atmosphere`` API, and a future MINE organ will do the same.
+AMBER_ALERT_THEME: Final = ThemeTokens(
+    world_name="MYELIN AMBER ALERT",
+    window_background="#160F07",
+    surface="#241608",
+    surface_soft="#1C140A",
+    surface_2="#36220C",
+    text_primary="#FFF4D6",
+    muted="#C9A96A",
+    cyan="#F5A623",
+    cyan_dim="#8A5A12",
+    border="#4A2E12",
+    is_dark=True,
+)
+
+RED_ALERT_THEME: Final = ThemeTokens(
+    world_name="MYELIN RED ALERT",
+    window_background="#140607",
+    surface="#25090B",
+    surface_soft="#20090F",
+    surface_2="#3A0E12",
+    text_primary="#FFF1F1",
+    muted="#D6A0A3",
+    cyan="#FF4D6D",
+    cyan_dim="#8C1F33",
+    border="#4F171C",
+    is_dark=True,
+)
+
+GREEN_RETURN_THEME: Final = ThemeTokens(
+    world_name="MYELIN GREEN RETURN",
+    window_background="#07140F",
+    surface="#0D211A",
+    surface_soft="#103629",
+    surface_2="#143D2D",
+    text_primary="#EAFBF3",
+    muted="#8EC9AA",
+    cyan="#39D98A",
+    cyan_dim="#176B4A",
+    border="#1F5A42",
+    is_dark=True,
+)
 
 
-DEFAULT_THEME: Final = ThemeTokens()
+class BaseTheme(str, Enum):
+    """User-selected, persisted MYELIN body preference."""
+
+    NEON = "neon"
+    WHITE = "white"
+    BLACK = "black"
+    PURPLE = "purple"
+
+
+class Atmosphere(str, Enum):
+    """Runtime-only body override.  Never persisted, never user-selected."""
+
+    NONE = "none"
+    AMBER_ALERT = "amber_alert"
+    RED_ALERT = "red_alert"
+    GREEN_RETURN = "green_return"
+
+
+BASE_THEMES: Final[dict[BaseTheme, ThemeTokens]] = {
+    BaseTheme.NEON: NEON_THEME,
+    BaseTheme.WHITE: WHITE_THEME,
+    BaseTheme.BLACK: BLACK_THEME,
+    BaseTheme.PURPLE: PURPLE_THEME,
+}
+
+ATMOSPHERE_THEMES: Final[dict[Atmosphere, ThemeTokens]] = {
+    Atmosphere.AMBER_ALERT: AMBER_ALERT_THEME,
+    Atmosphere.RED_ALERT: RED_ALERT_THEME,
+    Atmosphere.GREEN_RETURN: GREEN_RETURN_THEME,
+}
+
+# Highest-priority claim wins when more than one is active at once.  This is
+# a presentation-only ordering: it never changes organ state.
+ATMOSPHERE_PRIORITY: Final[tuple[Atmosphere, ...]] = (
+    Atmosphere.RED_ALERT,
+    Atmosphere.AMBER_ALERT,
+    Atmosphere.GREEN_RETURN,
+)
+
 
 class ThemeController(QObject):
+    """Common MYELIN body-theme authority.
+
+    Owns exactly one selected base theme plus zero-or-more opaque temporary
+    atmosphere claims.  It has no SINE, MIRL, MINE or COSECANT knowledge --
+    organs publish facts elsewhere and a presentation coordinator translates
+    those facts into ``claim_atmosphere``/``release_atmosphere`` calls here.
+    ``claim_id`` is never parsed or inspected; that is what keeps this
+    authority reusable by every future organ instead of owned by one.
+    """
+
     theme_changed = pyqtSignal(object)
-    def __init__(self, settings, parent: QObject | None = None) -> None:
+
+    def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self._settings = settings
-        self._theme = DEFAULT_THEME
+        self._base_theme: BaseTheme = BaseTheme.NEON
+        self._claims: dict[str, Atmosphere] = {}
+        self._current_tokens: ThemeTokens = BASE_THEMES[self._base_theme]
         self._reduced_motion = False
+
+    @property
+    def base_theme(self) -> BaseTheme:
+        return self._base_theme
+
     @property
     def current_theme(self) -> ThemeTokens:
-        return self._theme
+        return self._current_tokens
+
     def set_reduced_motion(self, enabled: bool) -> None:
         self._reduced_motion = bool(enabled)
+
+    def set_base_theme(self, base_theme: "BaseTheme | str") -> None:
+        """Update the selected base theme.  An active atmosphere still wins."""
+
+        if isinstance(base_theme, BaseTheme):
+            resolved = base_theme
+        else:
+            try:
+                resolved = BaseTheme(str(base_theme))
+            except ValueError:
+                return
+        if resolved == self._base_theme:
+            return
+        self._base_theme = resolved
+        self._recompute()
+
+    def claim_atmosphere(self, claim_id: str, atmosphere: "Atmosphere") -> None:
+        """Register one opaque presentation claim on a temporary atmosphere."""
+
+        if not isinstance(claim_id, str) or not claim_id:
+            raise ValueError("claim_id must be a non-empty string")
+        if not isinstance(atmosphere, Atmosphere) or atmosphere is Atmosphere.NONE:
+            raise ValueError("atmosphere must be a real Atmosphere value")
+        if self._claims.get(claim_id) == atmosphere:
+            return
+        self._claims[claim_id] = atmosphere
+        self._recompute()
+
+    def release_atmosphere(self, claim_id: str) -> None:
+        """Release one claim.  A stale or unknown claim id is a quiet no-op."""
+
+        if self._claims.pop(claim_id, None) is not None:
+            self._recompute()
+
+    def clear_runtime_atmospheres(self) -> None:
+        if not self._claims:
+            return
+        self._claims.clear()
+        self._recompute()
+
+    def _recompute(self) -> None:
+        tokens = BASE_THEMES[self._base_theme]
+        active = set(self._claims.values())
+        for atmosphere in ATMOSPHERE_PRIORITY:
+            if atmosphere in active:
+                tokens = ATMOSPHERE_THEMES[atmosphere]
+                break
+        if tokens is self._current_tokens:
+            return
+        self._current_tokens = tokens
+        self.theme_changed.emit(tokens)
     # The MYELIN wordmark console now lives in CONTROL_STATION.launcher as
     # BrandConsole -- shell/topbar composition belongs with the shell.
 
@@ -396,6 +580,13 @@ QLabel#feedTag[tone="red"]   {{ color: {red};   background: {alpha(red, 0.12)}; 
 QLabel#feedTag[tone="green"] {{ color: {green}; background: {alpha(green, 0.12)}; }}
 QLabel#feedTag[tone="violet"] {{ color: {violet}; background: {alpha(violet, 0.14)}; }}
 
+/* ---------- showcase hairlines (Metric Hub / Live MIRL / COSINE fixtures) --
+   a plain border-only divider; anything with per-instance colour logic
+   (a role, an alpha mix) is re-styled by the launcher's own retheme sweep
+   instead, since Qt attribute selectors cannot run that computation. ---- */
+QFrame#showcaseDivider {{ background: {border}; }}
+QLabel[divider="true"] {{ border-bottom: 1px solid {border}; }}
+
 /* ---------- scroll areas ---------- */
 QScrollArea {{ background: transparent; border: none; }}
 QScrollArea > QWidget > QWidget {{ background: transparent; }}
@@ -464,7 +655,7 @@ QWidget#sidebarBackdrop {{ background: rgba(0, 0, 0, 90); }}
 QWidget#comingSoonPage {{ background: {base}; }}
 QFrame#comingSoonCard {{
     background: {surface};
-    border: 1px solid {t.mix_card_border};
+    border: 1px solid {mix(cyan, 14, border)};
     border-radius: {RADIUS_LG}px;
 }}
 QLabel#comingSoonPageBadge {{
@@ -555,7 +746,7 @@ QMenu#studyMenu::separator {{ height: 1px; background: {border}; margin: 5px 8px
 QFrame#studyTimerCard, QFrame#studySetupCard, QFrame#studyTelemetryCard,
 QFrame#resourceIntentTelemetryCard, QFrame#studyStreamCard, QFrame#studyPlanCard {{
     background: {surface};
-    border: 1px solid {t.mix_card_border};
+    border: 1px solid {mix(cyan, 14, border)};
     border-radius: {RADIUS_LG}px;
 }}
 /* .card-head h2 */
@@ -810,4 +1001,24 @@ def apply_native_titlebar(window, *, background: str, foreground: str, dark_mode
     except Exception:
         return False
 
-__all__ = ["ThemeController", "ThemeTokens", "DEFAULT_THEME", "apply_native_titlebar", "build_application_stylesheet", "make_font", "resource_icon"]
+__all__ = [
+    "ThemeController",
+    "ThemeTokens",
+    "BaseTheme",
+    "Atmosphere",
+    "BASE_THEMES",
+    "ATMOSPHERE_THEMES",
+    "ATMOSPHERE_PRIORITY",
+    "NEON_THEME",
+    "WHITE_THEME",
+    "BLACK_THEME",
+    "PURPLE_THEME",
+    "AMBER_ALERT_THEME",
+    "RED_ALERT_THEME",
+    "GREEN_RETURN_THEME",
+    "DEFAULT_THEME",
+    "apply_native_titlebar",
+    "build_application_stylesheet",
+    "make_font",
+    "resource_icon",
+]
