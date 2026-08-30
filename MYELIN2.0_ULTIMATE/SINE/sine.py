@@ -125,6 +125,23 @@ class SineResponse(str, Enum):
     CONTINUE_SINE = "continue_sine"
 
 
+class SineSurface(str, Enum):
+    """What one popup occurrence factually IS, independent of stage ordinal.
+
+    ``INTERVENTION`` is the ordinary SINE 1/2/3 ladder.
+    ``POST_NORMAL_BREAK_RETURN_GATE`` is the green WELCOME BACK
+    acknowledgement surface that sits between a factual Normal Break
+    termination and SINE 2.  It is deliberately NOT a fourth intervention
+    stage and it never consumes one: it carries ``SineStage.NONE``, arms no
+    escalation deadline, and produces no ``SINE_DISPLAYED`` fact.  The user's
+    I'M BACK acknowledgement is what releases the same held episode into a
+    factual SINE 2.
+    """
+
+    INTERVENTION = "intervention"
+    POST_NORMAL_BREAK_RETURN_GATE = "post_normal_break_return_gate"
+
+
 @dataclass(frozen=True, slots=True)
 class SinePolicy:
     """All SINE timing decisions in one visible, testable contract."""
@@ -318,6 +335,7 @@ class SinePopupRequest:
     protected: bool
     presentation: SinePresentation
     mirl_display_token: object | None = None
+    surface: SineSurface = SineSurface.INTERVENTION
     schema_version: str = SINE_SCHEMA_VERSION
 
 
@@ -381,6 +399,8 @@ class SineLiveView:
     normal_break_id: str = ""
     normal_break_generation: int = 0
     post_normal_break_completion_kind: str = ""
+    post_normal_break_return_pending: bool = False
+    activity_clock_paused: bool = False
 
 
 @dataclass(slots=True)
@@ -438,12 +458,21 @@ class _Episode:
     retry_due_monotonic_ns: int | None = None
     study_alignment_announced: bool = False
     presentation_withheld_for_recovery: bool = False
+    recovery_pause_started_monotonic_ns: int | None = None
+    recovery_pause_target_stage: SineStage = SineStage.NONE
+    recovery_pause_remaining_ns: int | None = None
+    activity_pause_started_monotonic_ns: int | None = None
+    activity_pause_target_stage: SineStage = SineStage.NONE
+    activity_pause_remaining_ns: int | None = None
     normal_break_held: bool = False
     normal_break_id: str = ""
     normal_break_generation: int = 0
     normal_break_started_monotonic_ns: int | None = None
     normal_break_source_popup_request_id: str = ""
     post_normal_break_completion_kind: str = ""
+    post_normal_break_return_pending: bool = False
+    post_normal_break_gate_request_id: str = ""
+    post_normal_break_gate_retry_due_monotonic_ns: int | None = None
 
     @property
     def terminal(self) -> bool:
@@ -829,39 +858,54 @@ class SineAuthority:
             episode = self._episode
             if episode is not None and not episode.terminal:
                 # MIRL has verified recovery ENTRY but not final stability.
-                # Deadlines retain their original timestamps, while the
-                # presentation remains inhibited until relapse or closure.
-                if (
+                # The relevant escalation deadline is genuinely paused while
+                # presentation is withheld, then re-anchored only by a factual
+                # relapse. Final recovery resolves the episode without resume.
+                if episode.post_normal_break_return_pending:
+                    # The post-Normal-Break acknowledgement gate owns this
+                    # episode.  It is NOT an intervention stage, so no popup
+                    # expiry, no stage retry and no SINE-2/SINE-3 deadline may
+                    # run while it is pending.  Only the gate surface itself
+                    # may be restored.  This is what stops the already-elapsed
+                    # SINE-1 -> SINE-2 deadline (which aged through the whole
+                    # break) from firing SINE 2 the instant the hold clears.
+                    self._advance_post_normal_break_gate_retry(
+                        episode, now_monotonic_ns
+                    )
+                elif (
                     not episode.presentation_withheld_for_recovery
                     and not episode.normal_break_held
                 ):
                     self._advance_popup_deadline(episode, now_monotonic_ns)
                     self._advance_display_retry(episode, now_monotonic_ns)
 
-                    if (
-                        episode.current_stage >= SineStage.SINE_1
-                        and episode.requested_stage < SineStage.SINE_2
-                        and now_monotonic_ns >= episode.stage_2_deadline_monotonic_ns
-                    ):
-                        self._request_stage(
-                            episode,
-                            SineStage.SINE_2,
-                            now_monotonic_ns,
-                            "stage_2_deadline_reached",
-                        )
+                    if episode.activity_pause_started_monotonic_ns is None:
+                        if (
+                            episode.current_stage >= SineStage.SINE_1
+                            and episode.requested_stage < SineStage.SINE_2
+                            and now_monotonic_ns
+                            >= episode.stage_2_deadline_monotonic_ns
+                        ):
+                            self._request_stage(
+                                episode,
+                                SineStage.SINE_2,
+                                now_monotonic_ns,
+                                "stage_2_deadline_reached",
+                            )
 
-                    if (
-                        episode.current_stage >= SineStage.SINE_2
-                        and episode.requested_stage < SineStage.SINE_3
-                        and episode.stage_3_deadline_monotonic_ns is not None
-                        and now_monotonic_ns >= episode.stage_3_deadline_monotonic_ns
-                    ):
-                        self._request_stage(
-                            episode,
-                            SineStage.SINE_3,
-                            now_monotonic_ns,
-                            "stage_3_deadline_reached",
-                        )
+                        if (
+                            episode.current_stage >= SineStage.SINE_2
+                            and episode.requested_stage < SineStage.SINE_3
+                            and episode.stage_3_deadline_monotonic_ns is not None
+                            and now_monotonic_ns
+                            >= episode.stage_3_deadline_monotonic_ns
+                        ):
+                            self._request_stage(
+                                episode,
+                                SineStage.SINE_3,
+                                now_monotonic_ns,
+                                "stage_3_deadline_reached",
+                            )
 
             return self._take_facts()
 
@@ -890,6 +934,17 @@ class SineAuthority:
                 return False
             if occurrence.state is not PopupState.REQUESTED:
                 return False
+
+            if (
+                occurrence.request.surface
+                is SineSurface.POST_NORMAL_BREAK_RETURN_GATE
+            ):
+                return self._post_normal_break_gate_shown(
+                    episode,
+                    occurrence,
+                    shown_monotonic_ns,
+                    popup_hwnd,
+                )
 
             occurrence.state = PopupState.DISPLAYED
             occurrence.shown_monotonic_ns = shown_monotonic_ns
@@ -1013,14 +1068,44 @@ class SineAuthority:
             stage = occurrence.request.stage
             failures = episode.display_failures.get(stage, 0) + 1
             episode.display_failures[stage] = failures
+            is_return_gate = (
+                occurrence.request.surface
+                is SineSurface.POST_NORMAL_BREAK_RETURN_GATE
+            )
             self._emit(
                 "SINE_DISPLAY_FAILED",
-                f"SINE {int(stage)} popup did not display.",
+                (
+                    "The post-Normal-Break return gate did not display."
+                    if is_return_gate
+                    else f"SINE {int(stage)} popup did not display."
+                ),
                 occurred_monotonic_ns,
                 episode=episode,
                 occurrence=occurrence,
                 reason=occurrence.close_reason,
             )
+            if is_return_gate:
+                # The gate carries SineStage.NONE, so the ordinary stage retry
+                # lane cannot represent it.  Without its own bounded retry an
+                # undisplayable gate would strand the episode forever: no
+                # surface to acknowledge and no escalation clock running.
+                if failures <= self._policy.maximum_display_failures:
+                    episode.post_normal_break_gate_retry_due_monotonic_ns = (
+                        occurred_monotonic_ns
+                        + _seconds_to_ns(self._policy.display_retry_seconds)
+                    )
+                else:
+                    episode.post_normal_break_gate_retry_due_monotonic_ns = None
+                    self._emit(
+                        "SINE_DISPLAY_RETRY_EXHAUSTED",
+                        "The post-Normal-Break return gate reached its bounded "
+                        "display retry limit.",
+                        occurred_monotonic_ns,
+                        episode=episode,
+                        occurrence=occurrence,
+                        reason="bounded_retry_limit",
+                    )
+                return True
             if failures <= self._policy.maximum_display_failures:
                 episode.retry_stage = stage
                 episode.retry_due_monotonic_ns = occurred_monotonic_ns + _seconds_to_ns(
@@ -1075,6 +1160,21 @@ class SineAuthority:
                 return False
             if selected not in occurrence.request.presentation.allowed_responses:
                 return False
+
+            # UNMISTAKABLE DISCRIMINATOR: only an occurrence SINE itself minted
+            # as the post-Normal-Break gate takes the acknowledgement path.
+            # Ordinary Normal SINE-1/SINE-2 and Study RETURN_TO_FOCUS keep
+            # their existing meaning below, unchanged.
+            if (
+                occurrence.request.surface
+                is SineSurface.POST_NORMAL_BREAK_RETURN_GATE
+            ):
+                return self._acknowledge_post_normal_break_return(
+                    episode,
+                    occurrence,
+                    selected,
+                    occurred_monotonic_ns,
+                )
 
             occurrence.response = selected.value
             episode.last_response = selected.value
@@ -1199,6 +1299,31 @@ class SineAuthority:
                 reason=occurrence.close_reason,
             )
 
+            # An unacknowledged gate surface disappearing does not release the
+            # gate; the same episode still owes the user a WELCOME BACK to
+            # acknowledge, so the surface is restored through the authority.
+            if (
+                occurrence.request.surface
+                is SineSurface.POST_NORMAL_BREAK_RETURN_GATE
+                and episode.post_normal_break_return_pending
+                and not episode.terminal
+                and episode.current_popup_request_id
+                == occurrence.request.request_id
+            ):
+                episode.post_normal_break_gate_retry_due_monotonic_ns = (
+                    occurred_monotonic_ns
+                )
+                self._emit(
+                    "SINE_POST_BREAK_RETURN_GATE_SURFACE_LOST",
+                    "The post-break return gate is still unacknowledged and "
+                    "its surface must be restored.",
+                    occurred_monotonic_ns,
+                    episode=episode,
+                    occurrence=occurrence,
+                    reason=occurrence.close_reason,
+                )
+                return True
+
             # A Red window disappearing does not release Protected Red. Reopen
             # it through the authority unless recovery/emergency already ended
             # the episode.
@@ -1225,6 +1350,39 @@ class SineAuthority:
     # Confirmations from authoritative non-UI owners
     # ------------------------------------------------------------------
 
+    def cancel_matching_study_episode(
+        self,
+        *,
+        study_context_token: str,
+        occurred_monotonic_ns: int,
+        completion_reason: str,
+    ) -> bool:
+        """Cancel only the active SINE episode owned by a terminal Study scope."""
+
+        with self._lock:
+            episode = self._episode
+            if episode is None or episode.terminal or not episode.study_mode:
+                return True
+            if (
+                type(study_context_token) is not str
+                or not study_context_token
+                or episode.study_context_token != study_context_token
+                or type(completion_reason) is not str
+                or completion_reason
+                not in {"TARGET_REACHED", "USER_COMPLETED"}
+                or not self._valid_event_time(
+                    occurred_monotonic_ns,
+                    episode.accepted_monotonic_ns,
+                )
+            ):
+                return False
+
+            self._cancel_episode(
+                f"study_scope_terminal:{completion_reason.lower()}",
+                occurred_monotonic_ns,
+            )
+            return True
+
     def withhold_presentation_for_verified_return_entry(
         self,
         *,
@@ -1236,14 +1394,28 @@ class SineAuthority:
 
         with self._lock:
             episode = self._episode
+            post_normal_break_sine_two = bool(
+                episode is not None
+                and not episode.study_mode
+                and episode.current_stage is SineStage.SINE_2
+                and episode.post_normal_break_completion_kind
+                in {"NORMAL_BREAK_COMPLETED", "NORMAL_BREAK_STOPPED"}
+            )
             eligible_for_return_entry_withhold = bool(
                 episode is not None
+                # The green acknowledgement gate is not an intervention
+                # surface, so there is nothing to withhold there: the user
+                # still owes SINE the I'M BACK that releases this episode
+                # into a factual SINE 2.  Phase-1 withholding applies to that
+                # real SINE 2, exactly as before.
+                and not episode.post_normal_break_return_pending
                 and (
                     episode.study_mode
                     or (
                         episode.current_stage is SineStage.SINE_3
                         and episode.protected_red
                     )
+                    or post_normal_break_sine_two
                 )
             )
             if (
@@ -1262,6 +1434,10 @@ class SineAuthority:
             if episode.presentation_withheld_for_recovery:
                 return True
 
+            self._pause_recovery_escalation_deadline(
+                episode,
+                verified_monotonic_ns,
+            )
             episode.presentation_withheld_for_recovery = True
             episode.retry_stage = SineStage.NONE
             episode.retry_due_monotonic_ns = None
@@ -1302,6 +1478,7 @@ class SineAuthority:
                 episode is None
                 or episode.terminal
                 or episode.normal_break_held
+                or episode.post_normal_break_return_pending
                 or episode.candidate_uid != str(candidate_uid or "")
                 or not str(evidence_source or "").strip()
                 or episode.first_displayed_monotonic_ns is None
@@ -1314,6 +1491,11 @@ class SineAuthority:
             if not episode.presentation_withheld_for_recovery:
                 return True
 
+            if not self._resume_recovery_escalation_deadline(
+                episode,
+                occurred_monotonic_ns,
+            ):
+                return False
             episode.presentation_withheld_for_recovery = False
             episode.study_alignment_announced = False
             occurrence = self._current_popup(episode)
@@ -1334,6 +1516,109 @@ class SineAuthority:
             ):
                 episode.retry_stage = SineStage.SINE_3
                 episode.retry_due_monotonic_ns = occurred_monotonic_ns
+            return True
+
+    def pause_escalation_for_activity(
+        self,
+        *,
+        candidate_uid: str,
+        occurred_monotonic_ns: int,
+        evidence_source: str,
+    ) -> bool:
+        """Pause one Normal SINE escalation clock on factual ordinary Activity."""
+
+        with self._lock:
+            episode = self._episode
+            if (
+                episode is None
+                or episode.terminal
+                or episode.study_mode
+                or episode.protected_red
+                or episode.normal_break_held
+                # The post-break acknowledgement gate is its own specialist
+                # hold, not ordinary Activity.  Letting the generic Activity
+                # machinery capture/restore a deadline here would re-anchor
+                # the long-elapsed SINE-1 -> SINE-2 clock to "now + 0".
+                or episode.post_normal_break_return_pending
+                or episode.presentation_withheld_for_recovery
+                or episode.phase is not SinePhase.ACTIVE
+                or episode.candidate_uid != str(candidate_uid or "")
+                or not str(evidence_source or "").strip()
+                or episode.first_displayed_monotonic_ns is None
+                or not self._valid_event_time(
+                    occurred_monotonic_ns,
+                    episode.first_displayed_monotonic_ns,
+                )
+            ):
+                return False
+            if episode.activity_pause_started_monotonic_ns is not None:
+                return True
+
+            target_stage, remaining_ns = self._capture_escalation_deadline(
+                episode,
+                occurred_monotonic_ns,
+            )
+            episode.activity_pause_started_monotonic_ns = occurred_monotonic_ns
+            episode.activity_pause_target_stage = target_stage
+            episode.activity_pause_remaining_ns = remaining_ns
+            self._emit(
+                "SINE_ESCALATION_CLOCK_PAUSED_FOR_ACTIVITY",
+                "Ordinary non-distracting activity paused the active SINE escalation clock.",
+                occurred_monotonic_ns,
+                episode=episode,
+                occurrence=self._current_popup(episode),
+                reason=str(evidence_source).strip(),
+            )
+            return True
+
+    def resume_escalation_after_activity(
+        self,
+        *,
+        candidate_uid: str,
+        occurred_monotonic_ns: int,
+        evidence_source: str,
+    ) -> bool:
+        """Resume the same Normal SINE clock when Activity no longer owns it."""
+
+        with self._lock:
+            episode = self._episode
+            if (
+                episode is None
+                or episode.terminal
+                or episode.study_mode
+                or episode.protected_red
+                or episode.normal_break_held
+                or episode.post_normal_break_return_pending
+                or episode.presentation_withheld_for_recovery
+                or episode.candidate_uid != str(candidate_uid or "")
+                or not str(evidence_source or "").strip()
+                or episode.first_displayed_monotonic_ns is None
+                or not self._valid_event_time(
+                    occurred_monotonic_ns,
+                    episode.first_displayed_monotonic_ns,
+                )
+            ):
+                return False
+            if episode.activity_pause_started_monotonic_ns is None:
+                return True
+            if occurred_monotonic_ns < episode.activity_pause_started_monotonic_ns:
+                return False
+
+            self._restore_escalation_deadline(
+                episode,
+                target_stage=episode.activity_pause_target_stage,
+                remaining_ns=episode.activity_pause_remaining_ns,
+                occurred_monotonic_ns=occurred_monotonic_ns,
+            )
+            self._clear_activity_timer_pause(episode)
+            self._emit(
+                "SINE_ESCALATION_CLOCK_RESUMED_AFTER_ACTIVITY",
+                "The same SINE escalation clock resumed from its preserved remaining time.",
+                occurred_monotonic_ns,
+                episode=episode,
+                occurrence=self._current_popup(episode),
+                reason=str(evidence_source).strip(),
+            )
             return True
 
     def confirm_verified_return(
@@ -1528,7 +1813,7 @@ class SineAuthority:
             )
             return True
 
-    def resume_from_normal_break_as_sine2(
+    def enter_post_normal_break_return_gate(
         self,
         *,
         candidate_uid: str,
@@ -1538,7 +1823,19 @@ class SineAuthority:
         occurred_monotonic_ns: int,
         completion_kind: str,
     ) -> bool:
-        """Resume the exact held episode by requesting SINE 2 immediately."""
+        """Release the exact held episode into the WELCOME BACK gate, not SINE 2.
+
+        A factual Normal Break termination is NOT a SINE-2 display.  It ends
+        the break hold and opens one acknowledgement gate on the SAME episode:
+        no new episode, no new candidate, no new Trigger, no fake SINE 1, and
+        no SINE-2/SINE-3 clock.  Only the user's I'M BACK on that exact gate
+        surface releases this episode into a factual SINE 2 -- see
+        ``_acknowledge_post_normal_break_return``.
+
+        ``post_normal_break_completion_kind`` is still written here, because it
+        is the Phase-1 provenance discriminator that lets the resulting real
+        SINE 2 accept MIRL return-entry withholding.
+        """
 
         allowed_completion_kinds = {
             "NORMAL_BREAK_COMPLETED",
@@ -1561,9 +1858,12 @@ class SineAuthority:
             held_generation = episode.normal_break_generation
             self._clear_normal_break_hold(episode)
             episode.post_normal_break_completion_kind = completion_kind
+            episode.post_normal_break_return_pending = True
+            episode.post_normal_break_gate_retry_due_monotonic_ns = None
             self._emit(
-                "SINE_NORMAL_BREAK_RESUMED_AS_SINE_2",
-                "Normal Break ended; the same SINE episode resumed immediately at SINE 2.",
+                "SINE_POST_NORMAL_BREAK_RETURN_PENDING",
+                "Normal Break ended; the same SINE episode is waiting for the "
+                "user to acknowledge their return before SINE 2 exists.",
                 occurred_monotonic_ns,
                 episode=episode,
                 occurrence=occurrence,
@@ -1572,11 +1872,10 @@ class SineAuthority:
                 normal_break_generation=held_generation,
                 normal_break_completion_kind=completion_kind,
             )
-            self._request_stage(
+            self._request_post_normal_break_return_gate(
                 episode,
-                SineStage.SINE_2,
                 occurred_monotonic_ns,
-                "normal_break_resumed_immediately",
+                completion_kind,
             )
             return True
 
@@ -1716,15 +2015,33 @@ class SineAuthority:
                     normal_break_id="",
                     normal_break_generation=0,
                     post_normal_break_completion_kind="",
+                    post_normal_break_return_pending=False,
+                    activity_clock_paused=False,
                 )
             occurrence = self._current_popup(episode)
             now_ns = self._now_ns() if self._active_session() else 0
-            deadline = None if episode.normal_break_held else self._next_deadline(episode)
-            remaining = (
-                None
-                if deadline is None
-                else max(0.0, (deadline - now_ns) / NANOSECONDS_PER_SECOND)
-            )
+            if episode.normal_break_held or episode.post_normal_break_return_pending:
+                remaining = None
+            elif (
+                episode.presentation_withheld_for_recovery
+                and episode.recovery_pause_remaining_ns is not None
+            ):
+                remaining = (
+                    episode.recovery_pause_remaining_ns
+                    / NANOSECONDS_PER_SECOND
+                )
+            elif episode.activity_pause_remaining_ns is not None:
+                remaining = (
+                    episode.activity_pause_remaining_ns
+                    / NANOSECONDS_PER_SECOND
+                )
+            else:
+                deadline = self._next_deadline(episode)
+                remaining = (
+                    None
+                    if deadline is None
+                    else max(0.0, (deadline - now_ns) / NANOSECONDS_PER_SECOND)
+                )
             return SineLiveView(
                 session_id=self._session_id,
                 profile_type=self._profile_type,
@@ -1758,6 +2075,12 @@ class SineAuthority:
                 post_normal_break_completion_kind=(
                     episode.post_normal_break_completion_kind
                 ),
+                post_normal_break_return_pending=(
+                    episode.post_normal_break_return_pending
+                ),
+                activity_clock_paused=(
+                    episode.activity_pause_started_monotonic_ns is not None
+                ),
             )
 
     def emergency_stop(self) -> None:
@@ -1786,6 +2109,9 @@ class SineAuthority:
                     self._request_popup_close(episode, occurrence, now_ns, "emergency")
                 episode.protected_red = False
                 self._clear_normal_break_hold(episode)
+                self._clear_post_normal_break_gate(episode)
+                self._clear_recovery_timer_pause(episode)
+                self._clear_activity_timer_pause(episode)
                 episode.phase = SinePhase.EMERGENCY_STOPPED
                 episode.terminal_reason = "emergency"
             self._emit(
@@ -1858,6 +2184,202 @@ class SineAuthority:
             occurrence=occurrence,
             reason=reason,
             popup=request,
+        )
+
+    def _request_post_normal_break_return_gate(
+        self,
+        episode: _Episode,
+        occurred_ns: int,
+        reason: str,
+    ) -> None:
+        """Mint one acknowledgement surface that consumes no SINE stage.
+
+        Deliberately NOT ``_request_stage``: ``requested_stage`` is untouched,
+        no stage occurrence is counted against SINE 1/2/3, and the request
+        carries ``SineStage.NONE`` so nothing downstream can read it as an
+        intervention display.
+        """
+
+        if (
+            episode.terminal
+            or episode.normal_break_held
+            or not episode.post_normal_break_return_pending
+        ):
+            return
+        current = self._current_popup(episode)
+        if current is not None and current.state in {
+            PopupState.REQUESTED,
+            PopupState.DISPLAYED,
+        }:
+            self._request_popup_close(episode, current, occurred_ns, "superseded")
+
+        occurrence_number = episode.stage_occurrences.get(SineStage.NONE, 0) + 1
+        episode.stage_occurrences[SineStage.NONE] = occurrence_number
+        request = SinePopupRequest(
+            request_id=f"popup_{secrets.token_hex(16)}",
+            episode_uid=episode.episode_uid,
+            candidate_uid=episode.candidate_uid,
+            operational_event_id=episode.operational_event_id,
+            stage=SineStage.NONE,
+            occurrence=occurrence_number,
+            requested_monotonic_ns=occurred_ns,
+            # The gate has no display deadline: it is an acknowledgement, and
+            # an unacknowledged gate that silently expired would strand the
+            # episode with no surface and no clock.
+            visible_seconds=0.0,
+            protected=False,
+            presentation=self._post_normal_break_return_presentation(episode),
+            mirl_display_token=None,
+            surface=SineSurface.POST_NORMAL_BREAK_RETURN_GATE,
+        )
+        occurrence = _PopupOccurrence(request=request)
+        self._popups[request.request_id] = occurrence
+        self._popup_order.append(request.request_id)
+        self._trim_popup_history()
+        episode.current_popup_request_id = request.request_id
+        episode.post_normal_break_gate_request_id = request.request_id
+        episode.post_normal_break_gate_retry_due_monotonic_ns = None
+        episode.phase = SinePhase.WAITING_FOR_DISPLAY
+        episode.retry_stage = SineStage.NONE
+        episode.retry_due_monotonic_ns = None
+        self._emit(
+            "SINE_POST_BREAK_RETURN_GATE_REQUESTED",
+            "The post-Normal-Break WELCOME BACK acknowledgement surface was "
+            "requested; no SINE stage was consumed.",
+            occurred_ns,
+            episode=episode,
+            occurrence=occurrence,
+            reason=reason,
+            popup=request,
+        )
+
+    def _post_normal_break_gate_shown(
+        self,
+        episode: _Episode,
+        occurrence: _PopupOccurrence,
+        shown_monotonic_ns: int,
+        popup_hwnd: int,
+    ) -> bool:
+        """Record the gate as factually visible without advancing any stage."""
+
+        occurrence.state = PopupState.DISPLAYED
+        occurrence.shown_monotonic_ns = shown_monotonic_ns
+        occurrence.popup_hwnd = (
+            popup_hwnd if type(popup_hwnd) is int and popup_hwnd > 0 else 0
+        )
+        occurrence.visible_deadline_monotonic_ns = None
+        episode.phase = SinePhase.ACTIVE
+        episode.post_normal_break_gate_retry_due_monotonic_ns = None
+        # NOT ``SINE_DISPLAYED``: MIRL, Trigger, persistence and the console
+        # must never read this as a factual SINE stage display, and no
+        # SINE-3 deadline is armed here.
+        self._emit(
+            "SINE_POST_BREAK_RETURN_GATE_DISPLAYED",
+            "The WELCOME BACK acknowledgement surface is factually visible; "
+            "SINE 2 does not exist yet.",
+            shown_monotonic_ns,
+            episode=episode,
+            occurrence=occurrence,
+            reason=episode.post_normal_break_completion_kind,
+        )
+        return True
+
+    def _acknowledge_post_normal_break_return(
+        self,
+        episode: _Episode,
+        occurrence: _PopupOccurrence,
+        selected: SineResponse,
+        occurred_monotonic_ns: int,
+    ) -> bool:
+        """Close the gate and RE-ARM the ordinary SINE-1 -> SINE-2 interval.
+
+        I'M BACK is not a SINE-2 request.  A user who has just taken a real
+        break and acknowledged their return has earned the same fresh
+        intervention window any focused user gets: the episode stays at
+        SINE 1 and the already-authorized ``stage_2_delay_seconds`` window is
+        re-anchored to this acknowledgement.  SINE 2 then exists only if
+        eligible distraction actually continues for that whole window --
+        Phase-3 Activity pause and MIRL recovery both keep their authority over
+        that clock, so it is eligible time, not blind wall-clock time.
+
+        No new timing constant: this is the same 600 s (x F) gap SINE 1 already
+        owns, re-anchored to a later factual moment exactly as ``popup_shown``
+        re-anchors it to the factual SINE-1 display.
+        """
+
+        if (
+            selected is not SineResponse.RETURN_TO_FOCUS
+            or not episode.post_normal_break_return_pending
+            or episode.post_normal_break_gate_request_id
+            != occurrence.request.request_id
+            or episode.current_popup_request_id != occurrence.request.request_id
+        ):
+            return False
+
+        occurrence.response = selected.value
+        episode.last_response = selected.value
+        episode.last_response_monotonic_ns = occurred_monotonic_ns
+        episode.post_normal_break_return_pending = False
+        episode.post_normal_break_gate_request_id = ""
+        episode.post_normal_break_gate_retry_due_monotonic_ns = None
+        self._emit(
+            "SINE_POST_BREAK_RETURN_ACKNOWLEDGED",
+            "The user acknowledged their return from the Normal Break; the "
+            "same episode stays at SINE 1 with a fresh escalation window.",
+            occurred_monotonic_ns,
+            episode=episode,
+            occurrence=occurrence,
+            reason=episode.post_normal_break_completion_kind,
+            response=selected.value,
+        )
+        self._request_popup_close(
+            episode,
+            occurrence,
+            occurred_monotonic_ns,
+            f"response:{selected.value}",
+        )
+
+        # Any Activity pause captured BEFORE the break is void: the
+        # acknowledgement is a newer, stronger anchor and its remaining time
+        # would otherwise freeze the re-armed window forever.
+        self._clear_activity_timer_pause(episode)
+        episode.retry_stage = SineStage.NONE
+        episode.retry_due_monotonic_ns = None
+        stage_2_delay = (
+            episode.stage_2_delay_seconds_applied
+            if episode.stage_2_delay_seconds_applied is not None
+            else self._policy.stage_2_delay_seconds
+        )
+        episode.stage_2_deadline_monotonic_ns = (
+            occurred_monotonic_ns + _seconds_to_ns(stage_2_delay)
+        )
+        # SAME episode, same candidate, same operational event, still SINE 1.
+        # advance() requests SINE 2 only when this deadline becomes due.
+        episode.phase = SinePhase.ACTIVE
+        self._emit(
+            "SINE_STAGE_2_REARMED_AFTER_POST_BREAK_RETURN",
+            "The SINE-1 -> SINE-2 window was re-anchored to the factual "
+            "post-break return acknowledgement.",
+            occurred_monotonic_ns,
+            episode=episode,
+            occurrence=occurrence,
+            reason=episode.stage_2_timing_source,
+        )
+        return True
+
+    def _advance_post_normal_break_gate_retry(
+        self,
+        episode: _Episode,
+        now_ns: int,
+    ) -> None:
+        due = episode.post_normal_break_gate_retry_due_monotonic_ns
+        if due is None or now_ns < due:
+            return
+        episode.post_normal_break_gate_retry_due_monotonic_ns = None
+        self._request_post_normal_break_return_gate(
+            episode,
+            now_ns,
+            "post_normal_break_return_gate_restore",
         )
 
     def _advance_popup_deadline(self, episode: _Episode, now_ns: int) -> None:
@@ -1943,6 +2465,9 @@ class SineAuthority:
         was_red = episode.protected_red
         episode.protected_red = False
         self._clear_normal_break_hold(episode)
+        self._clear_post_normal_break_gate(episode)
+        self._clear_recovery_timer_pause(episode)
+        self._clear_activity_timer_pause(episode)
         episode.phase = SinePhase.RESOLVED
         episode.terminal_reason = reason
         if was_red:
@@ -1975,6 +2500,9 @@ class SineAuthority:
             self._request_popup_close(episode, occurrence, occurred_ns, "episode_cancelled")
         episode.protected_red = False
         self._clear_normal_break_hold(episode)
+        self._clear_post_normal_break_gate(episode)
+        self._clear_recovery_timer_pause(episode)
+        self._clear_activity_timer_pause(episode)
         episode.phase = SinePhase.CANCELLED
         episode.terminal_reason = reason
         self._emit(
@@ -2057,21 +2585,15 @@ class SineAuthority:
                     SineResponse.REQUEST_BREAK,
                 )
             elif stage is SineStage.SINE_2:
-                if _field(episode, "post_normal_break_completion_kind", "") in {
-                    "NORMAL_BREAK_COMPLETED",
-                    "NORMAL_BREAK_STOPPED",
-                }:
-                    headline = "WELCOME BACK"
-                    message = (
-                        "Hope you have refreshed and enjoyed your break. "
-                        "Let's come back to focus."
-                    )
-                else:
-                    headline = "Still Here?"
-                    message = (
-                        "You stepped away for a moment, but the loop pulled you back. "
-                        "Your focus window is still open."
-                    )
+                # WELCOME BACK is NOT SINE 2.  The green post-Normal-Break
+                # surface is its own acknowledgement gate -- see
+                # ``_post_normal_break_return_presentation`` -- so every
+                # factual SINE 2, post-break or ordinary, is the amber stage.
+                headline = "Still Here?"
+                message = (
+                    "You stepped away for a moment, but the loop pulled you back. "
+                    "Your focus window is still open."
+                )
                 # Normal SINE 2 now has one return action.  The compatibility
                 # enum/handler for CONTINUE_SINE remains available for old
                 # persisted inputs, but new presentation never offers it.
@@ -2092,6 +2614,31 @@ class SineAuthority:
             resource_title=title,
             allowed_responses=responses,
             weber_fechner=_weber_fechner_projection(stage),
+        )
+
+    def _post_normal_break_return_presentation(
+        self,
+        episode: _Episode,
+    ) -> SinePresentation:
+        """Presentation for the acknowledgement gate; not an intervention.
+
+        ``weber_fechner`` is deliberately ``None``: the gate is not a rung on
+        the Weber-Fechner ladder, and stamping a projection on it would be an
+        invented psychophysical claim.
+        """
+
+        return SinePresentation(
+            world="green",
+            badge="RETURN",
+            headline="WELCOME BACK",
+            message=(
+                "Hope you have refreshed and enjoyed your break. "
+                "Let's come back to focus."
+            ),
+            study_mode=False,
+            resource_title=str(_field(episode, "resource_title", "") or ""),
+            allowed_responses=(SineResponse.RETURN_TO_FOCUS,),
+            weber_fechner=None,
         )
 
     def _current_resource_title(self) -> str:
@@ -2344,6 +2891,97 @@ class SineAuthority:
         episode.normal_break_started_monotonic_ns = None
         episode.normal_break_source_popup_request_id = ""
 
+    @staticmethod
+    def _pause_recovery_escalation_deadline(
+        episode: _Episode,
+        occurred_monotonic_ns: int,
+    ) -> None:
+        if episode.activity_pause_started_monotonic_ns is not None:
+            target_stage = episode.activity_pause_target_stage
+            remaining_ns = episode.activity_pause_remaining_ns
+            SineAuthority._clear_activity_timer_pause(episode)
+        else:
+            target_stage, remaining_ns = SineAuthority._capture_escalation_deadline(
+                episode,
+                occurred_monotonic_ns,
+            )
+
+        episode.recovery_pause_started_monotonic_ns = occurred_monotonic_ns
+        episode.recovery_pause_target_stage = target_stage
+        episode.recovery_pause_remaining_ns = remaining_ns
+
+    @classmethod
+    def _resume_recovery_escalation_deadline(
+        cls,
+        episode: _Episode,
+        occurred_monotonic_ns: int,
+    ) -> bool:
+        pause_started = episode.recovery_pause_started_monotonic_ns
+        if pause_started is None or occurred_monotonic_ns < pause_started:
+            return False
+
+        cls._restore_escalation_deadline(
+            episode,
+            target_stage=episode.recovery_pause_target_stage,
+            remaining_ns=episode.recovery_pause_remaining_ns,
+            occurred_monotonic_ns=occurred_monotonic_ns,
+        )
+        cls._clear_recovery_timer_pause(episode)
+        return True
+
+    @staticmethod
+    def _capture_escalation_deadline(
+        episode: _Episode,
+        occurred_monotonic_ns: int,
+    ) -> tuple[SineStage, int | None]:
+        target_stage = SineStage.NONE
+        deadline = None
+        if episode.current_stage is SineStage.SINE_1:
+            target_stage = SineStage.SINE_2
+            deadline = episode.stage_2_deadline_monotonic_ns
+        elif episode.current_stage is SineStage.SINE_2:
+            target_stage = SineStage.SINE_3
+            deadline = episode.stage_3_deadline_monotonic_ns
+        return (
+            target_stage,
+            None if deadline is None else max(0, deadline - occurred_monotonic_ns),
+        )
+
+    @staticmethod
+    def _restore_escalation_deadline(
+        episode: _Episode,
+        *,
+        target_stage: SineStage,
+        remaining_ns: int | None,
+        occurred_monotonic_ns: int,
+    ) -> None:
+        if target_stage is SineStage.SINE_2 and remaining_ns is not None:
+            episode.stage_2_deadline_monotonic_ns = (
+                occurred_monotonic_ns + remaining_ns
+            )
+        elif target_stage is SineStage.SINE_3 and remaining_ns is not None:
+            episode.stage_3_deadline_monotonic_ns = (
+                occurred_monotonic_ns + remaining_ns
+            )
+
+    @staticmethod
+    def _clear_post_normal_break_gate(episode: _Episode) -> None:
+        episode.post_normal_break_return_pending = False
+        episode.post_normal_break_gate_request_id = ""
+        episode.post_normal_break_gate_retry_due_monotonic_ns = None
+
+    @staticmethod
+    def _clear_recovery_timer_pause(episode: _Episode) -> None:
+        episode.recovery_pause_started_monotonic_ns = None
+        episode.recovery_pause_target_stage = SineStage.NONE
+        episode.recovery_pause_remaining_ns = None
+
+    @staticmethod
+    def _clear_activity_timer_pause(episode: _Episode) -> None:
+        episode.activity_pause_started_monotonic_ns = None
+        episode.activity_pause_target_stage = SineStage.NONE
+        episode.activity_pause_remaining_ns = None
+
     def _active_session(self) -> bool:
         """Return whether SINE will accept observations and new triggers.
 
@@ -2389,6 +3027,7 @@ __all__ = (
     "SineResponse",
     "SineSessionTiming",
     "SineStage",
+    "SineSurface",
     "WeberFechnerProjection",
     "weber_fechner_response",
 )

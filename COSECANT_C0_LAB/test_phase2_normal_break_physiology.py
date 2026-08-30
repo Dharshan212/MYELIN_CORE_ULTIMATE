@@ -24,6 +24,7 @@ from SINE.sine import (
     SinePolicy,
     SineResponse,
     SineStage,
+    SineSurface,
 )
 
 
@@ -131,14 +132,16 @@ def test_p2_same_episode_is_held_and_all_sine_deadlines_are_suppressed():
     "completion_kind",
     ["NORMAL_BREAK_COMPLETED", "NORMAL_BREAK_STOPPED"],
 )
-def test_p2_completion_or_stop_resumes_same_episode_at_sine2_immediately(
+def test_p2_completion_or_stop_opens_the_return_gate_and_never_sine2(
     completion_kind,
 ):
+    """CASE A / CASE B -- the break terminal fact opens the gate, not SINE 2."""
+
     sine, clock, request_id, _ = _break_requested_sine()
     before = _hold(sine, request_id)
     end_ns = 304 * NS
 
-    assert sine.resume_from_normal_break_as_sine2(
+    assert sine.enter_post_normal_break_return_gate(
         candidate_uid=before.candidate_uid,
         episode_uid=before.episode_uid,
         break_id="break-1",
@@ -153,24 +156,290 @@ def test_p2_completion_or_stop_resumes_same_episode_at_sine2_immediately(
     assert after.candidate_uid == before.candidate_uid
     assert after.phase is SinePhase.WAITING_FOR_DISPLAY
     assert after.normal_break_held is False
+    assert after.post_normal_break_return_pending is True
     assert after.post_normal_break_completion_kind == completion_kind
-    requests = [fact.popup for fact in facts if fact.kind == "SINE_POPUP_REQUESTED"]
-    assert len(requests) == 1
-    assert requests[0].stage is SineStage.SINE_2
-    assert requests[0].requested_monotonic_ns == end_ns
-    # Phase 3 intentionally removes the visible CONTINUE SINE choice while
-    # retaining the compatibility enum/handler.  Same-episode immediate SINE 2
-    # remains the Phase-2 physiology under test here.
-    assert requests[0].presentation.allowed_responses == (
+    assert after.stage is SineStage.SINE_1
+    assert after.stage_3_deadline_monotonic_ns is None
+
+    kinds = {fact.kind for fact in facts}
+    assert "SINE_POST_NORMAL_BREAK_RETURN_PENDING" in kinds
+    assert "SINE_POST_BREAK_RETURN_GATE_REQUESTED" in kinds
+    assert "SINE_POPUP_REQUESTED" not in kinds
+
+    gates = [
+        fact.popup
+        for fact in facts
+        if fact.kind == "SINE_POST_BREAK_RETURN_GATE_REQUESTED"
+    ]
+    assert len(gates) == 1
+    assert gates[0].surface is SineSurface.POST_NORMAL_BREAK_RETURN_GATE
+    assert gates[0].stage is SineStage.NONE
+    assert gates[0].requested_monotonic_ns == end_ns
+    assert gates[0].presentation.headline == "WELCOME BACK"
+    assert gates[0].presentation.world == "green"
+    assert gates[0].presentation.allowed_responses == (
         SineResponse.RETURN_TO_FOCUS,
     )
 
 
-def test_p2_post_break_sine3_deadline_anchors_only_on_factual_sine2_display():
+@pytest.mark.parametrize(
+    "completion_kind",
+    ["NORMAL_BREAK_COMPLETED", "NORMAL_BREAK_STOPPED"],
+)
+def test_p2_acknowledged_gate_rearms_the_sine1_window_instead_of_sine2(
+    completion_kind,
+):
+    """CASE A / CASE B / CASE I -- I'M BACK re-arms, it does not escalate."""
+
     sine, clock, request_id, _ = _break_requested_sine()
     before = _hold(sine, request_id)
     end_ns = 304 * NS
-    assert sine.resume_from_normal_break_as_sine2(
+    assert sine.enter_post_normal_break_return_gate(
+        candidate_uid=before.candidate_uid,
+        episode_uid=before.episode_uid,
+        break_id="break-1",
+        break_generation=1,
+        occurred_monotonic_ns=end_ns,
+        completion_kind=completion_kind,
+    )
+    sine.advance(now_monotonic_ns=end_ns)
+
+    gate_request_id = sine.live_view().popup_request_id
+    gate_shown_ns = end_ns + 1 * NS
+    assert sine.popup_shown(
+        request_id=gate_request_id,
+        shown_monotonic_ns=gate_shown_ns,
+        popup_hwnd=303,
+    )
+    displayed_facts = sine.advance(now_monotonic_ns=gate_shown_ns)
+    displayed_kinds = {fact.kind for fact in displayed_facts}
+    assert "SINE_POST_BREAK_RETURN_GATE_DISPLAYED" in displayed_kinds
+    assert "SINE_DISPLAYED" not in displayed_kinds
+    assert "SINE_STAGE_3_SCHEDULED" not in displayed_kinds
+    assert sine.live_view().stage is SineStage.SINE_1
+    assert sine.live_view().stage_3_deadline_monotonic_ns is None
+
+    acknowledged_ns = gate_shown_ns + 2 * NS
+    assert sine.popup_response(
+        request_id=gate_request_id,
+        response=SineResponse.RETURN_TO_FOCUS,
+        occurred_monotonic_ns=acknowledged_ns,
+    )
+    facts = sine.advance(now_monotonic_ns=acknowledged_ns)
+    kinds = {fact.kind for fact in facts}
+    assert "SINE_POST_BREAK_RETURN_ACKNOWLEDGED" in kinds
+    assert "SINE_STAGE_2_REARMED_AFTER_POST_BREAK_RETURN" in kinds
+    # The gate is its own surface: it does not masquerade as ordinary
+    # SINE return intent.
+    assert "SINE_RETURN_INTENT_RECORDED" not in kinds
+    # THE DEFECT THIS TEST OWNS: acknowledgement must NOT request SINE 2.
+    assert "SINE_POPUP_REQUESTED" not in kinds
+
+    stage_2_gap_ns = int(SinePolicy().stage_2_delay_seconds * NS)
+    clock.now = acknowledged_ns
+    after = sine.live_view()
+    assert after.episode_uid == before.episode_uid
+    assert after.candidate_uid == before.candidate_uid
+    assert after.operational_event_id == before.operational_event_id
+    assert after.post_normal_break_return_pending is False
+    assert after.post_normal_break_completion_kind == completion_kind
+    assert after.stage is SineStage.SINE_1
+    assert after.phase is SinePhase.ACTIVE
+    assert after.stage_3_deadline_monotonic_ns is None
+    # No new constant: the same authorized SINE-1 -> SINE-2 gap, re-anchored.
+    assert after.stage_2_deadline_monotonic_ns == acknowledged_ns + stage_2_gap_ns
+    assert after.next_deadline_seconds == SinePolicy().stage_2_delay_seconds
+
+    # One second early: still nothing.
+    early_ns = acknowledged_ns + stage_2_gap_ns - 1 * NS
+    assert "SINE_POPUP_REQUESTED" not in {
+        fact.kind for fact in sine.advance(now_monotonic_ns=early_ns)
+    }
+    assert sine.live_view().stage is SineStage.SINE_1
+
+    # At the deadline: SINE 2 at last, as the ordinary amber stage.
+    due_ns = acknowledged_ns + stage_2_gap_ns
+    due_facts = sine.advance(now_monotonic_ns=due_ns)
+    requests = [fact.popup for fact in due_facts if fact.kind == "SINE_POPUP_REQUESTED"]
+    assert len(requests) == 1
+    assert requests[0].stage is SineStage.SINE_2
+    assert requests[0].surface is SineSurface.INTERVENTION
+    assert requests[0].requested_monotonic_ns == due_ns
+    # Phase 3 intentionally removes the visible CONTINUE SINE choice while
+    # retaining the compatibility enum/handler.
+    assert requests[0].presentation.allowed_responses == (
+        SineResponse.RETURN_TO_FOCUS,
+    )
+    # WELCOME BACK is the gate; the released SINE 2 is the ordinary amber
+    # stage, never a second green surface.
+    assert requests[0].presentation.headline == "Still Here?"
+    assert requests[0].presentation.world == "amber"
+    assert sine.live_view().episode_uid == before.episode_uid
+
+
+def test_p2_ignored_gate_never_escalates_to_sine3():
+    """CASE C -- no acknowledgement means no SINE 2, therefore no SINE 3."""
+
+    sine, clock, request_id, _ = _break_requested_sine()
+    before = _hold(sine, request_id)
+    end_ns = 304 * NS
+    assert sine.enter_post_normal_break_return_gate(
+        candidate_uid=before.candidate_uid,
+        episode_uid=before.episode_uid,
+        break_id="break-1",
+        break_generation=1,
+        occurred_monotonic_ns=end_ns,
+        completion_kind="NORMAL_BREAK_COMPLETED",
+    )
+    sine.advance(now_monotonic_ns=end_ns)
+    gate_request_id = sine.live_view().popup_request_id
+    gate_shown_ns = end_ns + 1 * NS
+    assert sine.popup_shown(
+        request_id=gate_request_id,
+        shown_monotonic_ns=gate_shown_ns,
+        popup_hwnd=304,
+    )
+    sine.advance(now_monotonic_ns=gate_shown_ns)
+
+    far_future_ns = gate_shown_ns + int(
+        (SinePolicy().stage_3_delay_seconds + 600.0) * NS
+    )
+    kinds = {
+        fact.kind for fact in sine.advance(now_monotonic_ns=far_future_ns)
+    }
+    assert "SINE_POPUP_REQUESTED" not in kinds
+    assert "SINE_POPUP_EXPIRED" not in kinds
+    view = sine.live_view()
+    assert view.stage is SineStage.SINE_1
+    assert view.post_normal_break_return_pending is True
+    assert view.stage_3_deadline_monotonic_ns is None
+    assert view.protected_red_active is False
+    assert view.popup_request_id == gate_request_id
+
+
+def test_p2_gate_refuses_the_generic_activity_clock():
+    """CASE G boundary -- the gate is a specialist hold, not ordinary Activity."""
+
+    sine, clock, request_id, _ = _break_requested_sine()
+    before = _hold(sine, request_id)
+    end_ns = 304 * NS
+    assert sine.enter_post_normal_break_return_gate(
+        candidate_uid=before.candidate_uid,
+        episode_uid=before.episode_uid,
+        break_id="break-1",
+        break_generation=1,
+        occurred_monotonic_ns=end_ns,
+        completion_kind="NORMAL_BREAK_COMPLETED",
+    )
+    sine.advance(now_monotonic_ns=end_ns)
+    gate_request_id = sine.live_view().popup_request_id
+    gate_shown_ns = end_ns + 1 * NS
+    assert sine.popup_shown(
+        request_id=gate_request_id,
+        shown_monotonic_ns=gate_shown_ns,
+        popup_hwnd=305,
+    )
+    sine.advance(now_monotonic_ns=gate_shown_ns)
+
+    later_ns = gate_shown_ns + 1 * NS
+    assert (
+        sine.pause_escalation_for_activity(
+            candidate_uid=before.candidate_uid,
+            occurred_monotonic_ns=later_ns,
+            evidence_source="monitor_ordinary_activity",
+        )
+        is False
+    )
+    assert (
+        sine.resume_escalation_after_activity(
+            candidate_uid=before.candidate_uid,
+            occurred_monotonic_ns=later_ns,
+            evidence_source="monitor_non_activity_policy",
+        )
+        is False
+    )
+    assert sine.live_view().activity_clock_paused is False
+    assert sine.live_view().post_normal_break_return_pending is True
+
+
+def test_p2_rearmed_window_is_eligible_time_not_wall_clock():
+    """Phase-3 Activity keeps its authority over the re-armed SINE-1 window."""
+
+    sine, clock, request_id, _ = _break_requested_sine()
+    before = _hold(sine, request_id)
+    end_ns = 304 * NS
+    assert sine.enter_post_normal_break_return_gate(
+        candidate_uid=before.candidate_uid,
+        episode_uid=before.episode_uid,
+        break_id="break-1",
+        break_generation=1,
+        occurred_monotonic_ns=end_ns,
+        completion_kind="NORMAL_BREAK_COMPLETED",
+    )
+    sine.advance(now_monotonic_ns=end_ns)
+    gate_request_id = sine.live_view().popup_request_id
+    gate_shown_ns = end_ns + 1 * NS
+    assert sine.popup_shown(
+        request_id=gate_request_id,
+        shown_monotonic_ns=gate_shown_ns,
+        popup_hwnd=306,
+    )
+    sine.advance(now_monotonic_ns=gate_shown_ns)
+    acknowledged_ns = gate_shown_ns + 1 * NS
+    assert sine.popup_response(
+        request_id=gate_request_id,
+        response=SineResponse.RETURN_TO_FOCUS,
+        occurred_monotonic_ns=acknowledged_ns,
+    )
+    sine.advance(now_monotonic_ns=acknowledged_ns)
+
+    # 100 s of the window burn down, then ordinary Activity takes over.
+    paused_ns = acknowledged_ns + 100 * NS
+    assert sine.pause_escalation_for_activity(
+        candidate_uid=before.candidate_uid,
+        occurred_monotonic_ns=paused_ns,
+        evidence_source="monitor_ordinary_activity",
+    )
+    sine.advance(now_monotonic_ns=paused_ns)
+    remaining = SinePolicy().stage_2_delay_seconds - 100.0
+    assert sine.live_view().activity_clock_paused is True
+    assert sine.live_view().next_deadline_seconds == remaining
+
+    # Hours of ordinary Activity cannot escalate a paused window.
+    idle_ns = paused_ns + 3600 * NS
+    assert "SINE_POPUP_REQUESTED" not in {
+        fact.kind for fact in sine.advance(now_monotonic_ns=idle_ns)
+    }
+    assert sine.live_view().stage is SineStage.SINE_1
+
+    resumed_ns = idle_ns + 1 * NS
+    assert sine.resume_escalation_after_activity(
+        candidate_uid=before.candidate_uid,
+        occurred_monotonic_ns=resumed_ns,
+        evidence_source="monitor_sine_driving_distraction",
+    )
+    sine.advance(now_monotonic_ns=resumed_ns)
+    assert sine.live_view().stage_2_deadline_monotonic_ns == (
+        resumed_ns + int(remaining * NS)
+    )
+
+    due_ns = resumed_ns + int(remaining * NS)
+    requests = [
+        fact
+        for fact in sine.advance(now_monotonic_ns=due_ns)
+        if fact.kind == "SINE_POPUP_REQUESTED"
+    ]
+    assert len(requests) == 1
+    assert requests[0].stage == 2
+
+
+def test_p2_post_break_sine3_deadline_anchors_only_on_factual_sine2_display():
+    """CASE A timing -- SINE 3 is armed by the SINE-2 display, not the gate."""
+
+    sine, clock, request_id, _ = _break_requested_sine()
+    before = _hold(sine, request_id)
+    end_ns = 304 * NS
+    assert sine.enter_post_normal_break_return_gate(
         candidate_uid=before.candidate_uid,
         episode_uid=before.episode_uid,
         break_id="break-1",
@@ -181,7 +450,31 @@ def test_p2_post_break_sine3_deadline_anchors_only_on_factual_sine2_display():
     sine.advance(now_monotonic_ns=end_ns)
     assert sine.live_view().stage_3_deadline_monotonic_ns is None
 
-    shown_ns = end_ns + 7 * NS
+    gate_request_id = sine.live_view().popup_request_id
+    gate_shown_ns = end_ns + 1 * NS
+    assert sine.popup_shown(
+        request_id=gate_request_id,
+        shown_monotonic_ns=gate_shown_ns,
+        popup_hwnd=201,
+    )
+    sine.advance(now_monotonic_ns=gate_shown_ns)
+    assert sine.live_view().stage_3_deadline_monotonic_ns is None
+
+    acknowledged_ns = gate_shown_ns + 3 * NS
+    assert sine.popup_response(
+        request_id=gate_request_id,
+        response=SineResponse.RETURN_TO_FOCUS,
+        occurred_monotonic_ns=acknowledged_ns,
+    )
+    sine.advance(now_monotonic_ns=acknowledged_ns)
+    assert sine.live_view().stage_3_deadline_monotonic_ns is None
+
+    # The re-armed SINE-1 window must elapse before SINE 2 exists at all.
+    due_ns = acknowledged_ns + int(SinePolicy().stage_2_delay_seconds * NS)
+    sine.advance(now_monotonic_ns=due_ns)
+    assert sine.live_view().stage_3_deadline_monotonic_ns is None
+
+    shown_ns = due_ns + 7 * NS
     stage_2_request = sine.live_view().popup_request_id
     assert sine.popup_shown(
         request_id=stage_2_request,
@@ -492,7 +785,7 @@ class RefusingHoldProxy(SineOrderProxy):
 
 
 class RefusingResumeProxy(SineOrderProxy):
-    def resume_from_normal_break_as_sine2(self, **kwargs):
+    def enter_post_normal_break_return_gate(self, **kwargs):
         self._order.append("sine:resume-refused")
         return False
 

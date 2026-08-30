@@ -12,6 +12,7 @@ being hidden inside style code.
 from __future__ import annotations
 
 import ctypes
+import math
 import sys
 import threading
 import time
@@ -153,6 +154,12 @@ class StudyTimerCard(QFrame):
         column.setSpacing(18)
         column.addWidget(self._build_timer_panel())
         column.addWidget(self._build_setup_panel())
+
+        self._study_snapshot: StudySnapshot | None = None
+        self._study_projection_timer = QTimer(self)
+        self._study_projection_timer.setInterval(200)
+        self._study_projection_timer.timeout.connect(self._project_study_countdown)
+        self._study_projection_timer.start()
 
         self.render(None, None)
 
@@ -456,6 +463,7 @@ class StudyTimerCard(QFrame):
         study: StudySnapshot | None,
         cosecant: CosecantSnapshot | None,
     ) -> None:
+        self._study_snapshot = study
         if study is None:
             self.subject_label.setText("No subject selected")
             self.task_label.setText("Prepare a Study block to begin")
@@ -510,6 +518,27 @@ class StudyTimerCard(QFrame):
             state in {StudyState.ACTIVE, StudyState.PAUSED} and not final_lock
         )
         self.break_button.setEnabled(state is StudyState.ACTIVE and not break_active)
+
+    def _project_study_countdown(self) -> None:
+        """Smooth the ring's countdown between backend StudySnapshot publishes.
+
+        Presentation only: reads the already-published snapshot fields and
+        never advances the Study runtime or invents a state. Only ACTIVE
+        interpolates; every other state (including the local projection
+        reaching zero) waits for the next authoritative snapshot.
+        """
+
+        study = self._study_snapshot
+        if study is None or study.state is not StudyState.ACTIVE:
+            return
+        authoritative_remaining = study.planned_seconds - study.elapsed_seconds
+        elapsed_since_publish = max(
+            0.0,
+            (time.monotonic_ns() - study.published_monotonic_ns) / 1_000_000_000,
+        )
+        display_remaining = max(0.0, authoritative_remaining - elapsed_since_publish)
+        display_whole_seconds = math.ceil(display_remaining)
+        self.time_label.setText(_duration(display_whole_seconds))
 
 
 class StudyTelemetryPanel(QFrame):

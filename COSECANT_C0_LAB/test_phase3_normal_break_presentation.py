@@ -25,7 +25,7 @@ from SINE.popup import (
     NormalBreakPresenter,
     NormalBreakSelectorWindow,
 )
-from SINE.sine import SineAuthority, SineResponse, SineStage
+from SINE.sine import SineAuthority, SineResponse, SineStage, SineSurface
 
 
 @pytest.fixture(scope="module")
@@ -148,20 +148,44 @@ def test_p3_normal_sine_button_matrix_and_study_contract_are_exact():
     "completion",
     ["NORMAL_BREAK_COMPLETED", "NORMAL_BREAK_STOPPED"],
 )
-def test_p3_post_break_sine2_is_the_welcome_back_surface(completion):
+def test_p3_post_break_sine2_is_never_the_welcome_back_surface(completion):
+    """CASE D -- WELCOME BACK is the gate; SINE 2 is always the amber stage."""
+
     presentation = SineAuthority()._presentation(
         _episode(completion=completion),
         SineStage.SINE_2,
     )
-    assert presentation.headline == "WELCOME BACK"
-    assert "refreshed" in presentation.message.lower()
-    assert "come back to focus" in presentation.message.lower()
+    assert presentation.headline == "Still Here?"
+    assert presentation.world == "amber"
+    assert presentation.badge == "SINE 2"
+    assert presentation.weber_fechner is not None
     assert presentation.allowed_responses == (SineResponse.RETURN_TO_FOCUS,)
 
 
 def test_p3_ordinary_normal_sine2_is_not_mislabeled_welcome_back():
     presentation = SineAuthority()._presentation(_episode(), SineStage.SINE_2)
     assert presentation.headline == "Still Here?"
+    assert presentation.world == "amber"
+    assert presentation.allowed_responses == (SineResponse.RETURN_TO_FOCUS,)
+
+
+@pytest.mark.parametrize(
+    "completion",
+    ["NORMAL_BREAK_COMPLETED", "NORMAL_BREAK_STOPPED"],
+)
+def test_p3_return_gate_is_the_welcome_back_surface_and_not_a_stage(completion):
+    """Chief's approved green surface, now owned by the acknowledgement gate."""
+
+    presentation = SineAuthority()._post_normal_break_return_presentation(
+        _episode(completion=completion)
+    )
+    assert presentation.headline == "WELCOME BACK"
+    assert "refreshed" in presentation.message.lower()
+    assert "come back to focus" in presentation.message.lower()
+    assert presentation.world == "green"
+    assert presentation.badge != "SINE 2"
+    assert presentation.study_mode is False
+    assert presentation.weber_fechner is None
     assert presentation.allowed_responses == (SineResponse.RETURN_TO_FOCUS,)
 
 
@@ -407,7 +431,7 @@ def test_p3_selector_has_no_three_second_presentation_timeout(app):
 def test_p3_control_station_normal_break_card_starts_inactive(app):
     page, _engine = _control_page()
     assert page._normal_break_hint.text() == "Inactive"
-    assert page._normal_break_source_value.text() == "\u2014"
+    assert page._normal_break_remaining_value.text() == "\u2014"
     assert page._normal_break_elapsed.text() == "\u2014 / \u2014"
     assert page._normal_break_state.text() == "Inactive"
     assert page._normal_break_progress.text() == "\u2014"
@@ -423,9 +447,6 @@ def test_p3_control_station_projects_source_timestamps_progress_and_stop_identit
     pending = _pending(runtime, now_ns=1_000_000_000)
     started = _started(runtime, pending)
     page, engine = _control_page()
-    page._latest_blacklist_live_view = SimpleNamespace(
-        resource_label="Instagram"
-    )
     monkeypatch.setattr(
         "CONTROL_STATION.launcher.time.monotonic_ns",
         lambda: started.started_monotonic_ns + 134_000_000_000,
@@ -434,7 +455,11 @@ def test_p3_control_station_projects_source_timestamps_progress_and_stop_identit
     page.render_normal_break_fact(started)
 
     assert page._normal_break_hint.text() == "Active"
-    assert page._normal_break_source_value.text() == "Instagram"
+    # AMBER-5: Source (a snapshotted Blacklist label, not a Normal Break
+    # authority fact) was replaced by Remaining, projected presentation-only
+    # from the break's own authoritative deadline with the same ceil()
+    # convention StudyRuntime uses: 300s planned - 134s elapsed = 166s.
+    assert page._normal_break_remaining_value.text() == "02:46"
     assert page._normal_break_elapsed.text() == "02:14 / 05:00"
     assert page._normal_break_state.text() == "Active"
     assert page._normal_break_progress.text() == "45%"
@@ -502,7 +527,7 @@ def test_p3_control_station_natural_completion_resets_card_without_ui_authority(
         page.render_normal_break_fact(fact)
 
     assert page._normal_break_hint.text() == "Inactive"
-    assert page._normal_break_source_value.text() == "\u2014"
+    assert page._normal_break_remaining_value.text() == "\u2014"
     assert page._normal_break_elapsed.text() == "\u2014 / \u2014"
     assert page._normal_break_progress.text() == "\u2014"
     assert page._normal_break_stop.isHidden()

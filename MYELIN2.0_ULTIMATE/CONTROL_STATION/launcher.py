@@ -2537,12 +2537,16 @@ class ControlPage(QWidget):
         self._latest_blacklist_live_view = None
         self._latest_sine_live_view = None
         self._active_normal_break_fact = None
-        self._normal_break_source = "\u2014"
         self._normal_break_stop_in_flight = False
+        self._engine_paused = False
         self._session_elapsed = QElapsedTimer()
         self._session_tick = QTimer(self)
         self._session_tick.setInterval(1000)
         self._session_tick.timeout.connect(self._advance_session_clock)
+        self._sine_projection_timer = QTimer(self)
+        self._sine_projection_timer.setInterval(200)
+        self._sine_projection_timer.timeout.connect(self._project_sine_countdown)
+        self._sine_projection_timer.start()
 
         page_layout = QVBoxLayout(self)
         page_layout.setContentsMargins(0, 0, 0, 0)
@@ -2574,22 +2578,22 @@ class ControlPage(QWidget):
         self._emergency = self.hero.btn_emergency
         self._profile.currentIndexChanged.connect(self._profile_changed)
         self._buttons["start"].clicked.connect(lifecycle.request_start)
-        self._buttons["pause"].clicked.connect(engine.pause)
+        self._buttons["pause"].clicked.connect(self._pause_resume_clicked)
         self._buttons["stop"].clicked.connect(lifecycle.request_stop)
         self._emergency.clicked.connect(lifecycle.request_emergency)
         left.addWidget(self.hero)
 
         # -------------------------------------------- Today's Session Health
         health, health_body = make_card()
-        head, _ = card_head("Today's Session Health", "Resets 00:00")
+        head, self._health_hint = card_head("Today's Session Health", "Loading")
         health_body.addWidget(head)
         health_body.addSpacing(16)
         health_row = QHBoxLayout()
         health_row.setSpacing(14)
-        sessions, self._stat_sessions = stat_box("Sessions", "0", "cyan")
-        returns, self._stat_return = stat_box("Return rate", "\u2014", "green")
-        distraction, self._stat_distraction = stat_box("Distraction", "\u2014", "amber")
-        for widget in (sessions, returns, distraction):
+        sessions, self._stat_sessions = stat_box("Sessions", "\u2014", "cyan")
+        returns, self._stat_returns = stat_box("Returns", "\u2014", "green")
+        triggers, self._stat_triggers = stat_box("Triggers", "\u2014", "amber")
+        for widget in (sessions, returns, triggers):
             health_row.addWidget(widget, 1)
         health_body.addLayout(health_row)
         left.addWidget(health)
@@ -2634,8 +2638,8 @@ class ControlPage(QWidget):
         normal_break_body.addSpacing(16)
         break_row = QHBoxLayout()
         break_row.setSpacing(14)
-        source, self._normal_break_source_value = stat_box(
-            "Source", "\u2014", "text", 16.0
+        remaining, self._normal_break_remaining_value = stat_box(
+            "Remaining", "\u2014", "text", 16.0
         )
         elapsed, self._normal_break_elapsed = stat_box(
             "Elapsed / Duration", "\u2014 / \u2014", "text", 16.0
@@ -2643,7 +2647,7 @@ class ControlPage(QWidget):
         state, self._normal_break_state = stat_box(
             "State", "Inactive", "text", 16.0
         )
-        for widget in (source, elapsed, state):
+        for widget in (remaining, elapsed, state):
             break_row.addWidget(widget, 1)
         normal_break_body.addLayout(break_row)
         normal_break_body.addSpacing(12)
@@ -2807,6 +2811,14 @@ class ControlPage(QWidget):
             return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
         return f"{minutes:02d}:{seconds:02d}"
 
+    def _pause_resume_clicked(self) -> None:
+        """Route the single Pause/Resume button to the correct engine call."""
+
+        if self._engine_paused:
+            self._engine.resume()
+        else:
+            self._engine.pause()
+
     def _profile_changed(self, index: int) -> None:
         key = str(self._profile.itemData(index) or "general")
         if self._profiles.set_active(key):
@@ -2832,8 +2844,10 @@ class ControlPage(QWidget):
         )
         restyle(self._status)
 
+        self._engine_paused = paused
         self._buttons["start"].setEnabled(not running)
         self._buttons["pause"].setEnabled(running)
+        self._buttons["pause"].setText("RESUME" if paused else "PAUSE")
         self._buttons["stop"].setEnabled(running)
         self._emergency.setEnabled(running)
 
@@ -2870,15 +2884,6 @@ class ControlPage(QWidget):
         ).upper()
         if kind == "NORMAL BREAK STARTED":
             self._active_normal_break_fact = fact
-            source = str(
-                self._value(
-                    self._latest_blacklist_live_view,
-                    "resource_label",
-                    "",
-                )
-                or ""
-            ).strip()
-            self._normal_break_source = source or "\u2014"
             self._normal_break_stop_in_flight = False
             self.refresh_normal_break()
             return
@@ -2910,14 +2915,18 @@ class ControlPage(QWidget):
             return
         duration_ns = max(0, deadline_ns - started_ns)
         elapsed_ns = min(duration_ns, max(0, time.monotonic_ns() - started_ns))
+        remaining_ns = max(0, deadline_ns - time.monotonic_ns())
         duration_seconds = duration_ns // 1_000_000_000
         elapsed_seconds = elapsed_ns // 1_000_000_000
+        remaining_seconds = math.ceil(remaining_ns / 1_000_000_000)
         ratio = 0.0 if duration_ns <= 0 else elapsed_ns / duration_ns
 
         self._normal_break_hint.setText(
             "Stopping\u2026" if self._normal_break_stop_in_flight else "Active"
         )
-        self._normal_break_source_value.setText(self._normal_break_source)
+        self._normal_break_remaining_value.setText(
+            self._format_seconds(remaining_seconds)
+        )
         self._normal_break_elapsed.setText(
             f"{self._format_seconds(elapsed_seconds)} / "
             f"{self._format_seconds(duration_seconds)}"
@@ -2959,13 +2968,12 @@ class ControlPage(QWidget):
 
     def _clear_normal_break_presentation(self) -> None:
         self._active_normal_break_fact = None
-        self._normal_break_source = "\u2014"
         self._normal_break_stop_in_flight = False
         self._render_normal_break_inactive()
 
     def _render_normal_break_inactive(self) -> None:
         self._normal_break_hint.setText("Inactive")
-        self._normal_break_source_value.setText("\u2014")
+        self._normal_break_remaining_value.setText("\u2014")
         self._normal_break_elapsed.setText("\u2014 / \u2014")
         self._normal_break_state.setText("Inactive")
         self._normal_break_track.set_progress(0.0)
@@ -3034,6 +3042,45 @@ class ControlPage(QWidget):
                 self._mine_elapsed.setText("\u2014 / 15:00")
                 self._mine_track.set_progress(0.0)
                 self._mine_value.setText("0%")
+
+    def render_today_session_health(self, snapshot: object) -> None:
+        """Place three already-calculated Today Health integers into labels.
+
+        Presentation only: no ratio, SQL, event counting, date arithmetic or
+        MIRL interpretation happens here. The snapshot is trusted exactly as
+        the read model prepared it.
+        """
+
+        self._stat_sessions.setText(
+            self._display_count(self._value(snapshot, "session_count"))
+        )
+        self._stat_returns.setText(
+            self._display_count(self._value(snapshot, "returned_episode_count"))
+        )
+        self._stat_triggers.setText(
+            self._display_count(self._value(snapshot, "trigger_count"))
+        )
+        self._health_hint.setText("Resets 00:00 local")
+
+    def show_today_session_health_unavailable(self) -> None:
+        """A failed or not-yet-proven read must never be shown as zero."""
+
+        self._stat_sessions.setText("—")
+        self._stat_returns.setText("—")
+        self._stat_triggers.setText("—")
+        self._health_hint.setText("Unavailable")
+
+    @staticmethod
+    def _display_count(value: object) -> str:
+        """Only an exact, already-validated non-negative int is a count.
+
+        No coercion: ``True``, ``3.8`` and ``"3"`` must never be displayed
+        as a believable number on a research metric card.
+        """
+
+        if type(value) is int and value >= 0:
+            return str(value)
+        return "—"
 
     def render_sine(self, payload: object) -> None:
         """Render exactly the latest SINE live-view facts."""
@@ -3110,6 +3157,50 @@ class ControlPage(QWidget):
                 f"t*={self._sine_t_star.text()} | popup={popup}",
                 flush=True,
             )
+
+    def _sine_actively_counting_deadline(self) -> int | None:
+        """Return the authoritative deadline to project, or None while frozen.
+
+        Presentation-only: every guard here mirrors a SINE fact that already
+        holds the countdown still. Never decrements locally under a hold.
+        """
+
+        sine = self._latest_sine_live_view
+        if sine is None:
+            return None
+        if bool(self._value(sine, "protected_red_active", False)):
+            return None
+        for flag in (
+            "presentation_withheld_for_recovery",
+            "activity_clock_paused",
+            "normal_break_held",
+            "post_normal_break_return_pending",
+        ):
+            if bool(self._value(sine, flag, False)):
+                return None
+        stage = self._value(sine, "stage")
+        try:
+            stage_number = int(getattr(stage, "value", stage))
+        except (TypeError, ValueError):
+            return None
+        if stage_number == 1:
+            return self._value(sine, "stage_2_deadline_monotonic_ns")
+        if stage_number == 2:
+            return self._value(sine, "stage_3_deadline_monotonic_ns")
+        return None
+
+    def _project_sine_countdown(self) -> None:
+        """Smooth the SINE timer label between backend snapshots.
+
+        Reads only the already-published monotonic deadline; never advances
+        SINE, never invents a stage, never writes back to the engine.
+        """
+
+        deadline_ns = self._sine_actively_counting_deadline()
+        if deadline_ns is None:
+            return
+        remaining = max(0.0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)
+        self._sine_timer.setText(self._format_seconds(remaining))
 
     def _render_current_authority_interval(self) -> None:
         """Project the current owner without inventing any timing value."""
@@ -3356,6 +3447,13 @@ class ControlStationWindow(QMainWindow):
         self.lifecycle.navigation_enabled.connect(self.navigation.set_enabled)
         self.lifecycle.exit_authorized.connect(self._finish_shutdown)
 
+        self.analytics.today_session_health_ready.connect(
+            self.pages.control.render_today_session_health
+        )
+        self.analytics.today_session_health_failed.connect(
+            lambda _message: self.pages.control.show_today_session_health_unavailable()
+        )
+
         # The controller supplies prepared view data. The launcher does not
         # interpret or recalculate any telemetry value.
         self.engine.control_view_changed.connect(self.pages.control.render)
@@ -3368,7 +3466,9 @@ class ControlStationWindow(QMainWindow):
         )
         self.engine.study_view_changed.connect(self.pages.study.render)
         self.engine.telemetry_received.connect(self._print_telemetry_event)
+        self.engine.telemetry_received.connect(self.analytics.telemetry_received)
         self.engine.engine_status_changed.connect(self._engine_status_changed)
+        self.engine.engine_status_changed.connect(self.analytics.engine_status_changed)
         self.engine.normal_stop_requested.connect(self.lifecycle.request_stop)
         self.pages.study.prepare_requested.connect(self.engine.prepare_study)
         self.pages.study.study_action_requested.connect(self.engine.request_study_action)
@@ -3376,6 +3476,11 @@ class ControlStationWindow(QMainWindow):
         self.pages.study.return_intent_requested.connect(self.engine.request_cosecant_return_intent)
 
         self.theme.theme_changed.connect(self._apply_theme)
+
+        # After every signal connection exists, request one initial Today
+        # Health read so the card cannot remain permanently at Loading when
+        # Control is already the restored page.
+        self.analytics.request_today_session_health_refresh()
 
     def _restore_preferences(self) -> None:
         """Restore normal UI preferences without restoring a SINE stage."""

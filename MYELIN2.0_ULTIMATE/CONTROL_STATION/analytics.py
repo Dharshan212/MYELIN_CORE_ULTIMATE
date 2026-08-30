@@ -63,6 +63,7 @@ POLL_INTERVAL_MS: Final = 120
 ANALYTICS_SHUTDOWN_TIMEOUT_SECONDS: Final = 2.0
 MAX_ERROR_LENGTH: Final = 220
 
+PAGE_CONTROL: Final = "control"
 PAGE_METRIC_HUB: Final = "metric-hub"
 PAGE_SCIENCE_LAB: Final = "science-lab"
 PAGE_LIVE_MIRL: Final = "live-mirl"
@@ -74,6 +75,13 @@ PROJECTION_NAMES: Final = {
     PAGE_LIVE_MIRL: "live_mirl",
     PAGE_COSINE: "cosine",
 }
+
+#: Telemetry kinds that must trigger a Today Health re-read. ``trigger`` only
+#: fires after durable admission (CORE_ENGINE/monitor.py emits it post-COMMIT);
+#: ``sine_verified_return`` is a REFRESH SIGNAL only -- the Returns count
+#: itself always comes from a persisted EPISODE_CLOSED/RETURNED fact, never
+#: from this telemetry kind.
+TODAY_HEALTH_TELEMETRY_KINDS: Final = frozenset({"trigger", "sine_verified_return"})
 
 
 def _field(value: object, name: str, default=None):
@@ -147,6 +155,67 @@ def _default_snapshot_provider() -> object:
     from PERSISTENCE.storage import read_control_station_analytics
 
     return read_control_station_analytics()
+
+
+def _local_day_window_utc(local_date, *, zone=None):
+    """Resolve one local civil day's [start, end) boundary pair in UTC.
+
+    Each boundary is resolved INDEPENDENTLY from its own naive local
+    midnight -- never by taking one already-resolved instant and adding 24
+    hours to it.  A fixed-offset ``datetime.now().astimezone()`` snapshot
+    carries only today's UTC offset, so adding a day to it silently reuses
+    that offset for tomorrow too; if the OS-local zone crosses a DST
+    transition inside this civil day, that produces a wrong, always-24-hour
+    window instead of the true (possibly 23h or 25h) local day.
+
+    Calling ``.astimezone()`` on a NAIVE datetime instead asks the platform
+    to resolve local-to-UTC for that exact calendar date, so each boundary
+    gets its own correct offset. ``zone`` exists only so a test can inject
+    an explicit ``ZoneInfo`` and prove the DST-crossing case deterministically
+    without depending on the host machine's configured timezone; production
+    always leaves it ``None`` and lets the OS resolve both instants.
+    """
+
+    from datetime import datetime, timedelta, time as time_of_day, timezone
+
+    start_naive = datetime.combine(local_date, time_of_day.min)
+    end_naive = datetime.combine(local_date + timedelta(days=1), time_of_day.min)
+    if zone is None:
+        start_utc = start_naive.astimezone(timezone.utc)
+        end_utc = end_naive.astimezone(timezone.utc)
+    else:
+        start_utc = start_naive.replace(tzinfo=zone).astimezone(timezone.utc)
+        end_utc = end_naive.replace(tzinfo=zone).astimezone(timezone.utc)
+    return start_utc, end_utc
+
+
+def _default_today_session_health_provider() -> object:
+    """Resolve the system-local civil day, convert it to UTC, and read it.
+
+    The header clock's timezone selection is presentation-only for the
+    Control Station clock and must never change which local day this
+    resolves -- see ``CONTROL_STATION/settings.py``'s own timezone note.
+    Neither is any timezone hard-coded here: ``_local_day_window_utc``
+    resolves both boundaries through whatever zone the OS is configured
+    with, independently per boundary, so a DST-crossing local day is not
+    silently treated as exactly 24 hours.
+    """
+
+    from datetime import datetime
+
+    from PERSISTENCE.session_health import read_today_session_health
+
+    today = datetime.now().date()
+    window_start_utc, window_end_utc = _local_day_window_utc(today)
+
+    def _as_utc_text(moment) -> str:
+        return moment.isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+    return read_today_session_health(
+        local_date_iso=today.isoformat(),
+        window_start_utc=_as_utc_text(window_start_utc),
+        window_end_utc=_as_utc_text(window_end_utc),
+    )
 
 
 def _default_export_provider(snapshot: object, request: "AnalyticsSheetRequest") -> str:
@@ -866,6 +935,9 @@ class _AnalyticsExport(QObject):
 class AnalyticsController(QObject):
     """Compose all analytics surfaces around one read-only refresh lane."""
 
+    today_session_health_ready = pyqtSignal(object)
+    today_session_health_failed = pyqtSignal(str)
+
     def __init__(
         self,
         *,
@@ -873,6 +945,7 @@ class AnalyticsController(QObject):
         red_guard,
         snapshot_provider: Callable[[], object] | None = None,
         export_provider: Callable[[object, AnalyticsSheetRequest], str] | None = None,
+        today_health_provider: Callable[[], object] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -890,6 +963,20 @@ class AnalyticsController(QObject):
         self._refresh.bundle_ready.connect(self._deliver_bundle)
         self._refresh.refresh_failed.connect(self._refresh_failed)
         self._refresh.refreshing_changed.connect(self._refreshing_changed)
+
+        # A second, independent read lane. Today Health is not part of the
+        # frozen ControlStationAnalyticsSnapshot bundle and must not share
+        # that bundle's generation/coalescing with the four dashboard pages.
+        self._today_health_refresh = SharedDashboardRefresh(
+            today_health_provider or _default_today_session_health_provider,
+            parent=self,
+        )
+        self._today_health_refresh.bundle_ready.connect(
+            self.today_session_health_ready.emit
+        )
+        self._today_health_refresh.refresh_failed.connect(
+            self.today_session_health_failed.emit
+        )
 
         self._export = _AnalyticsExport(
             report_access,
@@ -910,10 +997,35 @@ class AnalyticsController(QObject):
         return self._create_page(PAGE_COSINE, CosinePage)
 
     def page_opened(self, page_name: str) -> None:
-        """Refresh only when an analytics page becomes visible."""
+        """Refresh only when an analytics page or Control becomes visible."""
 
         if page_name in PROJECTION_NAMES:
             self._refresh.request_refresh()
+        if page_name == PAGE_CONTROL:
+            self.request_today_session_health_refresh()
+
+    def request_today_session_health_refresh(self) -> None:
+        """Ask for one fresh Today Health read; overlaps coalesce."""
+
+        if self._closed:
+            return
+        self._today_health_refresh.request_refresh()
+
+    def engine_status_changed(self, status: object) -> None:
+        """Refresh Today Health on every engine lifecycle transition."""
+
+        del status
+        self.request_today_session_health_refresh()
+
+    def telemetry_received(self, event: object) -> None:
+        """Refresh Today Health only for the two factual admission signals.
+
+        ``kind`` tells this method to re-read; it never supplies the count
+        itself -- that truth always comes from persistence.
+        """
+
+        if _field(event, "kind") in TODAY_HEALTH_TELEMETRY_KINDS:
+            self.request_today_session_health_refresh()
 
     def open_composer(self) -> bool:
         """Open one Analytics Sheet surface after Red/report checks."""
@@ -956,6 +1068,7 @@ class AnalyticsController(QObject):
         self._closed = True
         budget = max(0.0, float(timeout))
         drained = self._refresh.shutdown(timeout=budget)
+        drained = self._today_health_refresh.shutdown(timeout=budget) and drained
         drained = self._export.shutdown(timeout=budget) and drained
         if self._composer is not None:
             self._composer.close()

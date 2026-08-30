@@ -283,6 +283,14 @@ class SineAuthority(Protocol):
 
     def advance(self, *, now_monotonic_ns: int) -> tuple[object, ...]: ...
 
+    def cancel_matching_study_episode(
+        self,
+        *,
+        study_context_token: str,
+        occurred_monotonic_ns: int,
+        completion_reason: str,
+    ) -> bool: ...
+
     def confirm_verified_return(
         self,
         *,
@@ -300,6 +308,22 @@ class SineAuthority(Protocol):
     ) -> bool: ...
 
     def resume_presentation_after_recovery_relapse(
+        self,
+        *,
+        candidate_uid: str,
+        occurred_monotonic_ns: int,
+        evidence_source: str,
+    ) -> bool: ...
+
+    def pause_escalation_for_activity(
+        self,
+        *,
+        candidate_uid: str,
+        occurred_monotonic_ns: int,
+        evidence_source: str,
+    ) -> bool: ...
+
+    def resume_escalation_after_activity(
         self,
         *,
         candidate_uid: str,
@@ -336,7 +360,7 @@ class SineAuthority(Protocol):
         reason: str,
     ) -> bool: ...
 
-    def resume_from_normal_break_as_sine2(
+    def enter_post_normal_break_return_gate(
         self,
         *,
         candidate_uid: str,
@@ -1406,6 +1430,7 @@ class WindowsMonitorCoordinator:
         self.services.sine.observe(context)
         blacklist_result = self.services.blacklist.observe(context)
         self._prepare_dwell_telemetry(blacklist_result)
+        self._sync_sine_activity_clock(context, blacklist_result)
 
         self._refresh_break_eligible_study_target(context)
         # A parked break request is decided here, on the same observation the
@@ -1481,6 +1506,85 @@ class WindowsMonitorCoordinator:
             bool(getattr(normal_break, "active", False))
             or self._normal_break_resume_fault
             or _field(sine_view, "normal_break_held", False)
+        )
+
+    def _sync_sine_activity_clock(
+        self,
+        context: MonitorContext,
+        blacklist_result: object,
+    ) -> bool:
+        """Map current authoritative Normal-mode evidence to SINE RUN/PAUSE.
+
+        This consumes the same-cycle Resource Intent, COSINE and Executive
+        Blacklist facts already produced by the monitor. It never reads the
+        dashboard label, Windows, browser state or title text independently.
+        """
+
+        from CORE_ENGINE.blacklist import Disposition
+        from CORE_ENGINE.resource_intent import ResourceSurface
+        from SINE.sine import SinePhase
+
+        sine = self.services.sine.live_view()
+        candidate_uid = str(_field(sine, "candidate_uid", "") or "")
+        if (
+            not candidate_uid
+            or _field(sine, "phase") is not SinePhase.ACTIVE
+            or bool(_field(sine, "study_mode", False))
+            or bool(_field(sine, "protected_red_active", False))
+            or bool(_field(sine, "presentation_withheld_for_recovery", False))
+            or self._normal_break_owns_pause()
+        ):
+            return True
+
+        now_ns = int(context.foreground.observed_monotonic_ns or 0)
+        if now_ns <= 0:
+            return False
+
+        normal_break = getattr(self.services, "normal_break", None)
+        break_view = normal_break.snapshot() if normal_break is not None else None
+        break_state = _enum_text(_field(break_view, "state", "")).upper()
+
+        cosine = self.services.cosine.snapshot(now_ns=now_ns)
+        cosine_phase = _enum_text(_field(cosine, "phase", "")).upper()
+        cosine_active = cosine_phase not in {"", "IDLE", "CLOSED", "SHUTDOWN"}
+
+        intent_verdict = _field(context.resource_intent, "verdict")
+        resource_identity = _field(intent_verdict, "resource_identity")
+        resource_surface = _field(resource_identity, "surface")
+
+        blacklist_verdict = _field(blacklist_result, "verdict")
+        blacklist_disposition = _field(blacklist_verdict, "disposition")
+        blacklist_actionable = bool(_field(blacklist_verdict, "actionable", False))
+
+        # A pending TAKE A BREAK selector must never freeze the deadline it is
+        # bounded by. Messaging and COSINE retain their existing specialist
+        # policy, while genuine SINE-driving Blacklist evidence keeps RUN.
+        keep_running = bool(
+            break_state == "AWAITING_DURATION"
+            or cosine_active
+            or resource_surface is ResourceSurface.MESSAGING
+            or blacklist_disposition is Disposition.HANDOFF
+            or blacklist_actionable
+        )
+        if keep_running:
+            return bool(
+                self.services.sine.resume_escalation_after_activity(
+                    candidate_uid=candidate_uid,
+                    occurred_monotonic_ns=now_ns,
+                    evidence_source=(
+                        "normal_break_selector_pending"
+                        if break_state == "AWAITING_DURATION"
+                        else "monitor_non_activity_policy"
+                    ),
+                )
+            )
+
+        return bool(
+            self.services.sine.pause_escalation_for_activity(
+                candidate_uid=candidate_uid,
+                occurred_monotonic_ns=now_ns,
+                evidence_source="monitor_ordinary_activity",
+            )
         )
 
     def _observe_mirl_for_context(self, context: MonitorContext) -> tuple[object, ...]:
@@ -1583,12 +1687,16 @@ class WindowsMonitorCoordinator:
         fact: object,
         observation: ForegroundObservation | None,
     ) -> bool:
-        """Hand one durable completion back to the same SINE episode."""
+        """Hand one durable completion back to the same SINE episode.
+
+        The terminal fact opens the post-break acknowledgement gate; it does
+        NOT request SINE 2.  Only the user's I'M BACK on that gate does.
+        """
 
         kind = self._normal_break_fact_kind(fact)
         occurred_ns = int(_field(fact, "occurred_monotonic_ns", 0) or 0)
         accepted = bool(
-            self.services.sine.resume_from_normal_break_as_sine2(
+            self.services.sine.enter_post_normal_break_return_gate(
                 candidate_uid=_field(fact, "candidate_uid", ""),
                 episode_uid=_field(fact, "episode_uid", ""),
                 break_id=_field(fact, "break_id", ""),
@@ -1628,7 +1736,10 @@ class WindowsMonitorCoordinator:
             self.telemetry_queue,
             "normal_break_resumed",
             observation=observation,
-            message="The same SINE episode resumed immediately at SINE 2",
+            message=(
+                "The same SINE episode entered the post-break return gate; "
+                "SINE 2 waits for the user's acknowledgement"
+            ),
             break_id=_field(fact, "break_id", ""),
             generation=_field(fact, "generation", 0),
             episode_uid=_field(fact, "episode_uid", ""),
@@ -2603,6 +2714,29 @@ class WindowsMonitorCoordinator:
                     "feed_text": "USER PRESSED — I'M BACK",
                     "tone": "cyan",
                 }
+            if kind == "SINE_POST_NORMAL_BREAK_RETURN_PENDING":
+                return {
+                    "badge": "RETURN GATE",
+                    "feed_text": "BREAK ENDED — waiting for I'M BACK, SINE 2 not started",
+                    "tone": "green",
+                }
+            if kind == "SINE_POST_BREAK_RETURN_ACKNOWLEDGED":
+                return {
+                    "badge": "RETURN GATE",
+                    "feed_text": "I'M BACK acknowledged — same episode stays at SINE 1",
+                    "tone": "green",
+                }
+            if kind == "SINE_STAGE_2_REARMED_AFTER_POST_BREAK_RETURN":
+                live = self.services.sine.live_view()
+                interval = _field(live, "stage_2_delay_seconds_applied", None)
+                return {
+                    "badge": "SINE",
+                    "feed_text": (
+                        "SINE 2 — window re-armed from I'M BACK for "
+                        f"{_authoritative_seconds(interval)}"
+                    ),
+                    "tone": "amber",
+                }
             if kind in {"SINE_STAGE_2_SCHEDULED", "SINE_STAGE_3_SCHEDULED"}:
                 stage = 2 if kind == "SINE_STAGE_2_SCHEDULED" else 3
                 live = self.services.sine.live_view()
@@ -2767,6 +2901,31 @@ class WindowsMonitorCoordinator:
                 line = f"[SINE] SINE {stage} response={response or 'UNKNOWN'}"
             elif kind == "SINE_RETURN_INTENT_RECORDED":
                 line = f"[SINE] I'M BACK received | SINE {stage} | waiting for factual recovery"
+            elif kind == "SINE_POST_NORMAL_BREAK_RETURN_PENDING":
+                line = (
+                    "[SINE] POST-BREAK RETURN PENDING | "
+                    f"{reason or 'normal_break_ended'} | NO SINE 2 REQUESTED"
+                )
+            elif kind == "SINE_POST_BREAK_RETURN_GATE_REQUESTED":
+                line = f"[SINE] WELCOME BACK REQUESTED | occurrence={occurrence or 1}"
+            elif kind == "SINE_POST_BREAK_RETURN_GATE_DISPLAYED":
+                line = (
+                    f"[SINE] WELCOME BACK DISPLAYED | occurrence={occurrence or 1} | "
+                    "NO SINE STAGE CONSUMED | NO SINE 3 DEADLINE"
+                )
+            elif kind == "SINE_POST_BREAK_RETURN_GATE_SURFACE_LOST":
+                line = "[SINE] WELCOME BACK surface lost | restoring acknowledgement gate"
+            elif kind == "SINE_POST_BREAK_RETURN_ACKNOWLEDGED":
+                line = (
+                    "[SINE] I'M BACK ACKNOWLEDGED | same episode stays at SINE 1"
+                )
+            elif kind == "SINE_STAGE_2_REARMED_AFTER_POST_BREAK_RETURN":
+                live = self.services.sine.live_view()
+                interval = _field(live, "stage_2_delay_seconds_applied", None)
+                line = (
+                    "[SINE] NEXT=SINE 2 | window re-armed from I'M BACK for "
+                    f"{_authoritative_seconds(interval)}"
+                )
             elif kind == "SINE_STAGE_2_TIMING_BOUND":
                 line = f"[SINE] SINE 2 timing bound | source={reason or 'policy'}"
             elif kind == "SINE_STAGE_2_SCHEDULED":
@@ -2774,7 +2933,14 @@ class WindowsMonitorCoordinator:
             elif kind == "SINE_STAGE_3_SCHEDULED":
                 line = "[SINE] NEXT=SINE 3 | deadline armed"
             elif kind in {"SINE_POPUP_CLOSED", "SINE_POPUP_EXPIRED"}:
-                line = f"[SINE] SINE {stage} popup {kind.removeprefix('SINE_POPUP_').lower()}"
+                what = kind.removeprefix("SINE_POPUP_").lower()
+                # The acknowledgement gate carries SineStage.NONE, so naming it
+                # by stage ordinal would print a "SINE 0" that does not exist.
+                line = (
+                    f"[SINE] WELCOME BACK popup {what}"
+                    if stage == 0
+                    else f"[SINE] SINE {stage} popup {what}"
+                )
             elif kind == "SINE_PROTECTED_RED_ACTIVATED":
                 line = "[SINE] SINE 3 PROTECTED RED ACTIVE"
             elif kind == "SINE_EPISODE_RESOLVED":
@@ -3740,6 +3906,10 @@ class WindowsMonitorCoordinator:
             from COSECANT_STUDY_MODE.study import StudyState
 
             if _field(snapshot, "state", None) is StudyState.COMPLETED:
+                if not self._terminate_matching_study_sine(snapshot):
+                    raise RuntimeError(
+                        "SINE refused the exact terminal Study scope"
+                    )
                 # This command already durably recorded the terminal snapshot
                 # under its own correct action label (e.g. "COMPLETE"). Mark
                 # this block/generation handled so the periodic
@@ -3881,9 +4051,38 @@ class WindowsMonitorCoordinator:
         # deliberately NOT marked handled on failure so the next poll
         # retries the durability write instead of dropping it forever.
         self.services.resource_intent.retire_study_context()
+        if not self._terminate_matching_study_sine(snapshot):
+            raise RuntimeError("SINE refused the exact terminal Study scope")
         if not persisted:
             raise RuntimeError("Study target-reached snapshot was not durably accepted")
         self._last_study_completion_signature = signature
+
+    def _terminate_matching_study_sine(self, snapshot: object) -> bool:
+        """Forward one exact terminal Study identity to the SINE authority."""
+
+        from COSECANT_STUDY_MODE.study import StudyCompletionReason, StudyState
+
+        if _field(snapshot, "state", None) is not StudyState.COMPLETED:
+            return True
+        reason = _field(snapshot, "completion_reason", None)
+        if reason not in {
+            StudyCompletionReason.TARGET_REACHED,
+            StudyCompletionReason.USER_COMPLETED,
+        }:
+            return True
+
+        context_token = _field(snapshot, "context_token", "")
+        occurred_ns = _field(snapshot, "published_monotonic_ns", 0)
+        if type(context_token) is not str or not context_token:
+            return False
+        if type(occurred_ns) is not int or occurred_ns <= 0:
+            return False
+
+        return self.services.sine.cancel_matching_study_episode(
+            study_context_token=context_token,
+            occurred_monotonic_ns=occurred_ns,
+            completion_reason=reason.value,
+        )
 
     def _reconcile_break_target_with_study(self, study: object) -> None:
         """Clear remembered evidence when its owning Study identity retires."""

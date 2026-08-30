@@ -93,7 +93,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from SINE.sine import SineFact, SinePopupRequest, SineResponse, SineStage
+from SINE.sine import (
+    SineFact,
+    SinePopupRequest,
+    SineResponse,
+    SineStage,
+    SineSurface,
+)
 from SINE.normal_break import NormalBreakFact, NormalBreakFactKind
 
 
@@ -172,6 +178,13 @@ PALETTES: Final = {
         accent_dim="#8A5A12",
         halo="#3A2A0D",
         panel="#1C140A",
+    ),
+    "green": PopupPalette(
+        world="green",
+        accent="#39D98A",
+        accent_dim="#176B4A",
+        halo="#103629",
+        panel="#0D211A",
     ),
     "red": PopupPalette(
         world="red",
@@ -359,7 +372,11 @@ class SinePopupWindow(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setAccessibleName("MYELIN SINE intervention")
+        self.setAccessibleName(
+            "MYELIN post-break return acknowledgement"
+            if self.is_post_normal_break_return_gate
+            else "MYELIN SINE intervention"
+        )
         self.setAccessibleDescription(request.presentation.message)
         self.setFixedSize(
             POPUP_WIDTH,
@@ -381,19 +398,40 @@ class SinePopupWindow(QWidget):
     def _validate_request(request: SinePopupRequest) -> None:
         if not isinstance(request, SinePopupRequest):
             raise TypeError("popup requires a SinePopupRequest")
-        if request.stage not in {SineStage.SINE_1, SineStage.SINE_2, SineStage.SINE_3}:
-            raise ValueError("popup stage must be SINE 1, 2 or 3")
-        expected_world = {
-            SineStage.SINE_1: "blue",
-            SineStage.SINE_2: "amber",
-            SineStage.SINE_3: "red",
-        }[request.stage]
-        if request.presentation.world != expected_world:
-            raise ValueError("popup world does not match its SINE stage")
-        if request.protected != (request.stage is SineStage.SINE_3):
-            raise ValueError("only SINE 3 may be protected")
-        if request.stage is SineStage.SINE_3 and request.presentation.allowed_responses:
-            raise ValueError("protected SINE 3 must not contain action buttons")
+        gate = request.surface is SineSurface.POST_NORMAL_BREAK_RETURN_GATE
+        if gate:
+            # The post-Normal-Break acknowledgement gate is the one surface
+            # that is deliberately NOT a SINE stage.  It is green, carries
+            # SineStage.NONE, is never protected, offers exactly the return
+            # action, and claims no Weber-Fechner rung.
+            if request.stage is not SineStage.NONE:
+                raise ValueError("the post-break return gate must consume no SINE stage")
+            if request.presentation.world != "green":
+                raise ValueError("the post-break return gate must be the green world")
+            if request.protected:
+                raise ValueError("the post-break return gate is never protected")
+            if request.presentation.allowed_responses != (
+                SineResponse.RETURN_TO_FOCUS,
+            ):
+                raise ValueError("the post-break return gate offers only I'M BACK")
+            if request.presentation.weber_fechner is not None:
+                raise ValueError(
+                    "the post-break return gate is not a Weber-Fechner stage"
+                )
+        else:
+            if request.stage not in {SineStage.SINE_1, SineStage.SINE_2, SineStage.SINE_3}:
+                raise ValueError("popup stage must be SINE 1, 2 or 3")
+            allowed_worlds = {
+                SineStage.SINE_1: {"blue"},
+                SineStage.SINE_2: {"amber"},
+                SineStage.SINE_3: {"red"},
+            }[request.stage]
+            if request.presentation.world not in allowed_worlds:
+                raise ValueError("popup world does not match its SINE stage")
+            if request.protected != (request.stage is SineStage.SINE_3):
+                raise ValueError("only SINE 3 may be protected")
+            if request.stage is SineStage.SINE_3 and request.presentation.allowed_responses:
+                raise ValueError("protected SINE 3 must not contain action buttons")
         if not request.request_id or not request.episode_uid or not request.candidate_uid:
             raise ValueError("popup request identity is incomplete")
         if request.operational_event_id <= 0 or request.occurrence <= 0:
@@ -402,13 +440,20 @@ class SinePopupWindow(QWidget):
             raise ValueError("popup request requires a monotonic request time")
         if request.visible_seconds < 0:
             raise ValueError("popup visible duration cannot be negative")
-        theory = request.presentation.weber_fechner
-        if theory.stage_ordinal != int(request.stage):
-            raise ValueError("Weber-Fechner projection does not match factual SINE stage")
+        if not gate:
+            theory = request.presentation.weber_fechner
+            if theory is None or theory.stage_ordinal != int(request.stage):
+                raise ValueError(
+                    "Weber-Fechner projection does not match factual SINE stage"
+                )
 
     @property
     def is_protected_red(self) -> bool:
         return bool(self.request.protected and self.request.stage is SineStage.SINE_3)
+
+    @property
+    def is_post_normal_break_return_gate(self) -> bool:
+        return self.request.surface is SineSurface.POST_NORMAL_BREAK_RETURN_GATE
 
     @property
     def native_hwnd(self) -> int:
@@ -441,7 +486,12 @@ class SinePopupWindow(QWidget):
         eyebrow.setSpacing(10)
         self._orb = _StatusOrb(tokens.accent, shell)
         eyebrow.addWidget(self._orb, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._eyebrow_label = QLabel("MYELIN · SESSION ALERT", shell)
+        self._eyebrow_label = QLabel(
+            "MYELIN · BREAK ENDED"
+            if self.is_post_normal_break_return_gate
+            else "MYELIN · SESSION ALERT",
+            shell,
+        )
         self._eyebrow_label.setObjectName("eyebrow")
         self._eyebrow_label.setFont(_font(11, weight=QFont.Weight.DemiBold, spacing=1.4))
         eyebrow.addWidget(self._eyebrow_label, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -529,18 +579,27 @@ class SinePopupWindow(QWidget):
         self._glow_strip = _GlowStrip(tokens.accent, shell)
         body.addWidget(self._glow_strip)
 
-        self._countdown = QLabel("DISPLAY WINDOW --:--", shell)
+        # The gate has no SINE display deadline to project, so it never shows
+        # a countdown; it waits for the user's acknowledgement.
+        self._countdown = QLabel(
+            "NO DISPLAY DEADLINE · WAITING FOR YOUR ACKNOWLEDGEMENT"
+            if self.is_post_normal_break_return_gate
+            else "DISPLAY WINDOW --:--",
+            shell,
+        )
         self._countdown.setObjectName("countdown")
         self._countdown.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._countdown.setFont(_font(10.5, mono=True))
         body.addWidget(self._countdown)
 
-        intensity = presentation.weber_fechner.intensity_label.upper()
-        footer_text = (
-            "STUDY ACTIVE · SINE INTERVENTION"
-            if presentation.study_mode
-            else f"WEBER–FECHNER · {intensity}"
-        )
+        if self.is_post_normal_break_return_gate:
+            footer_text = "POST-BREAK RETURN · NOT A SINE STAGE"
+        elif presentation.study_mode:
+            footer_text = "STUDY ACTIVE · SINE INTERVENTION"
+        else:
+            footer_text = (
+                f"WEBER–FECHNER · {presentation.weber_fechner.intensity_label.upper()}"
+            )
         self._footer = QLabel(footer_text, shell)
         self._footer.setObjectName("footer")
         self._footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -752,14 +811,22 @@ class SinePopupWindow(QWidget):
         _register_hwnd(hwnd)
         self._shown_reported = True
         self._elapsed.start()
-        self._countdown_timer.start()
         self._start_orb_breathing()
-        self._status.setText("DISPLAYED · WAITING FOR SINE AUTHORITY")
-        self._refresh_countdown()
+        if self.is_post_normal_break_return_gate:
+            self._glow_strip.set_ratio(1.0)
+            self._status.setText("DISPLAYED · PRESS I'M BACK WHEN YOU ARE READY")
+        else:
+            self._countdown_timer.start()
+            self._status.setText("DISPLAYED · WAITING FOR SINE AUTHORITY")
+            self._refresh_countdown()
         self.popup_shown.emit(self.request.request_id, time.monotonic_ns(), hwnd)
 
     def _refresh_countdown(self) -> None:
-        if not self._shown_reported or not self._elapsed.isValid():
+        if (
+            not self._shown_reported
+            or not self._elapsed.isValid()
+            or self.is_post_normal_break_return_gate
+        ):
             return
         total_ms = max(0, round(float(self.request.visible_seconds) * 1000.0))
         remaining_ms = max(0, total_ms - self._elapsed.elapsed())
@@ -971,7 +1038,7 @@ class _NormalBreakSurface(QWidget):
         return shell, body
 
     def _apply_break_style(self) -> None:
-        palette = PALETTES["amber"]
+        palette = PALETTES["green"]
         hover = QColor(palette.accent).lighter(114).name()
         pressed = QColor(palette.accent).darker(114).name()
         self.setStyleSheet(
@@ -1460,7 +1527,11 @@ class SinePopupPresenter(QObject):
     def _apply_fact_on_gui_thread(self, fact: object) -> None:
         if not isinstance(fact, SineFact):
             return
-        if fact.kind == "SINE_POPUP_REQUESTED" and fact.popup is not None:
+        if (
+            fact.kind
+            in {"SINE_POPUP_REQUESTED", "SINE_POST_BREAK_RETURN_GATE_REQUESTED"}
+            and fact.popup is not None
+        ):
             self._present_on_gui_thread(fact.popup)
             return
         if fact.kind == "SINE_POPUP_CLOSE_REQUESTED":
