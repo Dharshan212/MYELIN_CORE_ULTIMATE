@@ -46,6 +46,11 @@ from MIRL.read_model import (
     LiveMirlEpisodeRow,
     MirlReadModelSnapshot,
 )
+from time_projection import (
+    TimezoneProjectionError,
+    project_utc_timestamp,
+    timezone_tag,
+)
 
 
 PAGE_WIDTH, PAGE_HEIGHT = A4
@@ -279,6 +284,19 @@ def suggested_report_filename(*, generated_at: datetime | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _projected_timestamp(value: object, presentation_timezone: str) -> str:
+    """Human wall time from immutable UTC evidence, with a truthful zone."""
+
+    try:
+        moment = project_utc_timestamp(value, presentation_timezone)
+    except TimezoneProjectionError:
+        return str(value or "Unavailable")
+    return (
+        f"{moment.strftime('%d %b %Y · %H:%M:%S')} "
+        f"[{timezone_tag(moment, presentation_timezone)}]"
+    )
+
+
 def _cover(
     snapshot: MirlReadModelSnapshot,
     request: MirlReportRequest,
@@ -297,6 +315,10 @@ def _cover(
         _key_value_table(
             (
                 ("Generated at (UTC)", generated_at),
+                (
+                    "Presentation timezone",
+                    snapshot.live_mirl.presentation_timezone,
+                ),
                 ("Selected range", snapshot.science_lab.metadata.selected_range_label),
                 ("Evidence population", _human_code(provenance.evidence_population)),
                 ("Source", provenance.source_name),
@@ -407,7 +429,9 @@ def _live_mirl_section(
                 episode.short_display_id,
                 episode.episode_status,
                 episode.final_outcome or "IN PROGRESS",
-                episode.started_at,
+                _projected_timestamp(
+                    episode.started_at, live.presentation_timezone
+                ),
                 episode.recovery_attempt_count,
                 episode.relapse_count,
                 episode.integrity_status.value,
@@ -435,6 +459,7 @@ def _live_mirl_section(
             _episode_timeline(
                 episode,
                 maximum_events=maximum_timeline_events,
+                presentation_timezone=live.presentation_timezone,
                 styles=styles,
             )
         )
@@ -445,6 +470,7 @@ def _episode_timeline(
     episode: LiveMirlEpisodeRow,
     *,
     maximum_events: int,
+    presentation_timezone: str,
     styles: dict[str, ParagraphStyle],
 ) -> list:
     selected = episode.timeline[:maximum_events]
@@ -460,7 +486,12 @@ def _episode_timeline(
                     (
                         ("Status", episode.episode_status),
                         ("Outcome", episode.final_outcome or "IN PROGRESS"),
-                        ("Started", episode.started_at),
+                        (
+                            "Started",
+                            _projected_timestamp(
+                                episode.started_at, presentation_timezone
+                            ),
+                        ),
                         ("Return intent latency", _display_seconds(episode.return_intent_latency_seconds)),
                         ("Verified return latency", _display_seconds(episode.verified_return_latency_seconds)),
                         ("Returned closure latency", _display_seconds(episode.stable_recovery_latency_seconds)),
@@ -479,7 +510,9 @@ def _episode_timeline(
         rows.append(
             (
                 event.episode_seq,
-                event.occurred_at,
+                _projected_timestamp(
+                    event.occurred_at, presentation_timezone
+                ),
                 _friendly_event(event.event_name),
                 event.observed_or_derived,
                 event.reason_or_outcome_code or "",

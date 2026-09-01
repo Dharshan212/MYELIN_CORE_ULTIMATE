@@ -123,6 +123,11 @@ from COSECANT_STUDY_MODE.planner import StudyPlanner
 from COSECANT_STUDY_MODE.view import StudyView
 from PERSISTENCE.storage import EngineStorage, bootstrap_production_schema
 from PROFILES.profiles import ProfileController
+from time_projection import (
+    TimezoneProjectionError,
+    project_utc_datetime,
+    timezone_tag,
+)
 from UI_THEMES.animation import (
     AlertBorderOverlay,
     AxonCanvas,
@@ -2349,7 +2354,7 @@ def _mirl_html(value: object) -> str:
     )
 
 
-def _mirl_story_html(row: object, tokens) -> str:
+def _mirl_story_html(row: object, tokens, presentation_timezone: str) -> str:
     """One episode told as prose, with its recorded values highlighted.
 
     The words are identical for every episode and only the values change, so
@@ -2379,7 +2384,9 @@ def _mirl_story_html(row: object, tokens) -> str:
     if row is None:
         return plain("No episode has been projected yet.")
 
-    opened = _mirl_parse_any_utc(getattr(row, "started_at", None))
+    opened = _mirl_projected_moment(
+        getattr(row, "started_at", None), presentation_timezone
+    )
     application = str(getattr(row, "application", "") or "").strip()
     timeline = tuple(getattr(row, "timeline", ()) or ())
     outcome = getattr(row, "final_outcome", None)
@@ -2396,7 +2403,11 @@ def _mirl_story_html(row: object, tokens) -> str:
         + strong(getattr(row, "short_display_id", None))
         + opened_at
         + plain(" at ")
-        + strong(_mirl_clock_utc(getattr(row, "started_at", None)))
+        + strong(
+            _mirl_clock_utc(
+                getattr(row, "started_at", None), presentation_timezone
+            )
+        )
         + plain(" on ")
         + (strong(application) if application else plain("an unnamed surface"))
         + plain(" \u2014 trigger ")
@@ -2426,7 +2437,12 @@ def _mirl_story_html(row: object, tokens) -> str:
                 plain("You returned after ")
                 + strong(_mirl_duration(latency), "green")
                 + plain(", verified at ")
-                + strong(_mirl_clock_utc(_mirl_recovered_at(row)), "green")
+                + strong(
+                    _mirl_clock_utc(
+                        _mirl_recovered_at(row), presentation_timezone
+                    ),
+                    "green",
+                )
                 + plain(".")
             )
         else:
@@ -2459,7 +2475,7 @@ def _mirl_story_html(row: object, tokens) -> str:
     return " ".join(lines)
 
 
-def showcase_episode_story(row: object) -> QLabel:
+def showcase_episode_story(row: object, presentation_timezone: str) -> QLabel:
     """``.gkv``'s prose cousin: one episode summarised in sentences.
 
     The rich text is rebuilt inside ``_retheme`` rather than once at
@@ -2480,7 +2496,7 @@ def showcase_episode_story(row: object) -> QLabel:
             f" background: {_white_alpha(0.02)}; border: 1px solid {_white_alpha(0.08)};"
             f" border-radius: {RADIUS_SM}px; padding: 16px 18px; }}"
         )
-        block.setText(_mirl_story_html(row, tokens))
+        block.setText(_mirl_story_html(row, tokens, presentation_timezone))
 
     _retheme(DEFAULT_THEME)
     _remember_retheme(block, _retheme)
@@ -2672,20 +2688,23 @@ def _mirl_parse_utc(value: object) -> "datetime | None":
         return None
 
 
-def _mirl_clock(value: object) -> str:
-    """``HH:MM:SS`` of a projected stamp -- the mockup's journey ``ts``."""
+def _mirl_clock(value: object, presentation_timezone: str) -> str:
+    """Selected-zone ``HH:MM:SS [zone]`` for one MIRL journey stamp."""
 
-    moment = _mirl_parse_utc(value)
-    return moment.strftime("%H:%M:%S") if moment else _mirl_text(value)
+    moment = _mirl_projected_moment(value, presentation_timezone)
+    if moment is None:
+        return _mirl_text(value)
+    return (
+        f"{moment.strftime('%H:%M:%S')} "
+        f"[{timezone_tag(moment, presentation_timezone)}]"
+    )
 
 
-def _mirl_clock_utc(value: object) -> str:
-    """``HH:MM UTC`` for an evidence-table time column.
+def _mirl_clock_utc(value: object, presentation_timezone: str) -> str:
+    """Selected-zone ``HH:MM [zone]`` for an evidence-table time column.
 
-    The UTC label is deliberate and must stay.  These stamps ARE UTC, and a
-    bare "18:22" reads as the viewer's local clock -- the standing ruling from
-    the Study Mode presentation audit, which applies to every surface, not
-    just Study.
+    The source stamp remains canonical UTC evidence.  Only this rendered wall
+    clock is projected, and the truthful zone tag keeps it unambiguous.
 
     Accepts BOTH the canonical ``...Z`` form and the ``+00:00`` offset form.
     The offset form is what the malformed-timestamp writer produced (see
@@ -2697,24 +2716,27 @@ def _mirl_clock_utc(value: object) -> str:
     integrity matters -- keeps rejecting them.
     """
 
-    moment = _mirl_parse_any_utc(value)
+    moment = _mirl_projected_moment(value, presentation_timezone)
     if moment is None:
         return _MIRL_UNAVAILABLE
-    return f"{moment.strftime('%H:%M')} UTC"
+    return f"{moment.strftime('%H:%M')} [{timezone_tag(moment, presentation_timezone)}]"
 
 
-def _mirl_clock_utc_seconds(value: object) -> str:
-    """``HH:MM:SS UTC`` -- used where a few seconds actually carry meaning.
+def _mirl_clock_utc_seconds(value: object, presentation_timezone: str) -> str:
+    """Selected-zone clock with seconds where those seconds carry meaning.
 
     Trigger Time needs the seconds: the trigger fires roughly three seconds
     before SINE-1 displays, and at minute resolution the two columns would
     read identically and look like a duplicated field.
     """
 
-    moment = _mirl_parse_any_utc(value)
+    moment = _mirl_projected_moment(value, presentation_timezone)
     if moment is None:
         return _MIRL_UNAVAILABLE
-    return f"{moment.strftime('%H:%M:%S')} UTC"
+    return (
+        f"{moment.strftime('%H:%M:%S')} "
+        f"[{timezone_tag(moment, presentation_timezone)}]"
+    )
 
 
 def _mirl_parse_any_utc(value: object) -> "datetime | None":
@@ -2738,13 +2760,29 @@ def _mirl_parse_any_utc(value: object) -> "datetime | None":
     return moment
 
 
-def _mirl_stamp(value: object) -> str:
-    """``24 Jul 2026 - 12:11:51``, the mockup's evidence-table stamp."""
+def _mirl_projected_moment(
+    value: object,
+    presentation_timezone: str,
+) -> "datetime | None":
+    """Project one readable UTC stamp without changing the raw field."""
 
-    moment = _mirl_parse_utc(value)
+    moment = _mirl_parse_any_utc(value)
+    if moment is None:
+        return None
+    try:
+        return project_utc_datetime(moment, presentation_timezone)
+    except TimezoneProjectionError:
+        return None
+
+
+def _mirl_stamp(value: object, presentation_timezone: str) -> str:
+    """Selected-zone human date/time with an unambiguous zone tag."""
+
+    moment = _mirl_projected_moment(value, presentation_timezone)
     if moment is None:
         return _mirl_UNAVAILABLE_or(value)
-    return moment.strftime("%d %b %Y \u00b7 %H:%M:%S")
+    stamp = moment.strftime("%d %b %Y \u00b7 %H:%M:%S")
+    return f"{stamp} [{timezone_tag(moment, presentation_timezone)}]"
 
 
 def _mirl_UNAVAILABLE_or(value: object) -> str:
@@ -3216,8 +3254,8 @@ def _mirl_verified_return_count_text(projection: object) -> str:
     return str(value) if _mirl_is_number(value) and isinstance(value, int) else "\u2014"
 
 
-def _mirl_day_label(row: object) -> str:
-    """The UTC day an episode opened, as ``31 Aug 2026``.
+def _mirl_day_label(row: object, presentation_timezone: str) -> str:
+    """The selected-timezone OPEN day, as ``31 Aug 2026``.
 
     The episode's display id already carries this date (EPI-DDMMYYYY-NN), but
     reading it off the id would be parsing a presentation string; this reads
@@ -3225,7 +3263,9 @@ def _mirl_day_label(row: object) -> str:
     than silently grouped with a real day.
     """
 
-    moment = _mirl_parse_any_utc(getattr(row, "started_at", None))
+    moment = _mirl_projected_moment(
+        getattr(row, "started_at", None), presentation_timezone
+    )
     return moment.strftime("%d %b %Y") if moment else "Date unavailable"
 
 
@@ -3499,7 +3539,7 @@ def _mirl_effective_state(
     return state, not fresh
 
 
-def _mirl_journey_step(event: object) -> tuple:
+def _mirl_journey_step(event: object, presentation_timezone: str) -> tuple:
     """One ``showcase_journey_step`` tuple built only from a projected event."""
 
     role, pill_text = _mirl_event_pill(getattr(event, "event_name", ""))
@@ -3509,11 +3549,15 @@ def _mirl_journey_step(event: object) -> tuple:
         role,
         pill_text,
         str(getattr(event, "observed_or_derived", "") or "").title() or "Recorded",
-        _mirl_clock(getattr(event, "occurred_at", "")),
+        _mirl_clock(getattr(event, "occurred_at", ""), presentation_timezone),
     )
 
 
-def _mirl_fill_journey_strip(layout, row: object) -> None:
+def _mirl_fill_journey_strip(
+    layout,
+    row: object,
+    presentation_timezone: str,
+) -> None:
     """Rebuild one journey strip from an episode row's projected timeline.
 
     A closed episode's final event becomes the mockup's coloured terminal
@@ -3540,7 +3584,7 @@ def _mirl_fill_journey_strip(layout, row: object) -> None:
     kind = "returned" if _mirl_recovered(outcome) else "terminal-red"
     for position, event in enumerate(timeline):
         last = position == len(timeline) - 1
-        entry = _mirl_journey_step(event)
+        entry = _mirl_journey_step(event, presentation_timezone)
         if last and closed:
             layout.addWidget(
                 showcase_flow_outcome(
@@ -3695,6 +3739,11 @@ class LiveMirlShowcasePage(QWidget):
         dialog = self._dashboard_dialog
         if dialog is not None:
             dialog.render_projection(projection)
+
+    def _timezone_key(self) -> str:
+        return str(
+            getattr(self._projection, "presentation_timezone", "local") or "local"
+        )
 
     def render_live_view(self, live_view: object | None) -> None:
         """One ``MirlLiveView`` snapshot from the running engine, or ``None``.
@@ -3920,7 +3969,11 @@ class LiveMirlShowcasePage(QWidget):
             )
             count = len(tuple(getattr(focus, "timeline", ()) or ()))
             self._journey_hint.setText(f"{count} recorded events")
-        _mirl_fill_journey_strip(self._strip_layout, focus)
+        _mirl_fill_journey_strip(
+            self._strip_layout,
+            focus,
+            self._timezone_key(),
+        )
         _retheme_subtree(self._strip_body)
         has_steps = focus is not None and bool(getattr(focus, "timeline", ()))
         self._journey_prev.setEnabled(has_steps)
@@ -4411,7 +4464,10 @@ class LiveMirlDashboardDialog(QWidget):
         button.setEnabled(False)
         button.setText("EXPORTING\u2026")
         try:
-            written = export_mirl_report(output_format)
+            written = export_mirl_report(
+                output_format,
+                presentation_timezone=self._timezone_key(),
+            )
         except Exception as error:  # export must never take the dashboard down
             print(f"[MYELIN][EXPORT] MIRL {output_format} failed: {error!r}", flush=True)
             button.setText("EXPORT FAILED")
@@ -4707,6 +4763,11 @@ class LiveMirlDashboardDialog(QWidget):
         closed = tuple(getattr(projection, "recently_closed_episodes", ()) or ())
         return active, closed
 
+    def _timezone_key(self) -> str:
+        return str(
+            getattr(self._projection, "presentation_timezone", "local") or "local"
+        )
+
     def _empty_text(self, fallback: str) -> str:
         return _mirl_text(getattr(self._projection, "empty_state_reason", None), fallback)
 
@@ -4746,7 +4807,9 @@ class LiveMirlDashboardDialog(QWidget):
         )
         generated = getattr(metadata, "generated_at", None)
         self._footer_time.setText(
-            f"Projected {_mirl_stamp(generated)}" if generated else "Not loaded"
+            f"Projected {_mirl_stamp(generated, self._timezone_key())}"
+            if generated
+            else "Not loaded"
         )
 
     def _render_current(self) -> None:
@@ -4792,7 +4855,7 @@ class LiveMirlDashboardDialog(QWidget):
         lay.addLayout(stats)
         lay.addSpacing(18)
 
-        lay.addWidget(showcase_episode_story(focus))
+        lay.addWidget(showcase_episode_story(focus, self._timezone_key()))
         lay.addStretch(1)
         _retheme_subtree(self._current_host.parentWidget())
 
@@ -4827,7 +4890,7 @@ class LiveMirlDashboardDialog(QWidget):
         # and print that day twice.
         per_day: dict[str, int] = {}
         for row in closed:
-            day = _mirl_day_label(row)
+            day = _mirl_day_label(row, self._timezone_key())
             per_day[day] = per_day.get(day, 0) + 1
 
         index = 0
@@ -4839,18 +4902,19 @@ class LiveMirlDashboardDialog(QWidget):
                 lay.addSpacing(12)
                 index += 1
 
-        current_day = None
+        grouped: dict[str, list[object]] = {}
         for row in closed:
-            day = _mirl_day_label(row)
-            if day != current_day:
-                if current_day is not None or active:
-                    lay.addSpacing(10)
-                current_day = day
-                lay.addWidget(_mirl_day_heading(day, per_day[day]))
+            day = _mirl_day_label(row, self._timezone_key())
+            grouped.setdefault(day, []).append(row)
+        for day, day_rows in grouped.items():
+            if index or active:
                 lay.addSpacing(10)
-            lay.addWidget(self._history_card(row, expanded=index < drawn))
-            lay.addSpacing(12)
-            index += 1
+            lay.addWidget(_mirl_day_heading(day, per_day[day]))
+            lay.addSpacing(10)
+            for row in day_rows:
+                lay.addWidget(self._history_card(row, expanded=index < drawn))
+                lay.addSpacing(12)
+                index += 1
         lay.addStretch(1)
 
     def _history_card(self, row: object, *, expanded: bool) -> QFrame:
@@ -4879,7 +4943,16 @@ class LiveMirlDashboardDialog(QWidget):
                 "green" if _mirl_recovered(outcome) else ("red" if outcome else "cyan"),
             )
         )
-        head.addWidget(label(_mirl_stamp(getattr(row, "started_at", None)), 11, 400, "muted"))
+        head.addWidget(
+            label(
+                _mirl_stamp(
+                    getattr(row, "started_at", None), self._timezone_key()
+                ),
+                11,
+                400,
+                "muted",
+            )
+        )
         toggle = showcase_outline_button("Hide Journey" if expanded else "Show Journey", small=True)
         toggle.setEnabled(bool(timeline))
         toggle.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -4914,7 +4987,11 @@ class LiveMirlDashboardDialog(QWidget):
             if state["built"]:
                 return
             state["built"] = True
-            _mirl_fill_journey_strip(strip_layout, row)
+            _mirl_fill_journey_strip(
+                strip_layout,
+                row,
+                self._timezone_key(),
+            )
             _retheme_subtree(strip_body)
 
         def toggled() -> None:
@@ -4967,7 +5044,7 @@ class LiveMirlDashboardDialog(QWidget):
                 outcome = _mirl_text(getattr(row, "final_outcome", None), "In Progress")
                 events = len(tuple(getattr(row, "timeline", ()) or ()))
                 picker.addItem(
-                    f"{_mirl_day_label(row)}  \u00b7  "
+                    f"{_mirl_day_label(row, self._timezone_key())}  \u00b7  "
                     f"{_mirl_text(getattr(row, 'short_display_id', None))}  \u00b7  "
                     f"{outcome}  \u00b7  {events} event(s)",
                     str(getattr(row, "episode_id", "")),
@@ -5025,7 +5102,7 @@ class LiveMirlDashboardDialog(QWidget):
         row.addWidget(
             showcase_chip_pill(
                 f"{str(getattr(event, 'observed_or_derived', '') or '').title()} "
-                f"{_mirl_clock(getattr(event, 'occurred_at', None))}",
+                f"{_mirl_clock(getattr(event, 'occurred_at', None), self._timezone_key())}",
                 "cyan",
             )
         )
@@ -5059,17 +5136,21 @@ class LiveMirlDashboardDialog(QWidget):
                 # Time Distracted is the moment SINE-1 displayed, i.e. when
                 # MYELIN first told you that you had drifted.  Clock only: the
                 # date already rides the Episode ID (EPI-DDMMYYYY-NN).
-                _mirl_clock_utc(getattr(row, "started_at", None)),
+                _mirl_clock_utc(
+                    getattr(row, "started_at", None), self._timezone_key()
+                ),
                 # Time Recovered is when the return was VERIFIED, so that this
                 # column minus the one before it IS the Return Latency column.
-                _mirl_clock_utc(_mirl_recovered_at(row))
+                _mirl_clock_utc(_mirl_recovered_at(row), self._timezone_key())
                 if recovered
                 else _MIRL_UNAVAILABLE,
                 _mirl_highest_sine(row),
                 # The trigger's OWN fire time, not the episode's start: SINE-1
                 # follows about three seconds later, and this column used to
                 # show that later instant under the trigger's name.
-                _mirl_clock_utc_seconds(getattr(row, "trigger_fired_at", None)),
+                _mirl_clock_utc_seconds(
+                    getattr(row, "trigger_fired_at", None), self._timezone_key()
+                ),
                 _mirl_application_text(row),
                 _mirl_evidence_return_latency(row, recovered),
             )
@@ -6596,6 +6677,9 @@ class ControlStationWindow(QMainWindow):
         self.analytics = AnalyticsController(
             report_access=self.engine.report_access,
             red_guard=self.lifecycle.red_guard,
+            timezone_key_provider=(
+                lambda: self.settings.snapshot().clock_timezone
+            ),
             parent=self,
         )
         self.tray = TrayController(
@@ -6805,6 +6889,9 @@ class ControlStationWindow(QMainWindow):
 
         if name == "base_theme":
             self.theme.set_base_theme(str(value))
+        elif name == "clock_timezone":
+            self.shell.clock.refresh()
+            self.analytics.timezone_changed()
 
     def _open_settings(self) -> None:
         """``MENU -> SETTINGS -> THEME``: the drawer's Settings row was pressed."""
@@ -6819,17 +6906,20 @@ class ControlStationWindow(QMainWindow):
         self._sine_presentation.handle_engine_status(status)
         print(f"[MYELIN][ENGINE] status={status}", flush=True)
 
-    @staticmethod
-    def _activity_time(timestamp: str) -> str:
-        """Render an event timestamp in the computer's local HH:MM:SS time."""
+    def _activity_time(self, timestamp: str) -> str:
+        """Render one factual event instant through the selected timezone."""
 
         try:
             parsed = datetime.fromisoformat(str(timestamp or "").replace("Z", "+00:00"))
-            if parsed.tzinfo is not None:
-                parsed = parsed.astimezone()
+            if parsed.tzinfo is None:
+                return "--:--:--"
+            parsed = project_utc_datetime(
+                parsed,
+                self.settings.snapshot().clock_timezone,
+            )
             return parsed.strftime("%H:%M:%S")
-        except (TypeError, ValueError):
-            return time.strftime("%H:%M:%S")
+        except (TypeError, ValueError, TimezoneProjectionError):
+            return "--:--:--"
 
     @staticmethod
     def _activity_title(app: str, title: str) -> str:

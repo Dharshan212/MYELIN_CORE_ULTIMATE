@@ -39,6 +39,7 @@ from MIRL.mirl import (
     MirlEventClass,
     MirlEventName,
 )
+from time_projection import project_utc_datetime, resolve_timezone
 
 
 MIRL_READ_MODEL_VERSION: Final = "myelin-mirl-read-model-v1"
@@ -225,6 +226,8 @@ class LiveMirlProjection:
     #: unavailable, never as zero.  Defaulted so an older construction site
     #: fails safe to "unavailable".
     worst_return_latency_seconds: float | None = None
+    #: Explicit display lens used for dates, masks and human wall times.
+    presentation_timezone: str = "local"
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,6 +308,9 @@ class MirlReadInput:
     #: persistence for the same reason as ``trigger_identities``: the episode
     #: knows only when SINE-1 displayed, roughly three seconds later.
     trigger_fire_times: Mapping[str, str] = MappingProxyType({})
+    #: Settings owns this choice; the input only carries it explicitly into
+    #: one deterministic display/read-model projection.
+    presentation_timezone: str = "local"
     start_time: str | None = None
     end_time: str | None = None
     applied_filters: Mapping[str, object] = MappingProxyType({})
@@ -314,6 +320,8 @@ class MirlReadInput:
             raise ValueError("source_name must not be empty")
         if not str(self.source_revision).strip():
             raise ValueError("source_revision must not be empty")
+        if not str(self.presentation_timezone).strip():
+            raise ValueError("presentation_timezone must not be empty")
         for name in ("total_session_count", "total_trigger_count"):
             value = getattr(self, name)
             if value is not None and (type(value) is not int or value < 0):
@@ -378,7 +386,7 @@ class MirlReadAuthority:
             exclusions.extend(episode_exclusions)
             global_issues.extend(row.integrity_issues)
 
-        rows = _apply_display_masks(rows)
+        rows = _apply_display_masks(rows, source.presentation_timezone)
         rows = _apply_trigger_facts(
             rows, source.trigger_identities, source.trigger_fire_times
         )
@@ -437,7 +445,12 @@ class MirlReadAuthority:
             source, rows, exclusions, status, global_issues, provenance
         )
         live_mirl = self._live_mirl(
-            rows, outcome_counts, metadata, status, global_issues
+            rows,
+            outcome_counts,
+            metadata,
+            status,
+            global_issues,
+            source.presentation_timezone,
         )
         science_lab = self._science_lab(
             source,
@@ -465,6 +478,7 @@ class MirlReadAuthority:
         runtime: object,
         *,
         source_revision: str = "live-runtime",
+        presentation_timezone: str = "local",
     ) -> MirlReadModelSnapshot:
         """Project a live runtime without treating its memory as durable storage."""
 
@@ -484,6 +498,7 @@ class MirlReadAuthority:
                 IntegrityStatus.CONFIRMED if integrity_ok else IntegrityStatus.DEGRADED
             ),
             upstream_integrity_issues=((diagnostic,) if diagnostic else ()),
+            presentation_timezone=presentation_timezone,
         )
         return self.project(source)
 
@@ -1011,6 +1026,7 @@ class MirlReadAuthority:
         metadata: ProjectionMetadata,
         status: IntegrityStatus,
         issues: Sequence[IntegrityIssue],
+        presentation_timezone: str,
     ) -> LiveMirlProjection:
         # MIRL never has more than one open episode at a time.  Among rows
         # with no episode_closed event, only the one with the latest
@@ -1070,6 +1086,7 @@ class MirlReadAuthority:
             status_message=_status_message(status, available),
             integrity_status=status,
             integrity_issues=tuple(issues),
+            presentation_timezone=presentation_timezone,
         )
 
     def _science_lab(
@@ -1361,12 +1378,15 @@ def _short_episode_id(episode_id: str) -> str:
     return f"MIRL-{tail}" if tail else "MIRL-UNKNOWN"
 
 
-def _open_date_key(started_at: str) -> str | None:
-    """``DDMMYYYY`` of the UTC date an episode OPENED, or None if unreadable."""
+def _open_date_key(started_at: str, presentation_timezone: str) -> str | None:
+    """Projected ``DDMMYYYY`` of episode OPEN, or None if unreadable."""
 
     if not _valid_utc_timestamp(started_at):
         return None
-    opened = datetime.fromisoformat(started_at[:-1] + "+00:00").astimezone(timezone.utc)
+    opened_utc = datetime.fromisoformat(started_at[:-1] + "+00:00").astimezone(
+        timezone.utc
+    )
+    opened = project_utc_datetime(opened_utc, presentation_timezone)
     return f"{opened.day:02d}{opened.month:02d}{opened.year:04d}"
 
 
@@ -1402,27 +1422,36 @@ def _apply_trigger_facts(
 
 def _apply_display_masks(
     rows: Sequence[LiveMirlEpisodeRow],
+    presentation_timezone: str,
 ) -> list[LiveMirlEpisodeRow]:
     """Stamp each row with its ``EPI-DDMMYYYY-NN`` daily-global sequence mask.
 
     ``NN`` is the episode's position among all episodes that OPENED on the
-    same UTC date, ordered by ``started_at``.  The opening date is used
-    deliberately: an episode opened at 23:58 and closed at 00:04 the next day
-    keeps the opening date's mask, and a mask is never recomputed once the
-    episode's own ``started_at`` is fixed.  ``episode_id`` breaks any
-    ``started_at`` tie, matching the tie-break the recency sort already uses.
+    same selected-timezone civil date, ordered by immutable UTC opening
+    instant.  Closing on another day never moves the mask. ``episode_id``
+    deterministically breaks an exact opening-instant tie.
 
     Rows are frozen, so masks are stamped with ``dataclasses.replace``.  Input
     order is preserved; the caller's recency sort still runs afterwards.
     """
 
-    ordered = sorted(rows, key=lambda row: (row.started_at, row.episode_id))
+    # Resolve once even for empty/malformed rows.  A missing named zone must
+    # fail clearly; it must never fall through to guessed fixed-offset masks.
+    resolve_timezone(presentation_timezone)
+    ordered: list[tuple[datetime, str, LiveMirlEpisodeRow]] = []
+    for row in rows:
+        if not _valid_utc_timestamp(row.started_at):
+            continue
+        opened = datetime.fromisoformat(row.started_at[:-1] + "+00:00").astimezone(
+            timezone.utc
+        )
+        ordered.append((opened, row.episode_id, row))
+    ordered.sort(key=lambda item: (item[0], item[1]))
     daily_counts: dict[str, int] = defaultdict(int)
     masks: dict[str, str] = {}
-    for row in ordered:
-        date_key = _open_date_key(row.started_at)
-        if date_key is None:
-            continue
+    for _opened, _episode_id, row in ordered:
+        date_key = _open_date_key(row.started_at, presentation_timezone)
+        assert date_key is not None
         daily_counts[date_key] += 1
         masks[row.episode_id] = f"EPI-{date_key}-{daily_counts[date_key]:02d}"
     return [

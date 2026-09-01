@@ -31,11 +31,10 @@ import shutil
 import tempfile
 import threading
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timedelta, timezone, tzinfo
+from datetime import datetime, tzinfo
 from enum import Enum
 from pathlib import Path
 from typing import Final
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from PyQt6.QtCore import QByteArray, QObject, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor, QGuiApplication
@@ -51,6 +50,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from time_projection import TimezoneProjectionError, resolve_timezone
 
 
 SCHEMA_VERSION: Final = 4
@@ -125,7 +125,11 @@ FORBIDDEN_RUNTIME_KEYS: Final = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class TimezoneChoice:
-    """One approved clock choice with a Windows-safe fallback offset."""
+    """One approved clock choice; legacy offset metadata is display-only.
+
+    ``fallback_minutes`` is retained for settings compatibility but TZ1 never
+    uses it to project named-zone history or the live clock.
+    """
 
     key: str
     label: str
@@ -547,13 +551,9 @@ def _snapshot_from_document(document: dict[str, object]) -> SettingsSnapshot:
 
 
 def _clock_timezone(choice: TimezoneChoice) -> tzinfo | None:
-    if choice.key == "local":
-        return None
-    try:
-        return ZoneInfo(choice.key)
-    except ZoneInfoNotFoundError:
-        # Some Windows Python installations do not include the IANA database.
-        return timezone(timedelta(minutes=choice.fallback_minutes or 0))
+    """Resolve a truthful live-clock zone; never guess a fixed DST offset."""
+
+    return resolve_timezone(choice.key)
 
 
 class TimezoneDialog(QDialog):
@@ -573,8 +573,9 @@ class TimezoneDialog(QDialog):
         title = themed_label("SELECT CLOCK TIMEZONE", 13, 700, "text", spacing=1.2, upper=True)
         title.setObjectName("dialogTitle")
         explanation = themed_label(
-            "This changes the Control Station clock only. It does not change "
-            "Windows or any MYELIN engine time.",
+            "This changes the MYELIN clock, displayed historical dates and "
+            "times, date grouping, and EPI display masks. It does not change "
+            "Windows, engine timing, or underlying UTC evidence.",
             11.5, 400, "muted", wrap=True,
         )
 
@@ -591,10 +592,11 @@ class TimezoneDialog(QDialog):
             QDialogButtonBox.StandardButton.Apply
             | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.button(QDialogButtonBox.StandardButton.Apply).setText("APPLY")
-        buttons.button(QDialogButtonBox.StandardButton.Apply).setObjectName("btnStart")
+        apply_button = buttons.button(QDialogButtonBox.StandardButton.Apply)
+        apply_button.setText("APPLY")
+        apply_button.setObjectName("btnStart")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setObjectName("btnStop")
-        buttons.accepted.connect(self._accept_selection)
+        apply_button.clicked.connect(self._accept_selection)
         buttons.rejected.connect(self.reject)
         self.list_widget.itemDoubleClicked.connect(self._accept_selection)
 
@@ -790,7 +792,14 @@ class SystemClockWidget(QFrame):
 
     def refresh(self) -> None:
         choice = TIMEZONE_BY_KEY[self._settings.snapshot().clock_timezone]
-        selected_timezone = _clock_timezone(choice)
+        try:
+            selected_timezone = _clock_timezone(choice)
+        except TimezoneProjectionError:
+            self.time_label.setText("--:--:--")
+            self.timezone_label.setText("[ UNAVAILABLE ]")
+            self.day_value.setText("—")
+            self.date_value.setText("—")
+            return
         now = datetime.now().astimezone() if selected_timezone is None else datetime.now(selected_timezone)
         self.time_label.setText(now.strftime("%H:%M:%S"))
         self.timezone_label.setText(f"[ {choice.tag} ]")

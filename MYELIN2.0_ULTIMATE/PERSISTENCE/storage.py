@@ -1664,7 +1664,7 @@ def read_trigger_identities() -> dict[str, str]:
     return identities
 
 
-def read_mirl_snapshot():
+def read_mirl_snapshot(presentation_timezone: str = "local"):
     """One authoritative MIRL read-model snapshot over all recorded evidence.
 
     Extracted so the dashboard read and the report export project from exactly
@@ -1687,6 +1687,7 @@ def read_mirl_snapshot():
             total_trigger_count=trigger_count,
             trigger_identities=read_trigger_identities(),
             trigger_fire_times=read_trigger_fire_times(),
+            presentation_timezone=presentation_timezone,
         )
     )
 
@@ -1720,7 +1721,10 @@ def _deep_jsonable(value: object):
 MIRL_EXPORT_FORMATS: Final = ("pdf", "json")
 
 
-def export_mirl_report(output_format: str) -> str:
+def export_mirl_report(
+    output_format: str,
+    presentation_timezone: str = "local",
+) -> str:
     """Write ONE MIRL export in the requested format and return its path.
 
     ``pdf`` is the readable summary -- cover, Metric Hub and Science Lab -- and
@@ -1740,7 +1744,7 @@ def export_mirl_report(output_format: str) -> str:
     if output_format not in MIRL_EXPORT_FORMATS:
         raise ValueError(f"output_format must be one of {MIRL_EXPORT_FORMATS}")
 
-    snapshot = read_mirl_snapshot()
+    snapshot = read_mirl_snapshot(presentation_timezone)
     downloads = Path.home() / "Downloads"
     downloads.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1780,10 +1784,12 @@ def export_mirl_report(output_format: str) -> str:
     return str(json_path)
 
 
-def read_control_station_analytics() -> ControlStationAnalyticsSnapshot:
+def read_control_station_analytics(
+    presentation_timezone: str = "local",
+) -> ControlStationAnalyticsSnapshot:
     from COSINE.report import CosineReadAuthority
 
-    mirl = read_mirl_snapshot()
+    mirl = read_mirl_snapshot(presentation_timezone)
 
     class _CosineReader:
         def read_cosine_events(self):

@@ -49,6 +49,13 @@ from PyQt6.QtWidgets import (
 )
 
 from .lifecycle import SurfaceKind
+from time_projection import (
+    TimezoneProjectionError,
+    civil_day_window_utc,
+    project_utc_timestamp,
+    selected_civil_date,
+    timezone_tag,
+)
 
 
 POLL_INTERVAL_MS: Final = 120
@@ -121,6 +128,17 @@ def _display_seconds(value: object) -> str:
     return "—" if value is None else f"{_display_number(value)} s"
 
 
+def _display_projected_timestamp(value: object, presentation_timezone: str) -> str:
+    try:
+        moment = project_utc_timestamp(value, presentation_timezone)
+    except TimezoneProjectionError:
+        return _safe_text(value)
+    return (
+        f"{moment.strftime('%d %b %Y · %H:%M:%S')} "
+        f"[{timezone_tag(moment, presentation_timezone)}]"
+    )
+
+
 def _bounded_error(error: BaseException) -> str:
     text = " ".join(f"{type(error).__name__}: {error}".split())
     return text[:MAX_ERROR_LENGTH]
@@ -144,7 +162,7 @@ def _publish_latest(target: queue.Queue, item: object) -> None:
         pass
 
 
-def _default_snapshot_provider() -> object:
+def _default_snapshot_provider(presentation_timezone: str = "local") -> object:
     """Call the one persistence-owned analytics projection entry point.
 
     INSTRUCTION: the future PERSISTENCE owner must return immutable prepared
@@ -154,7 +172,7 @@ def _default_snapshot_provider() -> object:
 
     from PERSISTENCE.storage import read_control_station_analytics
 
-    return read_control_station_analytics()
+    return read_control_station_analytics(presentation_timezone)
 
 
 def _local_day_window_utc(local_date, *, zone=None):
@@ -189,24 +207,19 @@ def _local_day_window_utc(local_date, *, zone=None):
     return start_utc, end_utc
 
 
-def _default_today_session_health_provider() -> object:
-    """Resolve the system-local civil day, convert it to UTC, and read it.
-
-    The header clock's timezone selection is presentation-only for the
-    Control Station clock and must never change which local day this
-    resolves -- see ``CONTROL_STATION/settings.py``'s own timezone note.
-    Neither is any timezone hard-coded here: ``_local_day_window_utc``
-    resolves both boundaries through whatever zone the OS is configured
-    with, independently per boundary, so a DST-crossing local day is not
-    silently treated as exactly 24 hours.
-    """
-
-    from datetime import datetime
+def _default_today_session_health_provider(
+    presentation_timezone: str = "local",
+    *,
+    now_utc=None,
+) -> object:
+    """Read Today through the explicit selected-timezone civil window."""
 
     from PERSISTENCE.session_health import read_today_session_health
 
-    today = datetime.now().date()
-    window_start_utc, window_end_utc = _local_day_window_utc(today)
+    today = selected_civil_date(presentation_timezone, now_utc=now_utc)
+    window_start_utc, window_end_utc = civil_day_window_utc(
+        today, presentation_timezone
+    )
 
     def _as_utc_text(moment) -> str:
         return moment.isoformat(timespec="microseconds").replace("+00:00", "Z")
@@ -285,6 +298,11 @@ class SharedDashboardRefresh(QObject):
         if self._closed:
             return False
         if self._in_flight:
+            # Invalidate the accepted worker immediately.  Its result may
+            # still arrive, but a newer request (notably a timezone change)
+            # must never render that older projection before the coalesced
+            # replacement starts.
+            self._generation += 1
             self._pending = True
             return True
 
@@ -625,6 +643,9 @@ class LiveMirlPage(DashboardPage):
 
     def render_projection(self, projection: object) -> None:
         super().render_projection(projection)
+        presentation_timezone = str(
+            _field(projection, "presentation_timezone", "local") or "local"
+        )
         available = bool(_field(projection, "available", False))
         active = tuple(_field(projection, "active_episodes", ()) or ())
         closed = tuple(_field(projection, "recently_closed_episodes", ()) or ())
@@ -644,7 +665,9 @@ class LiveMirlPage(DashboardPage):
                     _field(episode, "short_display_id", _field(episode, "episode_id")),
                     _field(episode, "episode_status"),
                     _field(episode, "final_outcome", "IN PROGRESS"),
-                    _field(episode, "started_at"),
+                    _display_projected_timestamp(
+                        _field(episode, "started_at"), presentation_timezone
+                    ),
                     _field(episode, "recovery_attempt_count"),
                     _field(episode, "relapse_count"),
                 )
@@ -657,7 +680,9 @@ class LiveMirlPage(DashboardPage):
             timeline_rows.append(
                 (
                     _field(event, "episode_seq"),
-                    _field(event, "occurred_at"),
+                    _display_projected_timestamp(
+                        _field(event, "occurred_at"), presentation_timezone
+                    ),
                     _field(event, "event_name"),
                     _field(event, "observed_or_derived"),
                     _field(event, "reference", _field(event, "reason_or_outcome_code")),
@@ -943,6 +968,7 @@ class AnalyticsController(QObject):
         *,
         report_access,
         red_guard,
+        timezone_key_provider: Callable[[], str] | None = None,
         snapshot_provider: Callable[[], object] | None = None,
         export_provider: Callable[[object, AnalyticsSheetRequest], str] | None = None,
         today_health_provider: Callable[[], object] | None = None,
@@ -955,9 +981,15 @@ class AnalyticsController(QObject):
         self._bundle = None
         self._pages: dict[str, DashboardPage] = {}
         self._composer: AnalyticsSheetDialog | None = None
+        self._timezone_key_provider = timezone_key_provider or (lambda: "local")
 
         self._refresh = SharedDashboardRefresh(
-            snapshot_provider or _default_snapshot_provider,
+            snapshot_provider
+            or (
+                lambda: _default_snapshot_provider(
+                    self._timezone_key_provider()
+                )
+            ),
             parent=self,
         )
         self._refresh.bundle_ready.connect(self._deliver_bundle)
@@ -968,7 +1000,12 @@ class AnalyticsController(QObject):
         # frozen ControlStationAnalyticsSnapshot bundle and must not share
         # that bundle's generation/coalescing with the four dashboard pages.
         self._today_health_refresh = SharedDashboardRefresh(
-            today_health_provider or _default_today_session_health_provider,
+            today_health_provider
+            or (
+                lambda: _default_today_session_health_provider(
+                    self._timezone_key_provider()
+                )
+            ),
             parent=self,
         )
         self._today_health_refresh.bundle_ready.connect(
@@ -1009,6 +1046,14 @@ class AnalyticsController(QObject):
 
         if self._closed:
             return
+        self._today_health_refresh.request_refresh()
+
+    def timezone_changed(self) -> None:
+        """Reproject both existing read lanes through the newest setting."""
+
+        if self._closed:
+            return
+        self._refresh.request_refresh()
         self._today_health_refresh.request_refresh()
 
     def engine_status_changed(self, status: object) -> None:

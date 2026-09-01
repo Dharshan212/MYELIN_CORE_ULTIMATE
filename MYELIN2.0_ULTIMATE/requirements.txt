@@ -1,0 +1,3 @@
+# TZ1 requires the real IANA database for historical named-zone projection.
+# Fixed offsets are intentionally not an acceptable fallback.
+tzdata==2026.3
