@@ -6994,8 +6994,13 @@ class ControlStationWindow(QMainWindow):
             dark_mode=tokens.is_dark,
         )
 
+    def _reassert_window_icon(self) -> None:
+        self.setWindowIcon(_canonical_application_icon())
+
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
         super().showEvent(event)
+        self._reassert_window_icon()
+        QTimer.singleShot(0, self._reassert_window_icon)
         self._apply_native_titlebar()
         self.tray.start()
         if isinstance(self.shell.brand, BrandConsole):
