@@ -7,6 +7,7 @@ single SQLite lane to reach a terminal receipt before returning success.
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import json
 import math
@@ -16,9 +17,10 @@ import time
 import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Final, Optional
 
 from PERSISTENCE.database import (
     ReceiptState,
@@ -1569,22 +1571,219 @@ def _counts() -> tuple[int, int]:
         connection.close()
 
 
-def read_control_station_analytics() -> ControlStationAnalyticsSnapshot:
-    from COSINE.report import CosineReadAuthority
+def _trigger_evidence(payload_text: str) -> dict:
+    """The evidence mapping inside one stored trigger payload.
+
+    ``_json_text`` stringifies nested values on the way in, so ``evidence``
+    comes back out as a Python literal repr rather than nested JSON.  Both
+    shapes are accepted.  Anything unreadable yields an empty mapping instead
+    of raising: one malformed row must not cost the whole table its names.
+    ``ast.literal_eval`` evaluates literals only -- it never executes stored
+    text as code.
+    """
+
+    try:
+        payload = json.loads(payload_text)
+    except (TypeError, ValueError):
+        return {}
+    evidence = payload.get("evidence") if isinstance(payload, dict) else None
+    if isinstance(evidence, dict):
+        return evidence
+    if isinstance(evidence, str):
+        try:
+            parsed = ast.literal_eval(evidence)
+        except (ValueError, SyntaxError, MemoryError, RecursionError):
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def read_trigger_fire_times() -> dict[str, str]:
+    """Map each trigger's ``candidate_uid`` to the UTC instant Trigger minted it.
+
+    This is the moment the trigger actually fired, which is NOT the moment
+    SINE-1 appeared: on real evidence SINE-1 follows about three seconds
+    later.  MIRL's episode only knows the later instant, so a surface that
+    wants to show the true trigger time has to be handed this.
+
+    Read-only.  ``created_at_utc`` is the stamp written as the trigger row was
+    committed, so it is the closest recorded wall clock to the firing itself.
+    """
+
+    connection = connect_database(read_only=True)
+    try:
+        rows = connection.execute(
+            "SELECT candidate_uid, created_at_utc FROM triggers ORDER BY id"
+        ).fetchall()
+    finally:
+        connection.close()
+
+    fired: dict[str, str] = {}
+    for row in rows:
+        candidate_uid = str(row["candidate_uid"] or "").strip()
+        stamp = str(row["created_at_utc"] or "").strip()
+        if candidate_uid and stamp:
+            fired[candidate_uid] = stamp
+    return fired
+
+
+def read_trigger_identities() -> dict[str, str]:
+    """Map each trigger's ``candidate_uid`` to the surface it actually fired on.
+
+    MIRL events carry only the opaque ``trg_...`` token Trigger mints; the
+    readable identity of what pulled attention away lives here, in the
+    trigger's own recorded evidence.  This reader exists so a presentation
+    surface can name it without ever reaching into the database itself.
+
+    Read-only, and it invents nothing: the recorded ``platform_key`` first,
+    else the ``process_name`` it was observed in, and a trigger that recorded
+    neither is simply absent from the map -- leaving the caller to show the
+    token it already has rather than a guess.
+    """
+
+    connection = connect_database(read_only=True)
+    try:
+        rows = connection.execute(
+            "SELECT candidate_uid, payload_json FROM triggers ORDER BY id"
+        ).fetchall()
+    finally:
+        connection.close()
+
+    identities: dict[str, str] = {}
+    for row in rows:
+        candidate_uid = str(row["candidate_uid"] or "").strip()
+        if not candidate_uid:
+            continue
+        evidence = _trigger_evidence(str(row["payload_json"] or ""))
+        label = str(evidence.get("platform_key") or "").strip()
+        if not label:
+            label = str(evidence.get("process_name") or "").strip()
+        if label:
+            identities[candidate_uid] = label
+    return identities
+
+
+def read_mirl_snapshot():
+    """One authoritative MIRL read-model snapshot over all recorded evidence.
+
+    Extracted so the dashboard read and the report export project from exactly
+    the same envelope; two call sites assembling their own ``MirlReadInput``
+    would eventually disagree about scope or identity.
+    """
+
     from MIRL.read_model import IntegrityStatus, MirlReadAuthority, MirlReadInput
 
     bootstrap_production_schema()
     session_count, trigger_count = _counts()
-    mirl_source = MirlReadInput(
-        events=read_mirl_events(),
-        source_name="MYELIN SQLite",
-        source_revision="production-schema-v1",
-        source_generated_at=_utc_now(),
-        upstream_integrity_status=IntegrityStatus.CONFIRMED,
-        total_session_count=session_count,
-        total_trigger_count=trigger_count,
+    return MirlReadAuthority().project(
+        MirlReadInput(
+            events=read_mirl_events(),
+            source_name="MYELIN SQLite",
+            source_revision="production-schema-v1",
+            source_generated_at=_utc_now(),
+            upstream_integrity_status=IntegrityStatus.CONFIRMED,
+            total_session_count=session_count,
+            total_trigger_count=trigger_count,
+            trigger_identities=read_trigger_identities(),
+            trigger_fire_times=read_trigger_fire_times(),
+        )
     )
-    mirl = MirlReadAuthority().project(mirl_source)
+
+
+def _deep_jsonable(value: object):
+    """Recursively convert a read-model snapshot into JSON-ready primitives.
+
+    Deliberately NOT ``_jsonable``: that one stringifies nested values on
+    purpose, which is right for a durable event payload but would flatten every
+    episode and timeline in this export into an unreadable repr string.  It is
+    also not ``dataclasses.asdict``, which deep-copies and fails outright on the
+    frozen ``mappingproxy`` values the read model publishes.
+    """
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Enum):
+        return value.value
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _deep_jsonable(getattr(value, field.name))
+            for field in dataclasses.fields(value)
+        }
+    if isinstance(value, Mapping):
+        return {str(key): _deep_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_deep_jsonable(item) for item in value]
+    return str(value)
+
+
+MIRL_EXPORT_FORMATS: Final = ("pdf", "json")
+
+
+def export_mirl_report(output_format: str) -> str:
+    """Write ONE MIRL export in the requested format and return its path.
+
+    ``pdf`` is the readable summary -- cover, Metric Hub and Science Lab -- and
+    deliberately stops there.  Adding the per-episode and integrity sections
+    runs to 55 pages on real evidence, at which point it is an archive rather
+    than a report.
+
+    ``json`` is that archive: every field behind all five dashboard tabs, at
+    full fidelity, with no episode cap and no timeline truncation.
+
+    One format per call, because the two answer different questions and
+    writing both every time left unwanted files behind.  Each is written to a
+    temporary name and moved into place, so a failed render can never leave a
+    half-written export on disk.
+    """
+
+    if output_format not in MIRL_EXPORT_FORMATS:
+        raise ValueError(f"output_format must be one of {MIRL_EXPORT_FORMATS}")
+
+    snapshot = read_mirl_snapshot()
+    downloads = Path.home() / "Downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    if output_format == "pdf":
+        from MIRL.report import (
+            MirlReportRequest,
+            MirlReportSections,
+            build_mirl_report_pdf,
+        )
+
+        pdf_path = downloads / f"MYELIN_MIRL_Report_{stamp}.pdf"
+        build_mirl_report_pdf(
+            snapshot,
+            MirlReportRequest(
+                output_path=pdf_path,
+                title="MYELIN MIRL Report",
+                subtitle="Authoritative native MIRL episode evidence",
+                sections=MirlReportSections(
+                    metric_hub=True,
+                    live_mirl=False,
+                    science_lab=True,
+                    integrity_and_provenance=False,
+                ),
+                overwrite=True,
+            ),
+        )
+        return str(pdf_path)
+
+    json_path = downloads / f"MYELIN_MIRL_Report_{stamp}.json"
+    temporary = json_path.with_name(f".{json_path.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(_deep_jsonable(snapshot), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    os.replace(temporary, json_path)
+    return str(json_path)
+
+
+def read_control_station_analytics() -> ControlStationAnalyticsSnapshot:
+    from COSINE.report import CosineReadAuthority
+
+    mirl = read_mirl_snapshot()
 
     class _CosineReader:
         def read_cosine_events(self):
@@ -1701,6 +1900,8 @@ __all__ = [
     "ReportExportLease",
     "ReportExportRefused",
     "ControlStationAnalyticsSnapshot",
+    "MIRL_EXPORT_FORMATS",
+    "export_mirl_report",
     "emergency_followup_required",
     "export_analytics_sheet",
     "read_control_station_analytics",

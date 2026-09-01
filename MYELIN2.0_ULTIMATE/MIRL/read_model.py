@@ -191,6 +191,15 @@ class LiveMirlEpisodeRow:
     timeline: tuple[LiveMirlTimelineRow, ...]
     integrity_status: IntegrityStatus
     integrity_issues: tuple[IntegrityIssue, ...]
+    #: The surface this episode fired on ("youtube"), resolved from Trigger's
+    #: recorded evidence.  Empty when no trigger identity was supplied or the
+    #: trigger recorded no surface -- never a placeholder, so a caller can tell
+    #: "not named" from a real name.
+    application: str = ""
+    #: UTC instant the trigger fired, from Trigger's own row.  Distinct from
+    #: ``started_at``, which is when SINE-1 displayed about three seconds
+    #: later.  Empty when no fire time was supplied.
+    trigger_fired_at: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,13 +214,17 @@ class LiveMirlProjection:
     status_message: str
     integrity_status: IntegrityStatus
     integrity_issues: tuple[IntegrityIssue, ...]
-    #: Mean stable-recovery latency over the SAME eligible population Metric
-    #: Hub uses (``_eligible_rows`` + ``_stable_recovery_latencies``), so the
-    #: two surfaces cannot report different averages.  ``None`` whenever the
-    #: projection is degraded or no RETURNED episode carries a latency -- the
-    #: UI must render that as unavailable, never as zero.  Defaulted so an
-    #: older construction site fails safe to "unavailable".
-    average_stable_recovery_latency_seconds: float | None = None
+    #: The single WORST measured return: the longest
+    #: ``verified_return_latency_seconds`` across every recorded episode, not
+    #: just the capped recent window the UI receives.  That field is already
+    #: suppressed on any episode carrying an integrity issue (see the
+    #: ``and not work.issues`` guard where the row is built), so this maximum
+    #: is drawn only from evidence MIRL considers sound -- no separate
+    #: eligibility gate applies, and none should be added.  ``None`` when no
+    #: episode has a measured verified return; the UI must render that as
+    #: unavailable, never as zero.  Defaulted so an older construction site
+    #: fails safe to "unavailable".
+    worst_return_latency_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +296,15 @@ class MirlReadInput:
     upstream_integrity_issues: tuple[str, ...] = ()
     total_session_count: int | None = None
     total_trigger_count: int | None = None
+    #: ``candidate_uid`` -> the surface that trigger fired on, supplied by
+    #: persistence.  MIRL events carry only the opaque token, so this projector
+    #: cannot derive the name and must be handed it; an empty map simply leaves
+    #: every episode unnamed rather than guessing one.
+    trigger_identities: Mapping[str, str] = MappingProxyType({})
+    #: ``candidate_uid`` -> the UTC instant that trigger fired, supplied by
+    #: persistence for the same reason as ``trigger_identities``: the episode
+    #: knows only when SINE-1 displayed, roughly three seconds later.
+    trigger_fire_times: Mapping[str, str] = MappingProxyType({})
     start_time: str | None = None
     end_time: str | None = None
     applied_filters: Mapping[str, object] = MappingProxyType({})
@@ -357,6 +379,9 @@ class MirlReadAuthority:
             global_issues.extend(row.integrity_issues)
 
         rows = _apply_display_masks(rows)
+        rows = _apply_trigger_facts(
+            rows, source.trigger_identities, source.trigger_fire_times
+        )
 
         rows.sort(
             key=lambda item: (
@@ -1015,20 +1040,25 @@ class MirlReadAuthority:
         active = tuple(active_rows)
         closed = tuple(closed_rows[:MAX_RECENTLY_CLOSED_EPISODES])
         available = bool(rows)
-        # Averaged over the FULL eligible population, deliberately not over
-        # ``closed`` -- that tuple is capped at MAX_RECENTLY_CLOSED_EPISODES
-        # for display, and a mean of the visible 100 presented as the mean of
-        # all would be a wrong number wearing a right label.
-        live_latencies = _stable_recovery_latencies(_eligible_rows(rows, status))
+        # Taken over the FULL population, deliberately not over ``closed`` --
+        # that tuple is capped at MAX_RECENTLY_CLOSED_EPISODES for display, and
+        # "the worst of the visible 100" wearing the label "the worst ever"
+        # would be a wrong number.  No eligibility filter is applied because
+        # the source field is already integrity-guarded at the point the row
+        # is built.
+        measured_returns = tuple(
+            row.verified_return_latency_seconds
+            for row in rows
+            if row.verified_return_latency_seconds is not None
+        )
+        worst_return = max(measured_returns) if measured_returns else None
         return LiveMirlProjection(
             available=available,
             metadata=metadata,
             active_episodes=active,
             recently_closed_episodes=closed,
             native_outcome_counts=_freeze_mapping(outcome_counts),
-            average_stable_recovery_latency_seconds=(
-                fmean(live_latencies) if live_latencies else None
-            ),
+            worst_return_latency_seconds=worst_return,
             evidence_availability=_freeze_mapping(
                 {
                     "native_mirl_events": available,
@@ -1338,6 +1368,36 @@ def _open_date_key(started_at: str) -> str | None:
         return None
     opened = datetime.fromisoformat(started_at[:-1] + "+00:00").astimezone(timezone.utc)
     return f"{opened.day:02d}{opened.month:02d}{opened.year:04d}"
+
+
+def _apply_trigger_facts(
+    rows: Sequence[LiveMirlEpisodeRow],
+    identities: Mapping[str, str],
+    fire_times: Mapping[str, str] = MappingProxyType({}),
+) -> list[LiveMirlEpisodeRow]:
+    """Attach what only Trigger knows: the surface, and when it actually fired.
+
+    Applied here rather than inside ``_project_episode`` for the same reason
+    ``_apply_display_masks`` is: it is a display concern over finished rows,
+    and it must not sit in the path that decides episode truth.  An episode
+    whose token is absent from a map simply keeps that field empty -- never a
+    placeholder, so a caller can tell "not supplied" from a real value.
+    """
+
+    if not identities and not fire_times:
+        return list(rows)
+    resolved: list[LiveMirlEpisodeRow] = []
+    for row in rows:
+        application = str(identities.get(row.candidate_uid) or "")
+        fired_at = str(fire_times.get(row.candidate_uid) or "")
+        if application or fired_at:
+            row = replace(
+                row,
+                application=application or row.application,
+                trigger_fired_at=fired_at or row.trigger_fired_at,
+            )
+        resolved.append(row)
+    return resolved
 
 
 def _apply_display_masks(

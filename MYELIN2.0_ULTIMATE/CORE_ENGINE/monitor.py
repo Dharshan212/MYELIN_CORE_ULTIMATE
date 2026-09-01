@@ -684,7 +684,23 @@ class WindowsForegroundReader:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    """One UTC wall stamp in MYELIN's canonical ``...Z`` form.
+
+    The trailing ``Z`` is not cosmetic.  ``observed_wall_time_utc`` produced
+    here rides the foreground observation into MIRL and is stored verbatim as
+    every return-verification and closure event's ``occurred_wall_time_utc``
+    (MIRL/mirl.py passes ``wall_time=observation.observed_wall_time_utc``).
+    MIRL's read model validates it with ``_valid_utc_timestamp``, which
+    REQUIRES a ``Z`` suffix -- a bare ``+00:00`` offset was rejected as
+    INVALID_WALL_TIMESTAMP, degrading the whole episode and suppressing its
+    verified-return and stable-recovery latencies.  Every other wall-stamp
+    helper in the tree (mirl.py, read_model.py, storage.py, cosecant.py)
+    already normalises this way; this one did not.
+    """
+
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
 
 
 def _field(value: object, name: str, default=None):

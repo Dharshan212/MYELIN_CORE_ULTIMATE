@@ -98,6 +98,7 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMainWindow,
+    QMenu,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -1666,6 +1667,10 @@ def showcase_metric_stat(
 
     _retheme(DEFAULT_THEME)
     _remember_retheme(box, _retheme)
+    # Same convention as ``showcase_episode_banner.detail_label``: exposed so a
+    # per-second readout can be retitled in place instead of rebuilding the
+    # whole tile on every tick.
+    box.figure_label = figure  # noqa: SLF001 -- see comment
     return box
 
 
@@ -2333,6 +2338,155 @@ def showcase_chip_pill(text: str, role: str | None = None) -> QLabel:
     return chip
 
 
+def _mirl_html(value: object) -> str:
+    """One recorded value, escaped for the rich-text summary."""
+
+    return (
+        _mirl_text(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _mirl_story_html(row: object, tokens) -> str:
+    """One episode told as prose, with its recorded values highlighted.
+
+    The words are identical for every episode and only the values change, so
+    the shape of an episode reads at a glance instead of having to be
+    reassembled from a key/value list.
+
+    Every highlighted value is a recorded field.  Nothing is inferred, and a
+    field MYELIN never recorded says so rather than being smoothed over -- an
+    unmeasured latency reads as unmeasured, not as zero.  Colour follows the
+    established rules: a verified return is green, a non-return is red, and
+    integrity is green only when CONFIRMED and otherwise MUTED, never red,
+    because degraded evidence is the ordinary condition of this surface.
+    """
+
+    muted = tokens.muted
+
+    def plain(text: str) -> str:
+        return f'<span style="color:{muted}">{text}</span>'
+
+    def strong(value: object, role: str = "cyan") -> str:
+        colour = _showcase_colour(role, tokens).name()
+        return (
+            f'<span style="color:{colour}; font-weight:700">'
+            f"{_mirl_html(value)}</span>"
+        )
+
+    if row is None:
+        return plain("No episode has been projected yet.")
+
+    opened = _mirl_parse_any_utc(getattr(row, "started_at", None))
+    application = str(getattr(row, "application", "") or "").strip()
+    timeline = tuple(getattr(row, "timeline", ()) or ())
+    outcome = getattr(row, "final_outcome", None)
+    integrity = _mirl_text(
+        getattr(getattr(row, "integrity_status", None), "value", None), "UNKNOWN"
+    )
+
+    lines = []
+
+    # 1 -- which episode, when, and what pulled attention away.
+    opened_at = plain(" opened on ") + strong(opened.strftime("%d %b %Y")) if opened else plain(" opened")
+    lines.append(
+        plain("Episode ")
+        + strong(getattr(row, "short_display_id", None))
+        + opened_at
+        + plain(" at ")
+        + strong(_mirl_clock_utc(getattr(row, "started_at", None)))
+        + plain(" on ")
+        + (strong(application) if application else plain("an unnamed surface"))
+        + plain(" \u2014 trigger ")
+        + strong(getattr(row, "source_event_id", None))
+        + plain(", session ")
+        + strong(getattr(row, "session_id", None))
+        + plain(".")
+    )
+
+    # 2 -- how far SINE escalated, and how much evidence there is.
+    last_event = getattr(timeline[-1], "event_name", None) if timeline else None
+    lines.append(
+        plain("MYELIN escalated as far as ")
+        + strong(_mirl_highest_sine(row))
+        + plain(" and recorded ")
+        + strong(len(timeline))
+        + plain(" event(s)")
+        + (plain(", the last being ") + strong(last_event) if last_event else plain(""))
+        + plain(".")
+    )
+
+    # 3 -- how it ended.  Each branch states only what the evidence supports.
+    latency = _mirl_measured_return_latency(row)
+    if _mirl_recovered(outcome):
+        if latency is not None:
+            lines.append(
+                plain("You returned after ")
+                + strong(_mirl_duration(latency), "green")
+                + plain(", verified at ")
+                + strong(_mirl_clock_utc(_mirl_recovered_at(row)), "green")
+                + plain(".")
+            )
+        else:
+            lines.append(
+                plain("You returned, but the exact latency could not be measured.")
+            )
+    elif outcome is None:
+        lines.append(plain("The episode is ") + strong("still open", "amber") + plain("."))
+    elif _mirl_text(outcome) in _MIRL_UNNAMED_OUTCOMES:
+        lines.append(plain("The episode ended when the ") + strong("emergency stop", "red") + plain(" was pressed."))
+    else:
+        lines.append(
+            plain("You did not return ")
+            + plain("\u2014 it ended ")
+            + strong(_mirl_text(outcome).replace("_", " "), "red")
+            + plain(".")
+        )
+
+    # 4 -- what the episode cost, and whether the evidence is sound.
+    lines.append(
+        plain("It carries ")
+        + strong(getattr(row, "recovery_attempt_count", None))
+        + plain(" recovery attempt(s) and ")
+        + strong(getattr(row, "relapse_count", None))
+        + plain(" relapse(s), with evidence integrity ")
+        + strong(integrity, "green" if integrity == "CONFIRMED" else "muted")
+        + plain(".")
+    )
+
+    return " ".join(lines)
+
+
+def showcase_episode_story(row: object) -> QLabel:
+    """``.gkv``'s prose cousin: one episode summarised in sentences.
+
+    The rich text is rebuilt inside ``_retheme`` rather than once at
+    construction, because the value colours are inlined into the HTML and a
+    stylesheet swap alone would leave them on the old world's palette.
+    """
+
+    block = QLabel()
+    block.setObjectName("showcaseStoryBlock")
+    block.setFont(make_font(13, 400))
+    block.setWordWrap(True)
+    block.setTextFormat(Qt.TextFormat.RichText)
+    block.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+    def _retheme(tokens) -> None:
+        block.setStyleSheet(
+            f"QLabel#showcaseStoryBlock {{ color: {tokens.text_primary};"
+            f" background: {_white_alpha(0.02)}; border: 1px solid {_white_alpha(0.08)};"
+            f" border-radius: {RADIUS_SM}px; padding: 16px 18px; }}"
+        )
+        block.setText(_mirl_story_html(row, tokens))
+
+    _retheme(DEFAULT_THEME)
+    _remember_retheme(block, _retheme)
+    return block
+
+
 def showcase_kv_block(text: str) -> QLabel:
     """``.gkv`` -- pre-wrapped monospace key/value block."""
 
@@ -2525,6 +2679,65 @@ def _mirl_clock(value: object) -> str:
     return moment.strftime("%H:%M:%S") if moment else _mirl_text(value)
 
 
+def _mirl_clock_utc(value: object) -> str:
+    """``HH:MM UTC`` for an evidence-table time column.
+
+    The UTC label is deliberate and must stay.  These stamps ARE UTC, and a
+    bare "18:22" reads as the viewer's local clock -- the standing ruling from
+    the Study Mode presentation audit, which applies to every surface, not
+    just Study.
+
+    Accepts BOTH the canonical ``...Z`` form and the ``+00:00`` offset form.
+    The offset form is what the malformed-timestamp writer produced (see
+    CORE_ENGINE/monitor.py ``_utc_now``); it still names an unambiguous UTC
+    instant, so reading a clock off it is reading recorded evidence, not
+    estimating one.  Integrity is untouched by this: the read model still
+    flags those events, and the Data Quality tab still counts every one of
+    them.  Only ``_mirl_parse_utc`` -- the strict parser used everywhere
+    integrity matters -- keeps rejecting them.
+    """
+
+    moment = _mirl_parse_any_utc(value)
+    if moment is None:
+        return _MIRL_UNAVAILABLE
+    return f"{moment.strftime('%H:%M')} UTC"
+
+
+def _mirl_clock_utc_seconds(value: object) -> str:
+    """``HH:MM:SS UTC`` -- used where a few seconds actually carry meaning.
+
+    Trigger Time needs the seconds: the trigger fires roughly three seconds
+    before SINE-1 displays, and at minute resolution the two columns would
+    read identically and look like a duplicated field.
+    """
+
+    moment = _mirl_parse_any_utc(value)
+    if moment is None:
+        return _MIRL_UNAVAILABLE
+    return f"{moment.strftime('%H:%M:%S')} UTC"
+
+
+def _mirl_parse_any_utc(value: object) -> "datetime | None":
+    """Parse a recorded UTC stamp in either form MYELIN has written.
+
+    ``_mirl_parse_utc`` stays strict -- it governs everywhere integrity
+    matters.  This one additionally accepts the ``+00:00`` offset form the
+    malformed-timestamp writer produced (CORE_ENGINE/monitor.py ``_utc_now``),
+    because that string still names an unambiguous instant and refusing to
+    read it would hide real evidence from display without making anything
+    truer.
+    """
+
+    text = str(value or "").strip()
+    moment = _mirl_parse_utc(text)
+    if moment is None and text.endswith("+00:00"):
+        try:
+            moment = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    return moment
+
+
 def _mirl_stamp(value: object) -> str:
     """``24 Jul 2026 - 12:11:51``, the mockup's evidence-table stamp."""
 
@@ -2615,6 +2828,22 @@ def _mirl_event_pill(event_name: object) -> tuple:
 
 def _mirl_recovered(outcome: object) -> bool:
     return str(outcome or "") == _MIRL_RECOVERED_OUTCOME
+
+
+def _mirl_application_text(row: object) -> str:
+    """What actually pulled attention away, not the token identifying it.
+
+    ``application`` is resolved by the read model from Trigger's own recorded
+    evidence (platform first, else the process it was observed in).  The
+    opaque ``trg_...`` candidate_uid stays as the fallback: it is still true,
+    merely unreadable, and showing it beats showing nothing where a trigger
+    recorded no surface at all.
+    """
+
+    application = str(getattr(row, "application", "") or "").strip()
+    if application:
+        return application
+    return _mirl_text(getattr(row, "candidate_uid", None), _MIRL_UNAVAILABLE)
 
 
 def _mirl_highest_sine(row: object) -> str:
@@ -2805,8 +3034,128 @@ def _sine_timer_text(
     remaining = getattr(sine_view, "next_deadline_seconds", None)
     if not _mirl_is_number(window) or not _mirl_is_number(remaining) or window <= 0:
         return "\u2014"
-    served = min(float(window), max(0.0, float(window) - max(0.0, float(remaining))))
+    # Count ON from the snapshot rather than freezing on it.  The monitor
+    # publishes every DEFAULT_POLL_SECONDS (1.5s), which does not divide into
+    # whole seconds, so rendering the raw snapshot skipped one second in three
+    # (00:00, 00:01, 00:03, 00:04, 00:06 ...).
+    #
+    # ``reference`` is ``sine_view_last_seen`` -- the local instant THIS
+    # snapshot arrived -- so what is added is a LOCAL elapsed delta, never a
+    # comparison against the engine's own clock.  Every arriving snapshot
+    # re-anchors it, so the reading cannot drift further than one poll, and the
+    # staleness gate above blanks the tile entirely once SINE goes quiet.  This
+    # is display-only, exactly like ``_mirl_elapsed``: never written, never
+    # counted, never feeding a metric.
+    since_snapshot = max(0.0, moment - reference)
+    remaining_now = max(0.0, float(remaining) - since_snapshot)
+    served = min(float(window), max(0.0, float(window) - remaining_now))
     return f"{_sine_clock(served)} / {_sine_clock(window)}"
+
+
+#: Outcomes that keep reading "unavailable" instead of being named.
+#: EMERGENCY is deliberately here (Dharshan, 2026-09-01): naming it belongs
+#: with the emergency follow-up history work, which is parked, so the surface
+#: stays exactly as it was rather than half-telling that story.
+_MIRL_UNNAMED_OUTCOMES: Final = frozenset({"EMERGENCY"})
+
+
+def _mirl_last_timeline_event(row: object, event_name: str):
+    """The LAST timeline event of one name, or ``None``.
+
+    Last rather than first: an episode that relapsed and recovered again
+    carries several verification events, and the final one is the return that
+    actually stuck.
+    """
+
+    found = None
+    for event in tuple(getattr(row, "timeline", ()) or ()):
+        if str(getattr(event, "event_name", "")) == event_name:
+            found = event
+    return found
+
+
+def _mirl_recovered_at(row: object) -> object:
+    """When the return was VERIFIED -- the moment this episode recovered.
+
+    Deliberately not the episode's last event.  That is the closure record,
+    which lands about a minute later once closure confirmation completes, and
+    reading it as the recovery time overstates every return by that gap.
+    """
+
+    event = _mirl_last_timeline_event(row, "return_verified")
+    return getattr(event, "occurred_at", None) if event is not None else None
+
+
+def _mirl_measured_return_latency(row: object) -> float | None:
+    """Seconds from SINE-1 displaying to the return being verified.
+
+    Measured from the two stamps this table already shows -- Time Distracted
+    and Time Recovered -- so the column is the visible subtraction of its own
+    neighbours and can be checked by eye.
+
+    This is computed here rather than read from the projection ON PURPOSE, and
+    the trade is worth stating plainly: the read model suppresses
+    ``verified_return_latency_seconds`` for any episode carrying an integrity
+    issue, which on current evidence is nearly all of them, so the column was
+    blank for 25 episodes that genuinely did return.  Cross-checked against
+    the one episode the read model does measure, this agrees to 1.3 seconds
+    (646.5s here vs 647.8s there) -- the difference being wall clock versus
+    the monotonic clock the read model uses.
+
+    It invents nothing: both stamps are recorded evidence, and a pair that
+    cannot be read, or that runs backwards, yields ``None`` rather than a
+    number.
+    """
+
+    start = _mirl_parse_any_utc(getattr(row, "started_at", None))
+    recovered = _mirl_parse_any_utc(_mirl_recovered_at(row))
+    if start is None or recovered is None:
+        return None
+    seconds = (recovered - start).total_seconds()
+    return seconds if seconds >= 0 else None
+
+
+def _mirl_evidence_return_latency(row: object, recovered: bool) -> str:
+    """Return Latency for the evidence table: Time Recovered minus Time Distracted.
+
+    Gated on the SAME ``recovered`` test that gates the Time Recovered column,
+    so this cell is always the visible subtraction of its two neighbours.
+
+    That gate matters on real evidence: three episodes DID have a verified
+    return and then ended NOT_RETURNED, ABORTED or EMERGENCY after relapsing.
+    Printing a duration there while Time Recovered reads unavailable would put
+    a number in the row that the row itself cannot account for, so those read
+    their outcome instead.
+    """
+
+    if recovered:
+        seconds = _mirl_measured_return_latency(row)
+        if seconds is not None:
+            return _mirl_duration(seconds)
+    return _mirl_non_return_label(row) or _MIRL_UNAVAILABLE
+
+
+def _mirl_non_return_label(row: object) -> str:
+    """The outcome that explains a missing return, or ``""`` if none does.
+
+    Names the ACTUAL ending -- NOT RETURNED, ABORTED -- rather than collapsing
+    every non-return into one word, so "unavailable" can go back to meaning
+    just one thing: MYELIN could not measure it.
+
+    Two cases deliberately return ``""`` and so keep reading unavailable:
+    an episode that DID return but whose latency was suppressed (a measurement
+    gap, not an outcome), and any outcome in ``_MIRL_UNNAMED_OUTCOMES``.
+    """
+
+    if row is None:
+        return ""
+    outcome = getattr(row, "final_outcome", None)
+    if outcome is None or _mirl_recovered(outcome):
+        return ""
+    text = _mirl_text(outcome)
+    if text in _MIRL_UNNAMED_OUTCOMES:
+        return ""
+    return text.replace("_", " ").upper()
 
 
 def _mirl_return_latency_text(focus: object) -> str:
@@ -2827,24 +3176,38 @@ def _mirl_return_latency_text(focus: object) -> str:
     latency = getattr(focus, "verified_return_latency_seconds", None)
     if latency is not None:
         return _mirl_latency(latency)
-    outcome = getattr(focus, "final_outcome", None)
-    if outcome is None or _mirl_recovered(outcome):
-        # Still open, or returned with no measured latency.  Either way this is
-        # unmeasured, which is not the same claim as "did not return".
-        return "\u2014"
-    return "NOT RETURNED"
+    # Still open, or returned with no measured latency -> unmeasured, which is
+    # not the same claim as naming how the episode actually ended.
+    return _mirl_non_return_label(focus) or "\u2014"
 
 
 def _mirl_verified_return_count_text(projection: object) -> str:
     """How many episodes actually reached a verified RETURNED outcome.
 
-    Straight from the read model's ``native_outcome_counts``, which is built
-    over EVERY recorded episode rather than the 100-episode display window, and
-    which buckets integrity-degraded episodes separately -- so a degraded
-    episode that returned is not counted here.  Zero is a real answer and
-    renders as "0", never as unavailable.
+    Counted from the episode rows this surface is showing, by the SAME rule the
+    evidence table uses, so the tile cannot contradict the column beneath it.
+
+    ``native_outcome_counts`` is deliberately NOT used here: it buckets any
+    integrity-degraded episode as DEGRADED rather than RETURNED, which on
+    current evidence reported 1 verified return while the table listed 26 real
+    ones.  It stays as the fallback when no rows are present, so an empty
+    capped list can never read as "no returns" when the read model knows
+    better.
+
+    Caveat inherited from the row list: it is capped at
+    MAX_RECENTLY_CLOSED_EPISODES (100).  Below that -- 56 episodes today --
+    this is the true total.  Zero is a real answer and renders as "0".
     """
 
+    episodes = _mirl_projection_episodes(projection)
+    if episodes:
+        return str(
+            sum(
+                1
+                for row in episodes
+                if _mirl_recovered(getattr(row, "final_outcome", None))
+            )
+        )
     counts = getattr(projection, "native_outcome_counts", None)
     getter = getattr(counts, "get", None)
     if not callable(getter):
@@ -2853,19 +3216,169 @@ def _mirl_verified_return_count_text(projection: object) -> str:
     return str(value) if _mirl_is_number(value) and isinstance(value, int) else "\u2014"
 
 
-def _mirl_mean_recovery_text(projection: object) -> str:
-    """Mean stable-recovery latency, as prepared by the read model.
+def _mirl_day_label(row: object) -> str:
+    """The UTC day an episode opened, as ``31 Aug 2026``.
 
-    Not averaged here: the launcher only receives the capped recent-episode
-    window, so a mean taken on this side would silently be "mean of the last
-    100" wearing the label "mean of all".  Reads unavailable while the
-    projection is integrity-degraded, because MYELIN does not publish a mean
-    over degraded evidence.
+    The episode's display id already carries this date (EPI-DDMMYYYY-NN), but
+    reading it off the id would be parsing a presentation string; this reads
+    the recorded stamp instead.  An unreadable stamp is named as such rather
+    than silently grouped with a real day.
     """
 
-    return _mirl_latency(
-        getattr(projection, "average_stable_recovery_latency_seconds", None)
+    moment = _mirl_parse_any_utc(getattr(row, "started_at", None))
+    return moment.strftime("%d %b %Y") if moment else "Date unavailable"
+
+
+def _mirl_day_heading(day: str, count: int) -> QWidget:
+    """One date separator above the episodes recorded on that day."""
+
+    host = QWidget()
+    host.setObjectName("plainBox")
+    row = QHBoxLayout(host)
+    row.setContentsMargins(2, 0, 2, 0)
+    row.setSpacing(10)
+    row.addWidget(label(day, 12.5, 700, "cyan", spacing=1.4, upper=True))
+    row.addWidget(
+        label(f"{count} episode(s)" if count != 1 else "1 episode", 11, 400, "muted")
     )
+    row.addStretch(1)
+    return host
+
+
+def _glass_episode_picker() -> QComboBox:
+    """The Event Timeline's episode chooser, styled like the glass overlay.
+
+    Built with a per-instance stylesheet plus ``_remember_retheme`` rather than
+    a QSS rule, because ``theme.py`` styles only the Control page's profile
+    combo and this one lives inside the dashboard overlay.
+    """
+
+    box = QComboBox()
+    box.setObjectName("mirlEpisodePicker")
+    box.setFont(make_font(11.5, 600))
+    box.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+    box.setAccessibleName("Choose which episode's timeline to show")
+
+    def _retheme(tokens) -> None:
+        box.setStyleSheet(
+            f"QComboBox#mirlEpisodePicker {{ background: {tokens.surface_soft};"
+            f" color: {tokens.text_primary}; border: 1px solid {tokens.border};"
+            f" border-radius: {RADIUS_SM}px; padding: 6px 10px; }}"
+            f"QComboBox#mirlEpisodePicker:hover {{ border-color: {tokens.cyan_dim}; }}"
+            f"QComboBox#mirlEpisodePicker::drop-down {{ border: none; width: 18px; }}"
+            f"QComboBox#mirlEpisodePicker QAbstractItemView {{"
+            f" background: {tokens.surface}; color: {tokens.text_primary};"
+            f" border: 1px solid {tokens.border};"
+            f" selection-background-color: {tokens.surface_soft};"
+            f" selection-color: {tokens.cyan}; outline: none; }}"
+        )
+
+    _retheme(DEFAULT_THEME)
+    _remember_retheme(box, _retheme)
+    return box
+
+
+def _mirl_projection_episodes(projection: object) -> tuple:
+    """Every episode row a projection carries, active first."""
+
+    return tuple(getattr(projection, "active_episodes", ()) or ()) + tuple(
+        getattr(projection, "recently_closed_episodes", ()) or ()
+    )
+
+
+def _mirl_worst_drift_text(projection: object) -> str:
+    """The longest single drift MYELIN has sound evidence for.
+
+    The read model's ``worst_return_latency_seconds``: the maximum
+    verified-return latency across EVERY recorded episode, not the capped
+    window the launcher receives, so the launcher must not recompute it from
+    ``recently_closed_episodes``.
+
+    Rendered as a duration rather than raw seconds -- the worst case runs to
+    tens of minutes, and "1951.1s" is not a readable answer to "how long was
+    my worst drift".  Unavailable until at least one episode has a measured
+    verified return; an episode that never returned has no return latency at
+    all and can never be the worst *return*.
+    """
+
+    prepared = getattr(projection, "worst_return_latency_seconds", None)
+    candidates = [prepared] if _mirl_is_number(prepared) else []
+    # Measured the SAME way the evidence table measures each row, so the tile
+    # can never contradict the column it summarises.  Without this the tile
+    # read 10m 47s -- the single episode the read model still measures --
+    # while the table plainly showed a 32m 29s drift two rows down.
+    for row in _mirl_projection_episodes(projection):
+        if not _mirl_recovered(getattr(row, "final_outcome", None)):
+            continue
+        seconds = _mirl_measured_return_latency(row)
+        if seconds is not None:
+            candidates.append(seconds)
+    return _mirl_duration(max(candidates)) if candidates else _mirl_duration(None)
+
+
+#: Distinct issue kinds listed in the Data Quality digest before it stops.
+#: This bounds DISTINCT kinds, not occurrences -- every occurrence is still
+#: counted into its kind, so no total is ever hidden by the cap.
+_MIRL_ISSUE_DIGEST_KINDS: Final = 12
+
+
+def _mirl_issue_digest(
+    issues: object,
+    exclusions: object,
+    *,
+    limit: int = _MIRL_ISSUE_DIGEST_KINDS,
+) -> str:
+    """One counted line per DISTINCT integrity issue, worst offender first.
+
+    Real evidence repeats the same issue across hundreds of events: a single
+    malformed-timestamp writer produced 276 identical
+    ``INVALID_WALL_TIMESTAMP`` lines here.  Printing them one per line said
+    nothing 276 lines could that one counted line cannot, and buried every
+    other finding in the panel.
+
+    Grouping also stops the previous truncation from misleading.  Listing the
+    first 40 occurrences reported "40" of something there were 276 of; the
+    count here is the TRUE total for that kind, and the cap applies only to
+    how many distinct KINDS are listed.
+    """
+
+    grouped: dict[tuple[str, str, str], int] = {}
+
+    for issue in tuple(issues or ()):
+        key = (
+            _mirl_text(getattr(getattr(issue, "severity", None), "value", None)),
+            _mirl_text(getattr(issue, "code", None)),
+            _mirl_text(getattr(issue, "detail", None)),
+        )
+        grouped[key] = grouped.get(key, 0) + 1
+
+    for item in tuple(exclusions or ()):
+        key = (
+            "EXCLUDED",
+            _mirl_text(getattr(item, "metric", None)),
+            _mirl_text(getattr(item, "reason", None)),
+        )
+        grouped[key] = grouped.get(key, 0) + 1
+
+    if not grouped:
+        return "No integrity issue or metric exclusion was recorded."
+
+    # Worst offender first, then alphabetical so equal counts stay stable
+    # across refreshes instead of shuffling under the reader.
+    ranked = sorted(grouped.items(), key=lambda pair: (-pair[1], pair[0][1], pair[0][2]))
+    lines = [
+        f"[{severity}] {code}"
+        + (f" \u00d7{count}" if count > 1 else "")
+        + f" \u2014 {detail}"
+        for (severity, code, detail), count in ranked[:limit]
+    ]
+    if len(ranked) > limit:
+        remaining = sum(count for _, count in ranked[limit:])
+        lines.append(
+            f"\u2026 and {len(ranked) - limit} more kinds "
+            f"({remaining} occurrences) not listed here."
+        )
+    return "\n".join(lines)
 
 
 def _mirl_state(projection: object) -> str:
@@ -3091,6 +3604,12 @@ class LiveMirlShowcasePage(QWidget):
         self._refreshing = False
         self._failed = False
         self._banner: QFrame | None = None
+        # The SINE timer's own figure label, refreshed in place once a second
+        # between engine ticks; ``_sine_timer_measured`` tracks whether it is
+        # currently showing a real value, so the tick knows when a full tile
+        # rebuild (colour and figure size change) is actually required.
+        self._sine_timer_label: QLabel | None = None
+        self._sine_timer_measured = False
 
         # Live engine signal (ruling 3.1/4.2) -- independent of the
         # projection refresh lane. See MirlAuthority.live_view() /
@@ -3263,7 +3782,11 @@ class LiveMirlShowcasePage(QWidget):
         self._render_journey(state, focus)
         self._render_outcomes(focus)
 
-        wants_tick = state == MIRL_STATE_ACTIVE
+        # Two readouts share the per-second tick now: the open-episode
+        # "Open for ..." line and the SINE timer.  Either alone is reason to
+        # keep it running.  ``_render_outcomes`` ran just above, so
+        # ``_sine_timer_measured`` is current.
+        wants_tick = state == MIRL_STATE_ACTIVE or self._sine_timer_measured
         if wants_tick and not self._elapsed_timer.isActive():
             self._elapsed_timer.start()
         elif not wants_tick and self._elapsed_timer.isActive():
@@ -3418,8 +3941,9 @@ class LiveMirlShowcasePage(QWidget):
             ("Return Latency", _mirl_return_latency_text(focus)),
             ("SINE Timer", self._sine_timer_text()),
             ("Verified Returns", _mirl_verified_return_count_text(self._projection)),
-            ("Stable Recovery", _mirl_mean_recovery_text(self._projection)),
+            ("Worst Drift", _mirl_worst_drift_text(self._projection)),
         )
+        self._sine_timer_label = None
         for column, (caption, value) in enumerate(values):
             measured = value != "\u2014"
             cell = showcase_metric_stat(
@@ -3432,24 +3956,50 @@ class LiveMirlShowcasePage(QWidget):
                 size=22.0 if len(value) <= 8 else 15.0,
                 number_role=None if measured else "muted",
             )
+            if caption == "SINE Timer":
+                self._sine_timer_label = getattr(cell, "figure_label", None)
+                self._sine_timer_measured = measured
             self._outcome_host.addWidget(cell, 0, column)
             self._outcome_host.setColumnStretch(column, 1)
             _retheme_subtree(cell)
 
     def _tick_elapsed(self) -> None:
-        """Retitle the open-episode readout in place; never rebuild on a tick."""
+        """Retitle the per-second readouts in place.
 
-        if self._effective_state()[0] != MIRL_STATE_ACTIVE:
-            self._elapsed_timer.stop()
-            return
+        Two share this tick: the open-episode "Open for ..." line and the SINE
+        timer.  The ONE case that rebuilds is the SINE timer crossing between a
+        real value and unavailable -- that changes the tile's colour and figure
+        size, which ``setText`` alone cannot carry.
+        """
+
         if not self.isVisible():
             return
-        banner = self._banner
-        detail = getattr(banner, "detail_label", None) if banner is not None else None
-        if detail is None:
-            return
-        focus = self._effective_focus()
-        detail.setText(f"Open for {_mirl_elapsed(getattr(focus, 'started_at', None))}")
+
+        active = self._effective_state()[0] == MIRL_STATE_ACTIVE
+
+        timer_text = self._sine_timer_text()
+        timer_measured = timer_text != "\u2014"
+        if timer_measured != self._sine_timer_measured:
+            # SINE just started, ended, or its signal went stale.
+            self._render_outcomes(self._effective_focus())
+        elif self._sine_timer_label is not None:
+            try:
+                self._sine_timer_label.setText(timer_text)
+            except RuntimeError:
+                # The tile was rebuilt underneath us; the next render re-binds.
+                self._sine_timer_label = None
+
+        if active:
+            banner = self._banner
+            detail = getattr(banner, "detail_label", None) if banner is not None else None
+            if detail is not None:
+                focus = self._effective_focus()
+                detail.setText(
+                    f"Open for {_mirl_elapsed(getattr(focus, 'started_at', None))}"
+                )
+
+        if not active and not timer_measured:
+            self._elapsed_timer.stop()
 
     def hideEvent(self, event) -> None:  # noqa: N802
         # Nothing off-screen needs a per-second readout.
@@ -3458,7 +4008,7 @@ class LiveMirlShowcasePage(QWidget):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        if self._effective_state()[0] == MIRL_STATE_ACTIVE:
+        if self._effective_state()[0] == MIRL_STATE_ACTIVE or self._sine_timer_measured:
             self._elapsed_timer.start()
 
     # -- journey card ---------------------------------------------------------
@@ -3584,6 +4134,12 @@ class LiveMirlDashboardDialog(QWidget):
         # alone is ~550 journey nodes on real evidence, and paying for four
         # hidden tabs would stall the open.
         self._dirty_tabs: set = set()
+        # Event Timeline is no longer locked to the newest episode.  Empty means
+        # "follow the focus episode"; otherwise it holds the chosen episode_id.
+        # ``_timeline_rebuilding`` suppresses the combo's own change signal while
+        # the list is being repopulated, which would otherwise re-enter render.
+        self._timeline_selection: str = ""
+        self._timeline_rebuilding = False
 
         # Mirrors LiveMirlShowcasePage's live engine snapshot -- forwarded by
         # the page on every update via apply_live_view(), not read directly
@@ -3789,13 +4345,88 @@ class LiveMirlDashboardDialog(QWidget):
         self._subline_exclusions = label("Exclusions: \u2014", 11, 400, "muted")
         row.addWidget(self._subline_exclusions)
         row.addStretch(1)
-        row.addWidget(showcase_outline_button("Export MIRL Report", small=True))
+        self._export_button = showcase_outline_button("Export MIRL Report", small=True)
+        self._export_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._export_button.clicked.connect(self._export_report)
+        row.addWidget(self._export_button)
 
         sub.setStyleSheet(
             f"QFrame#mirlDashboardSubline {{ background: transparent;"
             f" border-bottom: 1px solid {_white_alpha(0.07)}; }}"
         )
         return sub
+
+    #: How long the export button reports its outcome before returning to its
+    #: normal label.
+    _EXPORT_FEEDBACK_MS: Final = 4000
+
+    def _export_report(self) -> None:
+        """Offer the two formats and write only the one chosen.
+
+        A menu rather than two buttons: the formats answer different questions
+        (a report to read, an archive to query) and are never both wanted at
+        once, so the subline keeps one control instead of growing a second.
+        """
+
+        tokens = live_tokens()
+        menu = QMenu(self._export_button)
+        menu.setObjectName("mirlExportMenu")
+        menu.setFont(make_font(11.5, 600))
+        # Styled from the live tokens at popup time rather than through
+        # ``_remember_retheme``: the menu exists only while it is open, so it
+        # would never be reached by the shell's theme sweep anyway.
+        menu.setStyleSheet(
+            f"QMenu#mirlExportMenu {{ background: {tokens.surface};"
+            f" color: {tokens.text_primary}; border: 1px solid {tokens.border};"
+            f" border-radius: {RADIUS_SM}px; padding: 6px; }}"
+            f"QMenu#mirlExportMenu::item {{ padding: 8px 18px;"
+            f" border-radius: {RADIUS_SM}px; }}"
+            f"QMenu#mirlExportMenu::item:selected {{"
+            f" background: {qalpha(_showcase_colour('cyan', tokens), 0.16).name(QColor.NameFormat.HexArgb)};"
+            f" color: {tokens.cyan}; }}"
+        )
+        pdf_action = menu.addAction("PDF report  \u00b7  2 pages")
+        json_action = menu.addAction("JSON data  \u00b7  all five tabs")
+        button = self._export_button
+        chosen = menu.exec(button.mapToGlobal(QPoint(0, button.height() + 4)))
+        if chosen is pdf_action:
+            self._write_export("pdf")
+        elif chosen is json_action:
+            self._write_export("json")
+
+    def _write_export(self, output_format: str) -> None:
+        """Write one export and report the outcome on the button itself.
+
+        Run on the GUI thread deliberately: the whole export measures ~130ms on
+        real evidence (read and project 81ms, PDF 28ms, JSON 22ms), so a worker
+        thread would add failure modes to hide a delay nobody can perceive.
+
+        Failure is reported rather than swallowed -- an export that silently
+        does nothing is worse than one that says it failed.
+        """
+
+        from PERSISTENCE.storage import export_mirl_report
+
+        button = self._export_button
+        button.setEnabled(False)
+        button.setText("EXPORTING\u2026")
+        try:
+            written = export_mirl_report(output_format)
+        except Exception as error:  # export must never take the dashboard down
+            print(f"[MYELIN][EXPORT] MIRL {output_format} failed: {error!r}", flush=True)
+            button.setText("EXPORT FAILED")
+        else:
+            print(f"[MYELIN][EXPORT] MIRL {output_format} written: {written}", flush=True)
+            button.setText(f"{output_format.upper()} SAVED TO DOWNLOADS")
+        QTimer.singleShot(self._EXPORT_FEEDBACK_MS, self._restore_export_button)
+
+    def _restore_export_button(self) -> None:
+        try:
+            self._export_button.setText("EXPORT MIRL REPORT")
+            self._export_button.setEnabled(True)
+        except RuntimeError:
+            # The dashboard was torn down while the label was still reverting.
+            return
 
     def _build_tabbar(self) -> QWidget:
         bar = QFrame()
@@ -3915,7 +4546,23 @@ class LiveMirlDashboardDialog(QWidget):
 
     def _build_timeline_tab(self) -> QWidget:
         page, lay = self._tab_page()
-        self._timeline_host = lay
+
+        chooser = QHBoxLayout()
+        chooser.setSpacing(10)
+        chooser.addWidget(label("Episode", 11, 700, "muted", spacing=1.4, upper=True))
+        self._timeline_picker = _glass_episode_picker()
+        self._timeline_picker.currentIndexChanged.connect(self._timeline_episode_chosen)
+        chooser.addWidget(self._timeline_picker, 1)
+        lay.addLayout(chooser)
+        lay.addSpacing(16)
+
+        # The body is its own nested layout so clearing it on every render
+        # cannot take the chooser down with it.
+        body = QVBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        lay.addLayout(body)
+        self._timeline_host = body
         return page
 
     def _build_evidence_tab(self) -> QWidget:
@@ -4145,23 +4792,7 @@ class LiveMirlDashboardDialog(QWidget):
         lay.addLayout(stats)
         lay.addSpacing(18)
 
-        timeline = tuple(getattr(focus, "timeline", ()) or ())
-        latest = timeline[-1] if timeline else None
-        lay.addWidget(
-            showcase_kv_block(
-                f"Episode: {_mirl_text(getattr(focus, 'short_display_id', None))}\n"
-                f"State: {_mirl_text(getattr(focus, 'episode_status', None))}\n"
-                f"Latest Outcome: {_mirl_text(outcome, 'In Progress')}\n"
-                f"Source Event: {_mirl_text(getattr(focus, 'source_event_id', None))}\n"
-                f"Session: {_mirl_text(getattr(focus, 'session_id', None))}\n"
-                f"Application: {_mirl_text(getattr(focus, 'candidate_uid', None))}\n"
-                f"Opened: {_mirl_text(getattr(focus, 'started_at', None))}\n"
-                f"Latest Event: {_mirl_text(getattr(latest, 'event_name', None))}\n"
-                f"Recovery Attempts: {_mirl_text(getattr(focus, 'recovery_attempt_count', None))}\n"
-                f"Relapses: {_mirl_text(getattr(focus, 'relapse_count', None))}\n"
-                f"Integrity: {_mirl_text(getattr(getattr(focus, 'integrity_status', None), 'value', None))}"
-            )
-        )
+        lay.addWidget(showcase_episode_story(focus))
         lay.addStretch(1)
         _retheme_subtree(self._current_host.parentWidget())
 
@@ -4188,9 +4819,38 @@ class LiveMirlDashboardDialog(QWidget):
             )
         lay.addWidget(label(caption, 12, 400, "muted", wrap=True))
         lay.addSpacing(14)
-        for index, row in enumerate(episodes):
+
+        # Open episodes are listed first under their own heading rather than
+        # folded into their calendar day.  An episode can stay open past
+        # midnight -- the open one here opened a day before the newest closed
+        # one -- so grouping it by date would push a day heading out of order
+        # and print that day twice.
+        per_day: dict[str, int] = {}
+        for row in closed:
+            day = _mirl_day_label(row)
+            per_day[day] = per_day.get(day, 0) + 1
+
+        index = 0
+        if active:
+            lay.addWidget(_mirl_day_heading("Open now", len(active)))
+            lay.addSpacing(10)
+            for row in active:
+                lay.addWidget(self._history_card(row, expanded=index < drawn))
+                lay.addSpacing(12)
+                index += 1
+
+        current_day = None
+        for row in closed:
+            day = _mirl_day_label(row)
+            if day != current_day:
+                if current_day is not None or active:
+                    lay.addSpacing(10)
+                current_day = day
+                lay.addWidget(_mirl_day_heading(day, per_day[day]))
+                lay.addSpacing(10)
             lay.addWidget(self._history_card(row, expanded=index < drawn))
             lay.addSpacing(12)
+            index += 1
         lay.addStretch(1)
 
     def _history_card(self, row: object, *, expanded: bool) -> QFrame:
@@ -4272,10 +4932,65 @@ class LiveMirlDashboardDialog(QWidget):
         _retheme_subtree(card)
         return card
 
+    def _timeline_episode_chosen(self, index: int) -> None:
+        if self._timeline_rebuilding:
+            return
+        self._timeline_selection = str(self._timeline_picker.itemData(index) or "")
+        self._render_timeline_body()
+
+    def _timeline_episode(self):
+        """The episode the timeline is showing: the chosen one, else the focus."""
+
+        if self._timeline_selection:
+            for row in self._episodes_flat():
+                if str(getattr(row, "episode_id", "")) == self._timeline_selection:
+                    return row
+        return self._focus()
+
+    def _episodes_flat(self) -> tuple:
+        active, closed = self._episodes()
+        return (*active, *closed)
+
     def _render_timeline(self) -> None:
+        self._rebuild_timeline_picker()
+        self._render_timeline_body()
+
+    def _rebuild_timeline_picker(self) -> None:
+        """Refill the chooser, keeping the user's pick if that episode survives."""
+
+        picker = self._timeline_picker
+        episodes = self._episodes_flat()
+        self._timeline_rebuilding = True
+        try:
+            picker.clear()
+            for row in episodes:
+                outcome = _mirl_text(getattr(row, "final_outcome", None), "In Progress")
+                events = len(tuple(getattr(row, "timeline", ()) or ()))
+                picker.addItem(
+                    f"{_mirl_day_label(row)}  \u00b7  "
+                    f"{_mirl_text(getattr(row, 'short_display_id', None))}  \u00b7  "
+                    f"{outcome}  \u00b7  {events} event(s)",
+                    str(getattr(row, "episode_id", "")),
+                )
+            picker.setEnabled(bool(episodes))
+            wanted = self._timeline_selection or str(
+                getattr(self._focus(), "episode_id", "") or ""
+            )
+            index = picker.findData(wanted)
+            if index < 0:
+                # The chosen episode fell out of the projection; fall back to
+                # following the focus again rather than showing a stale pick.
+                self._timeline_selection = ""
+                index = 0 if episodes else -1
+            if index >= 0:
+                picker.setCurrentIndex(index)
+        finally:
+            self._timeline_rebuilding = False
+
+    def _render_timeline_body(self) -> None:
         _clear_layout(self._timeline_host)
         lay = self._timeline_host
-        focus = self._focus()
+        focus = self._timeline_episode()
         timeline = tuple(getattr(focus, "timeline", ()) or ()) if focus is not None else ()
         if not timeline:
             lay.addWidget(label("No authoritative event to show.", 12, 400, "muted"))
@@ -4341,14 +5056,22 @@ class LiveMirlDashboardDialog(QWidget):
             cells = (
                 str(index + 1),
                 _mirl_text(getattr(row, "short_display_id", None)),
-                _mirl_duration(getattr(row, "stable_recovery_latency_seconds", None)),
-                _mirl_stamp(getattr(timeline[-1], "occurred_at", None))
-                if timeline and recovered
+                # Time Distracted is the moment SINE-1 displayed, i.e. when
+                # MYELIN first told you that you had drifted.  Clock only: the
+                # date already rides the Episode ID (EPI-DDMMYYYY-NN).
+                _mirl_clock_utc(getattr(row, "started_at", None)),
+                # Time Recovered is when the return was VERIFIED, so that this
+                # column minus the one before it IS the Return Latency column.
+                _mirl_clock_utc(_mirl_recovered_at(row))
+                if recovered
                 else _MIRL_UNAVAILABLE,
                 _mirl_highest_sine(row),
-                _mirl_stamp(getattr(row, "started_at", None)),
-                _mirl_text(getattr(row, "candidate_uid", None), _MIRL_UNAVAILABLE),
-                _mirl_duration(getattr(row, "verified_return_latency_seconds", None)),
+                # The trigger's OWN fire time, not the episode's start: SINE-1
+                # follows about three seconds later, and this column used to
+                # show that later instant under the trigger's name.
+                _mirl_clock_utc_seconds(getattr(row, "trigger_fired_at", None)),
+                _mirl_application_text(row),
+                _mirl_evidence_return_latency(row, recovered),
             )
             for column, value in enumerate(cells):
                 table.setItem(index, column, QTableWidgetItem(value))
@@ -4431,21 +5154,9 @@ class LiveMirlDashboardDialog(QWidget):
                 label("No integrity issue or metric exclusion was recorded.", 12, 400, "muted")
             )
         else:
-            lines = [
-                f"[{_mirl_text(getattr(getattr(issue, 'severity', None), 'value', None))}] "
-                f"{_mirl_text(getattr(issue, 'code', None))} \u2014 "
-                f"{_mirl_text(getattr(issue, 'detail', None))}"
-                for issue in issues[:40]
-            ]
-            lines += [
-                f"[EXCLUDED] {_mirl_text(getattr(item, 'metric', None))} \u2014 "
-                f"{_mirl_text(getattr(item, 'reason', None))}"
-                for item in exclusions[:40]
-            ]
-            hidden = max(0, len(issues) - 40) + max(0, len(exclusions) - 40)
-            if hidden:
-                lines.append(f"\u2026 and {hidden} more not listed here.")
-            third_body.addWidget(showcase_kv_block("\n".join(lines)))
+            third_body.addWidget(
+                showcase_kv_block(_mirl_issue_digest(issues, exclusions))
+            )
         lay.addWidget(third)
 
         lay.addStretch(1)
