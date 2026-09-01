@@ -25,7 +25,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from statistics import fmean
@@ -43,7 +43,14 @@ from MIRL.mirl import (
 
 MIRL_READ_MODEL_VERSION: Final = "myelin-mirl-read-model-v1"
 NANOSECONDS_PER_SECOND: Final = 1_000_000_000
-MAX_RECENTLY_CLOSED_EPISODES: Final = 50
+MAX_RECENTLY_CLOSED_EPISODES: Final = 100
+# Display-only outcome for an episode that provably never closed.  It is NOT
+# a MirlEvent reason and NOT a member of EpisodeOutcome -- no episode_closed
+# event ever carried it.  It exists solely so Live MIRL stops presenting a
+# provably abandoned episode as if it were still running.  Aggregate MIRL
+# truth (outcome_counts, Metric Hub, Science Lab) still counts these rows as
+# PENDING, which is what the event evidence actually supports.
+ABANDONED_DISPLAY_OUTCOME: Final = "NOT_RETURNED"
 
 
 class IntegrityStatus(str, Enum):
@@ -198,6 +205,13 @@ class LiveMirlProjection:
     status_message: str
     integrity_status: IntegrityStatus
     integrity_issues: tuple[IntegrityIssue, ...]
+    #: Mean stable-recovery latency over the SAME eligible population Metric
+    #: Hub uses (``_eligible_rows`` + ``_stable_recovery_latencies``), so the
+    #: two surfaces cannot report different averages.  ``None`` whenever the
+    #: projection is degraded or no RETURNED episode carries a latency -- the
+    #: UI must render that as unavailable, never as zero.  Defaulted so an
+    #: older construction site fails safe to "unavailable".
+    average_stable_recovery_latency_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +355,8 @@ class MirlReadAuthority:
             rows.append(row)
             exclusions.extend(episode_exclusions)
             global_issues.extend(row.integrity_issues)
+
+        rows = _apply_display_masks(rows)
 
         rows.sort(
             key=lambda item: (
@@ -925,18 +941,10 @@ class MirlReadAuthority:
         issues: Sequence[IntegrityIssue],
         provenance: ResearchProvenance,
     ) -> MetricHubProjection:
-        eligible = (
-            [row for row in rows if row.integrity_status is IntegrityStatus.CONFIRMED]
-            if status is IntegrityStatus.CONFIRMED
-            else []
-        )
+        eligible = _eligible_rows(rows, status)
         closed = [row for row in eligible if row.final_outcome is not None]
         returned = [row for row in eligible if row.final_outcome == "RETURNED"]
-        latencies = tuple(
-            row.stable_recovery_latency_seconds
-            for row in returned
-            if row.stable_recovery_latency_seconds is not None
-        )
+        latencies = _stable_recovery_latencies(eligible)
         closure_rate = _percentage(len(closed), len(eligible))
         recovery_rate = _percentage(len(returned), len(eligible))
         available = bool(rows)
@@ -979,17 +987,48 @@ class MirlReadAuthority:
         status: IntegrityStatus,
         issues: Sequence[IntegrityIssue],
     ) -> LiveMirlProjection:
-        active = tuple(row for row in rows if row.final_outcome is None)
-        closed = tuple(row for row in rows if row.final_outcome is not None)[
-            :MAX_RECENTLY_CLOSED_EPISODES
-        ]
+        # MIRL never has more than one open episode at a time.  Among rows
+        # with no episode_closed event, only the one with the latest
+        # started_at can possibly still be genuinely open -- any earlier
+        # unresolved episode is provably abandoned, because a later episode
+        # could not have started while it was still open.  This
+        # reclassification is display-scope only (LiveMirlProjection);
+        # outcome_counts, Metric Hub and Science Lab are intentionally left
+        # untouched, so these rows still count as PENDING there.
+        unresolved = [row for row in rows if row.final_outcome is None]
+        still_open_id = (
+            max(unresolved, key=lambda row: (row.started_at, row.episode_id)).episode_id
+            if unresolved
+            else None
+        )
+
+        active_rows: list[LiveMirlEpisodeRow] = []
+        closed_rows: list[LiveMirlEpisodeRow] = []
+        for row in rows:  # rows is already recency-sorted by this point
+            if row.final_outcome is not None:
+                closed_rows.append(row)
+            elif row.episode_id == still_open_id:
+                active_rows.append(row)
+            else:
+                closed_rows.append(replace(row, final_outcome=ABANDONED_DISPLAY_OUTCOME))
+
+        active = tuple(active_rows)
+        closed = tuple(closed_rows[:MAX_RECENTLY_CLOSED_EPISODES])
         available = bool(rows)
+        # Averaged over the FULL eligible population, deliberately not over
+        # ``closed`` -- that tuple is capped at MAX_RECENTLY_CLOSED_EPISODES
+        # for display, and a mean of the visible 100 presented as the mean of
+        # all would be a wrong number wearing a right label.
+        live_latencies = _stable_recovery_latencies(_eligible_rows(rows, status))
         return LiveMirlProjection(
             available=available,
             metadata=metadata,
             active_episodes=active,
             recently_closed_episodes=closed,
             native_outcome_counts=_freeze_mapping(outcome_counts),
+            average_stable_recovery_latency_seconds=(
+                fmean(live_latencies) if live_latencies else None
+            ),
             evidence_availability=_freeze_mapping(
                 {
                     "native_mirl_events": available,
@@ -1014,18 +1053,10 @@ class MirlReadAuthority:
         issues: Sequence[IntegrityIssue],
         provenance: ResearchProvenance,
     ) -> ScienceLabProjection:
-        eligible = (
-            [row for row in rows if row.integrity_status is IntegrityStatus.CONFIRMED]
-            if status is IntegrityStatus.CONFIRMED
-            else []
-        )
+        eligible = _eligible_rows(rows, status)
         returned = [row for row in eligible if row.final_outcome == "RETURNED"]
         closed = [row for row in eligible if row.final_outcome is not None]
-        latencies = tuple(
-            row.stable_recovery_latency_seconds
-            for row in returned
-            if row.stable_recovery_latency_seconds is not None
-        )
+        latencies = _stable_recovery_latencies(eligible)
         recovery_rate = _percentage(len(returned), len(eligible))
         closure_rate = _percentage(len(closed), len(eligible))
         metric_integrity = (
@@ -1222,6 +1253,35 @@ def _status_message(status: IntegrityStatus, available: bool) -> str:
     return "INTEGRITY-CONFIRMED MIRL EVIDENCE"
 
 
+def _eligible_rows(
+    rows: Sequence[LiveMirlEpisodeRow], status: IntegrityStatus
+) -> list[LiveMirlEpisodeRow]:
+    """The integrity-confirmed rows rates and means may be built from.
+
+    A projection that is not itself CONFIRMED yields NOTHING: MYELIN does not
+    publish a rate or a mean derived from degraded evidence.  Metric Hub,
+    Science Lab and Live MIRL all go through here so the three surfaces can
+    never drift into disagreeing about which episodes count.
+    """
+
+    if status is not IntegrityStatus.CONFIRMED:
+        return []
+    return [row for row in rows if row.integrity_status is IntegrityStatus.CONFIRMED]
+
+
+def _stable_recovery_latencies(
+    rows: Sequence[LiveMirlEpisodeRow],
+) -> tuple[float, ...]:
+    """Stable-recovery latencies of the RETURNED episodes among ``rows``."""
+
+    return tuple(
+        row.stable_recovery_latency_seconds
+        for row in rows
+        if row.final_outcome == "RETURNED"
+        and row.stable_recovery_latency_seconds is not None
+    )
+
+
 def _outcome_counts(rows: Sequence[LiveMirlEpisodeRow]) -> dict[str, int]:
     counts = {"RETURNED": 0, "EMERGENCY": 0, "PENDING": 0, "DEGRADED": 0}
     for row in rows:
@@ -1258,8 +1318,59 @@ def _percentage(numerator: int, denominator: int) -> float | None:
 
 
 def _short_episode_id(episode_id: str) -> str:
+    """Fallback display id for an episode whose open date cannot be read.
+
+    Every episode with a well-formed ``started_at`` is re-masked by
+    :func:`_apply_display_masks` as ``EPI-DDMMYYYY-NN``.  This opaque form
+    survives only where the opening wall timestamp is malformed -- which is
+    already an ``INVALID_WALL_TIMESTAMP`` integrity issue -- so a broken
+    timestamp degrades the label instead of the projection.
+    """
+
     tail = episode_id.rsplit("-", 1)[-1][:8].upper()
     return f"MIRL-{tail}" if tail else "MIRL-UNKNOWN"
+
+
+def _open_date_key(started_at: str) -> str | None:
+    """``DDMMYYYY`` of the UTC date an episode OPENED, or None if unreadable."""
+
+    if not _valid_utc_timestamp(started_at):
+        return None
+    opened = datetime.fromisoformat(started_at[:-1] + "+00:00").astimezone(timezone.utc)
+    return f"{opened.day:02d}{opened.month:02d}{opened.year:04d}"
+
+
+def _apply_display_masks(
+    rows: Sequence[LiveMirlEpisodeRow],
+) -> list[LiveMirlEpisodeRow]:
+    """Stamp each row with its ``EPI-DDMMYYYY-NN`` daily-global sequence mask.
+
+    ``NN`` is the episode's position among all episodes that OPENED on the
+    same UTC date, ordered by ``started_at``.  The opening date is used
+    deliberately: an episode opened at 23:58 and closed at 00:04 the next day
+    keeps the opening date's mask, and a mask is never recomputed once the
+    episode's own ``started_at`` is fixed.  ``episode_id`` breaks any
+    ``started_at`` tie, matching the tie-break the recency sort already uses.
+
+    Rows are frozen, so masks are stamped with ``dataclasses.replace``.  Input
+    order is preserved; the caller's recency sort still runs afterwards.
+    """
+
+    ordered = sorted(rows, key=lambda row: (row.started_at, row.episode_id))
+    daily_counts: dict[str, int] = defaultdict(int)
+    masks: dict[str, str] = {}
+    for row in ordered:
+        date_key = _open_date_key(row.started_at)
+        if date_key is None:
+            continue
+        daily_counts[date_key] += 1
+        masks[row.episode_id] = f"EPI-{date_key}-{daily_counts[date_key]:02d}"
+    return [
+        replace(row, short_display_id=masks[row.episode_id])
+        if row.episode_id in masks
+        else row
+        for row in rows
+    ]
 
 
 def _range_label(start: str | None, end: str | None) -> str:

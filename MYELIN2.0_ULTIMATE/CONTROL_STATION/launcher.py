@@ -52,7 +52,7 @@ if __package__ in (None, ""):
         sys.path.insert(0, _project_root_text)
 
     __package__ = "CONTROL_STATION"
-from datetime import datetime
+from datetime import datetime, timezone
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Final
@@ -104,6 +104,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QStackedWidget,
     QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -1283,6 +1284,41 @@ _SHOWCASE_METRIC_DONUT: Final = (
 )
 
 
+#: The tokens in force right now.  ``_apply_theme`` keeps this in step on
+#: every world change, mirroring ``animation.set_active_theme``.  It exists so
+#: a fixture rebuilt BETWEEN world changes (Live MIRL rebuilds on every
+#: projection) starts on the live world instead of the default one.
+_LIVE_TOKENS = DEFAULT_THEME
+
+
+def _set_live_tokens(tokens) -> None:
+    global _LIVE_TOKENS
+    _LIVE_TOKENS = tokens
+
+
+def live_tokens():
+    """The theme a newly constructed launcher fixture should start from."""
+
+    return _LIVE_TOKENS
+
+
+def _retheme_subtree(root: QWidget) -> None:
+    """Bring one freshly built subtree onto the live world.
+
+    Same closure contract as ``_apply_theme``'s sweep, applied to one branch
+    instead of the whole shell.
+    """
+
+    tokens = live_tokens()
+    for widget in (root, *root.findChildren(QWidget)):
+        retheme = getattr(widget, "_retheme", None)
+        if callable(retheme):
+            retheme(tokens)
+        apply_theme = getattr(widget, "apply_theme", None)
+        if callable(apply_theme):
+            apply_theme(tokens)
+
+
 def _remember_retheme(widget: QWidget, retheme: Callable[[object], None]) -> None:
     """Attach a per-widget theme-refresh closure for the launcher's sweep.
 
@@ -1926,16 +1962,6 @@ class MetricHubShowcasePage(QWidget):
 
 
 #: mockup ``journeySteps`` -- (index, name, pill role, pill label, stamp label, stamp)
-_SHOWCASE_MIRL_JOURNEY: Final = (
-    (1, "Episode Started", "start", "Start", "Observed", "12:11:51"),
-    (2, "SINE Stage Opened", "active", "Active", "Observed", "12:11:51"),
-    (3, "SINE Stage Scheduled", "", "Scheduled", "Observed", "12:11:51"),
-    (4, "SINE Response Recorded", "evidence", "Evidence", "Observed", "12:11:58"),
-    (5, "SINE Stage Closed", "completed", "Completed", "Observed", "12:11:58"),
-    (6, "Break Accepted", "terminal", "Terminal", "Observed", "12:11:59"),
-    (7, "Episode Closed", "terminal", "Terminal", "Derived", "12:11:59"),
-)
-
 #: mockup ``cosinePlatformData`` and ``cosineEvents``
 _SHOWCASE_COSINE_PLATFORMS: Final = (
     ("Netflix", 3, "#F0444D"),
@@ -1976,11 +2002,19 @@ def showcase_journey_pill(role: str, text: str) -> QLabel:
 
     def _retheme(tokens) -> None:
         colour = _showcase_colour(_JOURNEY_PILL_ROLES.get(role, "muted"), tokens)
-        border = (
-            tokens.border
-            if role in ("", "terminal")
-            else qalpha(colour, 0.50).name(QColor.NameFormat.HexArgb)
-        )
+        # Mockup border rules, per class:
+        #   .journey-pill                -> var(--border)
+        #   .journey-pill.start/.active  -> var(--cyan-dim)   (a SOLID token)
+        #   .journey-pill.evidence       -> #A78BFA 50%
+        #   .journey-pill.completed      -> var(--green) 45%
+        #   .journey-pill.terminal       -> inherits var(--border)
+        if role in ("", "terminal"):
+            border = tokens.border
+        elif role in ("start", "active"):
+            border = tokens.cyan_dim
+        else:
+            alpha_percent = 0.45 if role == "completed" else 0.50
+            border = qalpha(colour, alpha_percent).name(QColor.NameFormat.HexArgb)
         pill.setStyleSheet(
             f"QLabel#showcaseJourneyPill {{ color: {colour.name()};"
             f" background: transparent; border: 1px solid {border};"
@@ -2138,8 +2172,15 @@ def showcase_episode_banner(
     ok: bool = False,
     outcome_muted: bool = False,
     status_size: float = 19.0,
+    detail: str = "",
 ) -> QFrame:
-    """``.episode-banner`` -- 8% tint, 30% border, status left, outcome right."""
+    """``.episode-banner`` -- 8% tint, 30% border, status left, outcome right.
+
+    ``detail`` adds one muted line under the status value and publishes it as
+    ``banner.detail_label`` so a live readout (Live MIRL's open-episode
+    elapsed time) can be retitled in place instead of rebuilding the banner
+    once a second.
+    """
 
     tone = _showcase_colour("green" if ok else "red")
     banner = QFrame()
@@ -2164,6 +2205,11 @@ def showcase_episode_banner(
         value.setFont(make_font(status_size, 700))
         value.setWordWrap(True)
         left.addWidget(value)
+    detail_label: QLabel | None = None
+    if detail:
+        detail_label = label(detail, 11.5, 400, "muted")
+        left.addWidget(detail_label)
+    banner.detail_label = detail_label  # noqa: SLF001 -- see docstring
     lay.addLayout(left)
     lay.addStretch(1)
 
@@ -2238,8 +2284,13 @@ def showcase_cta(text: str) -> QPushButton:
     button.setObjectName("showcaseCta")
     button.setFont(make_font(12, 700, spacing=0.8))
     button.setEnabled(False)
+    # ``.btn-cta svg`` -- the mockup puts a 12x12 play triangle before the
+    # label.  Qt has no inline SVG in a button, so the same glyph is painted
+    # once into a pixmap and re-painted on every world change.
+    button.setIconSize(QSize(12, 12))
 
     def _retheme(tokens) -> None:
+        button.setIcon(_showcase_play_icon(QColor(tokens.cyan)))
         hover_bg = qalpha(QColor(tokens.cyan), 0.10).name(QColor.NameFormat.HexArgb)
         pressed_bg = qalpha(QColor(tokens.cyan), 0.18).name(QColor.NameFormat.HexArgb)
         button.setStyleSheet(
@@ -2325,18 +2376,735 @@ def showcase_outline_button(text: str, *, small: bool = False) -> QPushButton:
     return button
 
 
+def _showcase_play_icon(colour: QColor) -> QIcon:
+    """``.btn-cta svg`` -- the 12x12 filled play triangle ``M6 4l14 8-14 8V4z``."""
+
+    pixmap = QPixmap(12, 12)
+    pixmap.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(colour)
+    triangle = QPainterPath()
+    # The mockup path is authored on a 24x24 viewBox; halve it for 12x12.
+    triangle.moveTo(3.0, 2.0)
+    triangle.lineTo(10.0, 6.0)
+    triangle.lineTo(3.0, 10.0)
+    triangle.closeSubpath()
+    painter.drawPath(triangle)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def _showcase_chevron_button(forward: bool) -> QPushButton:
+    """``.journey-nav button`` -- 26x26 bordered chevron beside the strip."""
+
+    button = QPushButton("\u203a" if forward else "\u2039")
+    button.setObjectName("showcaseJourneyNav")
+    button.setFixedSize(26, 26)
+    button.setFont(make_font(15, 700))
+    button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+
+    def _retheme(tokens) -> None:
+        button.setStyleSheet(
+            f"QPushButton#showcaseJourneyNav {{ background: {tokens.surface_soft};"
+            f" color: {tokens.muted}; border: 1px solid {tokens.border};"
+            f" border-radius: {RADIUS_SM}px; padding: 0px; }}"
+            f"QPushButton#showcaseJourneyNav:hover {{ color: {tokens.cyan};"
+            f" border-color: {tokens.cyan_dim}; }}"
+            f"QPushButton#showcaseJourneyNav:disabled {{ color: {tokens.border};"
+            f" border-color: {tokens.border}; }}"
+        )
+
+    _retheme(DEFAULT_THEME)
+    _remember_retheme(button, _retheme)
+    return button
+
+
+def _clear_layout(layout) -> None:
+    """Drop every child of one layout, recursing into nested layouts."""
+
+    while layout.count():
+        item = layout.takeAt(0)
+        widget = item.widget()
+        child = item.layout()
+        if widget is not None:
+            # hide() MUST come before setParent(None).  Reparenting a visible
+            # widget to no parent makes it a top-level window, and Qt then
+            # shows it as a real OS window -- captioned with the application
+            # name, because these fixtures set no window title -- on the next
+            # event-loop pass, well before deleteLater() collects it.  Live
+            # MIRL rebuilds these blocks on every projection and live-signal
+            # tick, so each tick spawned a fresh stack of blank "MYELIN
+            # Control Station" windows.  Hiding first latches the widget's
+            # hidden state so the orphan can never be shown.
+            widget.hide()
+            widget.setParent(None)
+            widget.deleteLater()
+        elif child is not None:
+            _clear_layout(child)
+
+
+# --------------------------------------------------------------------------
+# Live MIRL: one projection -> presentation
+#
+# Everything below reads a ``LiveMirlProjection`` prepared by
+# ``MIRL.read_model``.  Nothing here recomputes episode truth, re-derives an
+# outcome, or invents a journey node: an absent field renders as unavailable,
+# never as a completed step.
+# --------------------------------------------------------------------------
+
+#: The Live MIRL presentation states.  ``degraded`` is deliberately NOT one of
+#: them -- integrity is a MODIFIER layered over whichever state is showing.
+#: On real evidence most episodes carry an integrity issue, so degraded is the
+#: ORDINARY look on this surface and must never be styled as an alert.
+MIRL_STATE_ENTRY: Final = "entry"
+MIRL_STATE_EMPTY: Final = "empty"
+MIRL_STATE_IDLE: Final = "idle-with-history"
+MIRL_STATE_ACTIVE: Final = "active-episode"
+
+#: ``MirlEventName`` value -> (journey pill role, pill label).  Every name in
+#: MIRL's event contract is listed, so a real timeline never lands on the
+#: neutral fallback by accident; an unknown future name still degrades safely.
+_MIRL_EVENT_PILLS: Final = {
+    "trigger_prepared": ("", "Prepared"),
+    "first_display_timed_out": ("", "Timed Out"),
+    "first_display_rejected": ("", "Rejected"),
+    "episode_created": ("start", "Start"),
+    "sine_displayed": ("active", "Active"),
+    "sine_response_recorded": ("evidence", "Evidence"),
+    "return_intent_recorded": ("evidence", "Evidence"),
+    "sine_terminated": ("terminal", "Terminal"),
+    "return_verification_started": ("active", "Active"),
+    "return_unverified": ("", "Unverified"),
+    "return_verification_interrupted": ("", "Interrupted"),
+    "return_verification_completed": ("completed", "Completed"),
+    "return_verified": ("completed", "Completed"),
+    "closure_confirmation_started": ("active", "Active"),
+    "closure_confirmation_interrupted": ("", "Interrupted"),
+    "relapse_detected": ("", "Relapse"),
+    "episode_resumed": ("active", "Active"),
+    "closure_confirmation_completed": ("completed", "Completed"),
+    "episode_closed": ("terminal", "Terminal"),
+    "evidence_gap": ("", "Evidence Gap"),
+    "emergency_stopped": ("terminal", "Terminal"),
+}
+
+#: The one outcome meaning the user actually came back.  ABORTED, EMERGENCY,
+#: SESSION_ENDED and the read model's display-only NOT_RETURNED all closed
+#: WITHOUT a verified recovery and must never be painted as a success.
+_MIRL_RECOVERED_OUTCOME: Final = "RETURNED"
+
+_MIRL_UNAVAILABLE: Final = "Unavailable"
+_MIRL_NOT_RECORDED: Final = "Not Recorded"
+
+
+def _mirl_text(value: object, empty: str = "\u2014") -> str:
+    if value is None:
+        return empty
+    cleaned = " ".join(str(value).split())
+    return cleaned or empty
+
+
+def _mirl_parse_utc(value: object) -> "datetime | None":
+    """Parse one projected UTC stamp; malformed evidence returns None."""
+
+    text = str(value or "")
+    if not text.endswith("Z"):
+        return None
+    try:
+        return datetime.fromisoformat(text[:-1] + "+00:00")
+    except ValueError:
+        return None
+
+
+def _mirl_clock(value: object) -> str:
+    """``HH:MM:SS`` of a projected stamp -- the mockup's journey ``ts``."""
+
+    moment = _mirl_parse_utc(value)
+    return moment.strftime("%H:%M:%S") if moment else _mirl_text(value)
+
+
+def _mirl_stamp(value: object) -> str:
+    """``24 Jul 2026 - 12:11:51``, the mockup's evidence-table stamp."""
+
+    moment = _mirl_parse_utc(value)
+    if moment is None:
+        return _mirl_UNAVAILABLE_or(value)
+    return moment.strftime("%d %b %Y \u00b7 %H:%M:%S")
+
+
+def _mirl_UNAVAILABLE_or(value: object) -> str:
+    return _mirl_text(value, _MIRL_UNAVAILABLE)
+
+
+def _mirl_duration(seconds: object) -> str:
+    """Human duration for an already-measured span; never re-derives one."""
+
+    if seconds is None or isinstance(seconds, bool):
+        return _MIRL_UNAVAILABLE
+    if not isinstance(seconds, (int, float)):
+        return _MIRL_UNAVAILABLE
+    total = int(max(0.0, float(seconds)))
+    days, rest = divmod(total, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes, secs = divmod(rest, 60)
+    if days:
+        return f"{days}d {hours:02d}h"
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
+def _mirl_latency(seconds: object) -> str:
+    """A latency the read model measured, to one decimal, or an em dash."""
+
+    if seconds is None or isinstance(seconds, bool):
+        return "\u2014"
+    if not isinstance(seconds, (int, float)):
+        return "\u2014"
+    return f"{float(seconds):.1f}s"
+
+
+def _mirl_delta(first: object, second: object) -> str:
+    """Gap between two projected stamps -- the mockup's ``jflowTimeDelta``."""
+
+    start = _mirl_parse_utc(first)
+    end = _mirl_parse_utc(second)
+    if start is None or end is None:
+        return "\u2014"
+    gap = int((end - start).total_seconds())
+    sign = "+" if gap >= 0 else "-"
+    gap = abs(gap)
+    hours, rest = divmod(gap, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{sign}{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{sign}{minutes:02d}:{secs:02d}"
+
+
+def _mirl_elapsed(started_at: object, *, now=None) -> str:
+    """How long an OPEN episode has been open.
+
+    This is the one value on this surface computed in the presentation layer:
+    the read model publishes ``started_at`` but no elapsed field, because
+    elapsed depends on the current clock rather than on recorded evidence.
+    It exists so an hours-old unresolved episode cannot read as though it had
+    just begun.  It is never written anywhere and never feeds a metric.
+    """
+
+    opened = _mirl_parse_utc(started_at)
+    if opened is None:
+        return _MIRL_UNAVAILABLE
+    moment = now or datetime.now(timezone.utc)
+    return _mirl_duration((moment - opened).total_seconds())
+
+
+def _mirl_event_title(event_name: object) -> str:
+    return str(event_name or "").replace("_", " ").title() or "Event"
+
+
+def _mirl_event_pill(event_name: object) -> tuple:
+    key = str(event_name or "")
+    if key in _MIRL_EVENT_PILLS:
+        return _MIRL_EVENT_PILLS[key]
+    return ("", _mirl_event_title(key))
+
+
+def _mirl_recovered(outcome: object) -> bool:
+    return str(outcome or "") == _MIRL_RECOVERED_OUTCOME
+
+
+def _mirl_highest_sine(row: object) -> str:
+    stages = tuple(getattr(row, "sine_stages_exposed", ()) or ())
+    return f"SINE-{max(stages)}" if stages else _MIRL_NOT_RECORDED
+
+
+#: The live "SINE Stage" readout (Current Episode surfaces only -- Episode
+#: History keeps using ``_mirl_highest_sine`` on the projected row, since a
+#: past episode's highest stage is real history, not a live signal).
+_SINE_STAGE_INACTIVE_TEXT: Final = "SINE INACTIVE"
+
+#: ``SinePhase`` values (SINE/sine.py) in which a stage is actually in
+#: flight. Mirrors ``_MIRL_ENGINE_ACTIVE_PHASES`` in spirit -- SINE.sine.py
+#: is not imported here for its own types, so these are plain string values.
+_SINE_ENGINE_ACTIVE_PHASES: Final = frozenset(
+    {"waiting_for_display", "active", "protected_red"}
+)
+
+
+def _sine_stage_display(
+    sine_view: object,
+    live_view_last_seen: float | None,
+    waiting_since: float,
+    *,
+    now: float | None = None,
+) -> str:
+    """"SINE-N" from a fresh, live-confirmed in-flight stage; "SINE INACTIVE"
+    otherwise -- no trigger, no engine running, a resolved/cancelled stage,
+    or a stale/lost signal all read the same way. Shares the MIRL badge's
+    freshness timeout (ruling 3.1/4.2) so the two live indicators never
+    disagree about whether the app is currently running.
+    """
+
+    moment = time.monotonic() if now is None else now
+    reference = live_view_last_seen if live_view_last_seen is not None else waiting_since
+    fresh = (moment - reference) <= _MIRL_LIVE_SIGNAL_TIMEOUT_SECONDS
+    if not fresh or sine_view is None:
+        return _SINE_STAGE_INACTIVE_TEXT
+    phase = getattr(sine_view, "phase", None)
+    phase_value = str(getattr(phase, "value", phase) or "")
+    if phase_value not in _SINE_ENGINE_ACTIVE_PHASES:
+        return _SINE_STAGE_INACTIVE_TEXT
+    stage = getattr(sine_view, "stage", None)
+    stage_value = getattr(stage, "value", stage)
+    try:
+        stage_num = int(stage_value)
+    except (TypeError, ValueError):
+        return _SINE_STAGE_INACTIVE_TEXT
+    if stage_num <= 0:
+        return _SINE_STAGE_INACTIVE_TEXT
+    return f"SINE-{stage_num}"
+
+
+def _mirl_session_text(
+    live_view: object,
+    live_view_last_seen: float | None,
+    waiting_since: float,
+    *,
+    fallback: object = None,
+    now: float | None = None,
+) -> str:
+    """The live session number, falling back to the last recorded one.
+
+    Guideline: "session also must update after i press stop button ... so
+    previous session and trigger numbers must be displayed". Two rules, in
+    order:
+
+    * While the engine is running and the live signal is fresh, this is the
+      CURRENT session -- never a frozen number left over from before Stop.
+    * Otherwise it shows ``fallback``: the session of the newest episode in
+      the committed projection. Pressing Stop already forces one projection
+      refresh (see ``engine_stopped`` in ``_connect_components``), so the
+      number the user is left looking at is the session that just ended, not
+      a stale live value and not a blank.
+
+    "Not Recorded" is therefore reserved for the genuinely empty case -- no
+    live signal AND no episode ever committed.
+    """
+
+    moment = time.monotonic() if now is None else now
+    reference = live_view_last_seen if live_view_last_seen is not None else waiting_since
+    fresh = (moment - reference) <= _MIRL_LIVE_SIGNAL_TIMEOUT_SECONDS
+    if fresh and live_view is not None:
+        session_id = getattr(live_view, "session_id", None)
+        if session_id:
+            return _mirl_text(session_id)
+    return _mirl_text(fallback) if fallback else _MIRL_NOT_RECORDED
+
+
+def _mirl_trigger_text(
+    live_view: object,
+    live_view_last_seen: float | None,
+    waiting_since: float,
+    *,
+    fallback: object = None,
+    now: float | None = None,
+) -> str:
+    """The live trigger id, falling back to the last recorded one.
+
+    Guideline: "trigger must update from 57 to 58 when i trigger ... so
+    previous session and trigger numbers must be displayed". Same two rules,
+    same order, as ``_mirl_session_text``: the live id while an episode is
+    actually running, otherwise ``fallback`` -- the ``source_event_id`` of
+    the newest episode in the committed projection. So the tile sits on 57
+    at rest and becomes 58 once the new episode exists.
+
+    Honest caveat on WHEN it flips: ``MirlLiveView.operational_event_id`` is
+    populated from the episode object only once one exists (see
+    ``MirlAuthority.live_view()`` in the protected MIRL/mirl.py), so 58
+    appears at the same moment the episode badge goes Active -- not one tick
+    earlier, at raw detection before SINE-1 displays. The earlier
+    pending-trigger token does carry the id internally, but exposing it would
+    mean editing that protected file.
+    """
+
+    moment = time.monotonic() if now is None else now
+    reference = live_view_last_seen if live_view_last_seen is not None else waiting_since
+    fresh = (moment - reference) <= _MIRL_LIVE_SIGNAL_TIMEOUT_SECONDS
+    if fresh and live_view is not None:
+        operational_event_id = getattr(live_view, "operational_event_id", None)
+        if operational_event_id:
+            return _mirl_text(operational_event_id)
+    return _mirl_text(fallback) if fallback else _MIRL_NOT_RECORDED
+
+
+#: Which applied escalation window the SINE timer measures against, keyed by
+#: the stage currently in flight.  SINE-3 is terminal -- it opens no further
+#: window -- so it is deliberately absent rather than mapped to a guess.
+_SINE_TIMER_STAGE_WINDOWS: Final = {
+    1: "stage_2_delay_seconds_applied",
+    2: "stage_3_delay_seconds_applied",
+}
+
+
+def _mirl_is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _sine_clock(seconds: object) -> str:
+    """MM:SS for an already-measured span."""
+
+    total = int(max(0.0, float(seconds)))
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def _sine_timer_text(
+    sine_view: object,
+    sine_view_last_seen: float | None,
+    waiting_since: float,
+    *,
+    now: float | None = None,
+) -> str:
+    """Time served against the SINE window in flight, as ``MM:SS / MM:SS``.
+
+    Both halves are the engine's own numbers: ``next_deadline_seconds`` is the
+    time SINE says is left, and ``stage_N_delay_seconds_applied`` is the window
+    it actually applied for this session, already personalised by the F factor.
+    Served time is their difference.  Nothing here selects a stage, sets a
+    deadline or assumes a baseline -- a hardcoded "5:00" would be an invented
+    number, since the applied window varies per session (the SINE-1 -> SINE-2
+    baseline alone is 600s BEFORE personalisation).
+
+    Deliberately NOT interpolated between engine ticks.  The monitor publishes
+    a fresh SineLiveView every poll; counting down locally in between would put
+    a figure on screen that SINE never published, and the launcher cannot
+    compare monotonic clocks across the engine boundary anyway.  Same freshness
+    rule and blank-on-stale behaviour as the SINE Stage readout, so the two
+    never disagree about whether a stage is running.
+    """
+
+    moment = time.monotonic() if now is None else now
+    reference = sine_view_last_seen if sine_view_last_seen is not None else waiting_since
+    if (moment - reference) > _MIRL_LIVE_SIGNAL_TIMEOUT_SECONDS or sine_view is None:
+        return "\u2014"
+    phase = getattr(sine_view, "phase", None)
+    if str(getattr(phase, "value", phase) or "") not in _SINE_ENGINE_ACTIVE_PHASES:
+        return "\u2014"
+    stage = getattr(sine_view, "stage", None)
+    try:
+        stage_num = int(getattr(stage, "value", stage))
+    except (TypeError, ValueError):
+        return "\u2014"
+    field = _SINE_TIMER_STAGE_WINDOWS.get(stage_num)
+    if field is None:
+        return "\u2014"
+    window = getattr(sine_view, field, None)
+    remaining = getattr(sine_view, "next_deadline_seconds", None)
+    if not _mirl_is_number(window) or not _mirl_is_number(remaining) or window <= 0:
+        return "\u2014"
+    served = min(float(window), max(0.0, float(window) - max(0.0, float(remaining))))
+    return f"{_sine_clock(served)} / {_sine_clock(window)}"
+
+
+def _mirl_return_latency_text(focus: object) -> str:
+    """The focused episode's SINE-1 to verified-return latency, or why none.
+
+    ``verified_return_latency_seconds`` is measured BY THE READ MODEL from the
+    episode's own start -- the instant the trigger minted it, which is SINE-1 --
+    to the verified-return event.  It is exactly the span this tile names, and
+    is never recomputed on this side.
+
+    A closed episode that never returned reads NOT RETURNED rather than
+    borrowing the previous episode's latency: printing another episode's number
+    under this episode's heading would state something untrue about it.
+    """
+
+    if focus is None:
+        return "\u2014"
+    latency = getattr(focus, "verified_return_latency_seconds", None)
+    if latency is not None:
+        return _mirl_latency(latency)
+    outcome = getattr(focus, "final_outcome", None)
+    if outcome is None or _mirl_recovered(outcome):
+        # Still open, or returned with no measured latency.  Either way this is
+        # unmeasured, which is not the same claim as "did not return".
+        return "\u2014"
+    return "NOT RETURNED"
+
+
+def _mirl_verified_return_count_text(projection: object) -> str:
+    """How many episodes actually reached a verified RETURNED outcome.
+
+    Straight from the read model's ``native_outcome_counts``, which is built
+    over EVERY recorded episode rather than the 100-episode display window, and
+    which buckets integrity-degraded episodes separately -- so a degraded
+    episode that returned is not counted here.  Zero is a real answer and
+    renders as "0", never as unavailable.
+    """
+
+    counts = getattr(projection, "native_outcome_counts", None)
+    getter = getattr(counts, "get", None)
+    if not callable(getter):
+        return "\u2014"
+    value = getter(_MIRL_RECOVERED_OUTCOME)
+    return str(value) if _mirl_is_number(value) and isinstance(value, int) else "\u2014"
+
+
+def _mirl_mean_recovery_text(projection: object) -> str:
+    """Mean stable-recovery latency, as prepared by the read model.
+
+    Not averaged here: the launcher only receives the capped recent-episode
+    window, so a mean taken on this side would silently be "mean of the last
+    100" wearing the label "mean of all".  Reads unavailable while the
+    projection is integrity-degraded, because MYELIN does not publish a mean
+    over degraded evidence.
+    """
+
+    return _mirl_latency(
+        getattr(projection, "average_stable_recovery_latency_seconds", None)
+    )
+
+
+def _mirl_state(projection: object) -> str:
+    """Resolve the data state.  Integrity is handled separately, as a modifier."""
+
+    if projection is None:
+        return MIRL_STATE_ENTRY
+    if not bool(getattr(projection, "available", False)):
+        return MIRL_STATE_EMPTY
+    if tuple(getattr(projection, "active_episodes", ()) or ()):
+        return MIRL_STATE_ACTIVE
+    return MIRL_STATE_IDLE
+
+
+def _mirl_effective_focus(
+    projection: object,
+    live_view: object,
+    live_view_last_seen: float | None,
+    waiting_since: float,
+    *,
+    now: float | None = None,
+):
+    """Which episode's content the Current Episode / Event Journey show.
+
+    Preferring ``active_episodes[0]`` outright would be wrong: that "active"
+    row can be nothing more than the single still-unclosed episode MIRL
+    happens to be carrying in its history.  If nobody ever closes it, it sits
+    there forever, silently outranking every genuinely more recent,
+    cleanly-closed episode (guideline: "make sure it shows the latest one" --
+    a day-old abandoned episode must not hide a real episode from an hour
+    ago).
+
+    When the live engine actually confirms an episode is running right now
+    (the same check the "Episode Active" badge uses, ruling 3.1/4.2), this
+    shows that episode, matching the badge. Otherwise it shows whichever
+    episode -- open or closed -- genuinely started most recently.
+    """
+
+    if projection is None:
+        return None
+    active = tuple(getattr(projection, "active_episodes", ()) or ())
+    closed = tuple(getattr(projection, "recently_closed_episodes", ()) or ())
+    state, _ = _mirl_effective_state(
+        projection, live_view, live_view_last_seen, waiting_since, now=now
+    )
+    if state == MIRL_STATE_ACTIVE and active:
+        return active[0]
+    candidates = active + closed
+    if not candidates:
+        return None
+    return max(candidates, key=lambda row: str(getattr(row, "started_at", "") or ""))
+
+
+#: Mirrors ``MirlAuthority._ACTIVE_PHASES`` in MIRL/mirl.py (private, not
+#: exported, and mirl.py is protected -- never imported here for its own
+#: types). These are the coarse phases in which a real recovery episode is
+#: in flight. Keep in sync if that set ever changes.
+_MIRL_ENGINE_ACTIVE_PHASES: Final = frozenset(
+    {"WAITING_FOR_RETURN", "RETURN_VERIFICATION", "CLOSURE_CONFIRMATION"}
+)
+
+#: monitor.py republishes "mirl_health_status" on every monitoring cycle
+#: unconditionally (see monitor.py's ``_publish_live_views``), so once the
+#: engine is running this signal is effectively continuous. A gap shorter
+#: than this is a normal startup window; a gap longer than this means the
+#: connection itself -- not the episode -- is the problem, and is surfaced
+#: to the user rather than silently trusted.
+_MIRL_LIVE_SIGNAL_TIMEOUT_SECONDS: Final = 5.0
+
+
+def _mirl_live_active(live_view: object) -> bool | None:
+    """True/False from a real engine snapshot; ``None`` if there is none."""
+
+    if live_view is None:
+        return None
+    episode_id = str(getattr(live_view, "episode_id", "") or "")
+    if not episode_id:
+        return False
+    phase = getattr(live_view, "phase", None)
+    phase_value = str(getattr(phase, "value", phase) or "")
+    return phase_value in _MIRL_ENGINE_ACTIVE_PHASES
+
+
+def _mirl_effective_state(
+    projection: object,
+    live_view: object,
+    live_view_last_seen: float | None,
+    waiting_since: float,
+    *,
+    now: float | None = None,
+) -> tuple[str, bool]:
+    """Resolve the live "episode active" state and the live-signal health flag.
+
+    The read model alone cannot tell a genuinely open episode from one
+    abandoned by a session that already ended -- it only sees history. So
+    the active badge trusts ONLY a fresh, live, positive confirmation from
+    the running engine: no engine running, no live signal received yet, a
+    stale/lost signal, or a live signal that itself reports no active
+    episode -- all of these show INACTIVE. The DB projection is NEVER used
+    on its own to promote this badge to active -- see Chief's ruling 3.1/4.2
+    ("must show Episode Inactive when there is no MYELIN activity"). Every
+    other Live MIRL surface (episode list, timeline, evidence, and the
+    focus episode's own content when idle) still comes from the projection,
+    unchanged.
+
+    Returns ``(state, live_signal_degraded)``. ``live_signal_degraded`` is
+    True only once the live engine has gone quiet for longer than a normal
+    startup gap; it is purely informational and never promotes the state
+    above, which already defaults to inactive with no live confirmation.
+    """
+
+    state = _mirl_state(projection)
+    moment = time.monotonic() if now is None else now
+    reference = live_view_last_seen if live_view_last_seen is not None else waiting_since
+    fresh = (moment - reference) <= _MIRL_LIVE_SIGNAL_TIMEOUT_SECONDS
+    if state == MIRL_STATE_ACTIVE and (not fresh or _mirl_live_active(live_view) is not True):
+        state = MIRL_STATE_IDLE
+    return state, not fresh
+
+
+def _mirl_journey_step(event: object) -> tuple:
+    """One ``showcase_journey_step`` tuple built only from a projected event."""
+
+    role, pill_text = _mirl_event_pill(getattr(event, "event_name", ""))
+    return (
+        getattr(event, "episode_seq", 0),
+        _mirl_event_title(getattr(event, "event_name", "")),
+        role,
+        pill_text,
+        str(getattr(event, "observed_or_derived", "") or "").title() or "Recorded",
+        _mirl_clock(getattr(event, "occurred_at", "")),
+    )
+
+
+def _mirl_fill_journey_strip(layout, row: object) -> None:
+    """Rebuild one journey strip from an episode row's projected timeline.
+
+    A closed episode's final event becomes the mockup's coloured terminal
+    node; green ONLY for a verified RETURNED outcome, red for every other
+    ending, including the display-only NOT_RETURNED.
+    """
+
+    _clear_layout(layout)
+    timeline = tuple(getattr(row, "timeline", ()) or []) if row is not None else ()
+    if not timeline:
+        layout.addWidget(
+            label(
+                "No recorded event evidence for this episode.",
+                12,
+                400,
+                "muted",
+            )
+        )
+        layout.addStretch(1)
+        return
+
+    outcome = getattr(row, "final_outcome", None)
+    closed = outcome is not None
+    kind = "returned" if _mirl_recovered(outcome) else "terminal-red"
+    for position, event in enumerate(timeline):
+        last = position == len(timeline) - 1
+        entry = _mirl_journey_step(event)
+        if last and closed:
+            layout.addWidget(
+                showcase_flow_outcome(
+                    _mirl_text(outcome),
+                    f"{entry[4]} \u00b7 {entry[5]}",
+                    kind,
+                ),
+                0,
+                Qt.AlignmentFlag.AlignVCenter,
+            )
+        else:
+            layout.addWidget(showcase_journey_step(entry))
+        if not last:
+            layout.addWidget(
+                ShowcaseFlowLink(
+                    _mirl_delta(
+                        getattr(event, "occurred_at", ""),
+                        getattr(timeline[position + 1], "occurred_at", ""),
+                    )
+                ),
+                0,
+                Qt.AlignmentFlag.AlignVCenter,
+            )
+    layout.addStretch(1)
+
+
 class LiveMirlShowcasePage(QWidget):
     """The Live MIRL launcher page, reproduced from the approved mockup.
 
-    Showcase surface: no MIRL runtime, no read model, no episode machine.
-    Every value is a fixed fixture from the mockup.
+    Presentation only.  Every value comes from one ``LiveMirlProjection``
+    handed to :meth:`render_projection` by ``AnalyticsController``'s single
+    shared refresh lane -- this page owns no MIRL runtime, opens no database,
+    reads no SQL and derives no episode truth.  The one value computed here
+    is how long an open episode has been open (``_mirl_elapsed``), which the
+    read model cannot publish because it depends on the current clock.
+
+    It implements exactly the contract ``AnalyticsController`` already uses
+    for its own dashboard pages -- a ``refresh_requested`` signal plus
+    ``render_projection`` / ``set_refreshing`` / ``show_refresh_failure`` --
+    so it joins the existing refresh lane rather than opening a second one.
+    It deliberately exposes neither ``request_refresh`` nor ``ready``, so
+    NavigationController still treats it as ready on the next event-loop
+    turn, exactly as before.
     """
+
+    refresh_requested = pyqtSignal()
+
+    #: Cadence of the open-episode elapsed readout.  ONE timer, owned by this
+    #: page, running only while an open episode is actually on screen.
+    ELAPSED_TICK_MS: Final = 1000
+
+    #: One journey node (150px) plus the strip's 6px gap.
+    _STRIP_STEP_PX: Final = 156
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("showcasePage")
         self.setAccessibleName("Live MIRL showcase")
         self._dashboard_dialog: LiveMirlDashboardDialog | None = None
+        self._projection: object | None = None
+        self._refreshing = False
+        self._failed = False
+        self._banner: QFrame | None = None
+
+        # Live engine signal (ruling 3.1/4.2) -- independent of the
+        # projection refresh lane. See MirlAuthority.live_view() /
+        # EngineController.mirl_health_status_changed.
+        self._live_view: object | None = None
+        self._live_view_last_seen: float | None = None
+        self._constructed_at: float = time.monotonic()
+        self._live_degraded = False
+
+        # Live SINE stage (guideline: "SINE INACTIVE" with no trigger, else
+        # the real in-flight stage). Shares ``_constructed_at`` as its
+        # startup-grace reference with the live episode signal above.
+        self._sine_view: object | None = None
+        self._sine_view_last_seen: float | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -2353,148 +3121,423 @@ class LiveMirlShowcasePage(QWidget):
         wrap.setContentsMargins(34, 14, 34, 34)
         wrap.setSpacing(20)
 
-        wrap.addWidget(
-            showcase_topline(
-                "Live MIRL — Authoritative Overview",
-                "All committed evidence  |  3 Exclusions",
-            )
-        )
+        # Mockup block order for #page-live-mirl: topline, episode banner,
+        # 3-up metric stats, journey card, 4-up outcome stats, and the CTA
+        # row LAST, right-aligned (``.btn-cta-row { justify-content: flex-end }``).
+        self._topline_host = QVBoxLayout()
+        self._topline_host.setContentsMargins(0, 0, 0, 0)
+        wrap.addLayout(self._topline_host)
+
+        self._banner_host = QVBoxLayout()
+        self._banner_host.setContentsMargins(0, 0, 0, 0)
+        wrap.addLayout(self._banner_host)
+
+        self._stats_host = QGridLayout()
+        self._stats_host.setHorizontalSpacing(16)
+        wrap.addLayout(self._stats_host)
+
+        wrap.addWidget(self._build_journey_card())
+
+        self._outcome_host = QGridLayout()
+        self._outcome_host.setHorizontalSpacing(16)
+        wrap.addLayout(self._outcome_host)
 
         cta_row = QHBoxLayout()
         cta_row.addStretch(1)
-        open_dashboard_button = showcase_cta("Open Full Dashboard")
-        open_dashboard_button.setEnabled(True)
-        open_dashboard_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        open_dashboard_button.clicked.connect(self._open_full_dashboard)
-        cta_row.addWidget(open_dashboard_button)
-        cta_row.addStretch(1)
+        # Manual refresh drives the SAME lane page navigation and Stop already
+        # use (AnalyticsController._create_page wires refresh_requested to the
+        # real refresh) -- it is a second caller, never a second mechanism.
+        self._refresh_button = showcase_outline_button("Refresh")
+        self._refresh_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._refresh_button.clicked.connect(self.refresh_requested.emit)
+        cta_row.addWidget(self._refresh_button)
+        cta_row.addSpacing(10)
+        self._open_dashboard_button = showcase_cta("Open Full Dashboard")
+        self._open_dashboard_button.setEnabled(True)
+        self._open_dashboard_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._open_dashboard_button.clicked.connect(self._open_full_dashboard)
+        cta_row.addWidget(self._open_dashboard_button)
         wrap.addLayout(cta_row)
-
-        wrap.addWidget(
-            showcase_episode_banner(
-                "Episode Status", "No Active Episode", "Latest Outcome", "Break"
-            )
-        )
-
-        stats = QGridLayout()
-        stats.setHorizontalSpacing(16)
-        for column, (number, caption, size) in enumerate(
-            (("71", "Trigger", 32.0), ("SINE-1", "SINE Stage", 24.0),
-             ("104", "Session No.", 32.0))
-        ):
-            stats.addWidget(
-                showcase_metric_stat(number, caption, "", "cyan", size=size), 0, column
-            )
-            stats.setColumnStretch(column, 1)
-        wrap.addLayout(stats)
-
-        wrap.addWidget(self._build_journey())
-
-        outcomes = QGridLayout()
-        outcomes.setHorizontalSpacing(16)
-        for column, caption in enumerate(
-            ("Return Intent", "Candidate Return", "Verified Return", "Stable Recovery")
-        ):
-            outcomes.addWidget(
-                showcase_metric_stat(
-                    "—", caption, "", None, size=22.0, number_role="muted"
-                ),
-                0,
-                column,
-            )
-            outcomes.setColumnStretch(column, 1)
-        wrap.addLayout(outcomes)
 
         wrap.addStretch(1)
 
+        self._elapsed_timer = QTimer(self)
+        self._elapsed_timer.setInterval(self.ELAPSED_TICK_MS)
+        self._elapsed_timer.timeout.connect(self._tick_elapsed)
+
+        self._render()
+
+    # -- analytics refresh-lane contract --------------------------------------
+
+    def render_projection(self, projection: object) -> None:
+        self._projection = projection
+        self._failed = False
+        self._render()
+        dialog = self._dashboard_dialog
+        if dialog is not None:
+            dialog.render_projection(projection)
+
+    def render_live_view(self, live_view: object | None) -> None:
+        """One ``MirlLiveView`` snapshot from the running engine, or ``None``.
+
+        ``None`` is the same reset sentinel ``EngineController`` uses for
+        every other replace-in-place card at session start -- it clears the
+        cached snapshot and restarts the startup grace window rather than
+        immediately reporting the live signal as unavailable.
+        """
+
+        if live_view is None:
+            self._live_view = None
+            self._live_view_last_seen = None
+            self._constructed_at = time.monotonic()
+        else:
+            self._live_view = live_view
+            self._live_view_last_seen = time.monotonic()
+        self._render()
+        dialog = self._dashboard_dialog
+        if dialog is not None:
+            dialog.apply_live_view(self._live_view, self._live_view_last_seen, self._constructed_at)
+
+    def render_sine_view(self, sine_view: object | None) -> None:
+        """One ``SineLiveView`` snapshot from ``EngineController.sine_watch_
+        status_changed`` -- the SAME signal the Control page already
+        consumes; this page is simply a second subscriber. ``None`` is the
+        session-reset sentinel, same convention as :meth:`render_live_view`.
+        """
+
+        if sine_view is None:
+            self._sine_view = None
+            self._sine_view_last_seen = None
+        else:
+            self._sine_view = sine_view
+            self._sine_view_last_seen = time.monotonic()
+        self._render()
+        dialog = self._dashboard_dialog
+        if dialog is not None:
+            dialog.apply_sine_view(self._sine_view, self._sine_view_last_seen, self._constructed_at)
+
+    def _sine_stage_text(self) -> str:
+        return _sine_stage_display(self._sine_view, self._sine_view_last_seen, self._constructed_at)
+
+    def _session_text(self, focus: object) -> str:
+        return _mirl_session_text(
+            self._live_view,
+            self._live_view_last_seen,
+            self._constructed_at,
+            fallback=getattr(focus, "session_id", None),
+        )
+
+    def _trigger_text(self, focus: object) -> str:
+        return _mirl_trigger_text(
+            self._live_view,
+            self._live_view_last_seen,
+            self._constructed_at,
+            fallback=getattr(focus, "source_event_id", None),
+        )
+
+    def _sine_timer_text(self) -> str:
+        return _sine_timer_text(
+            self._sine_view, self._sine_view_last_seen, self._constructed_at
+        )
+
+    def set_refreshing(self, refreshing: bool) -> None:
+        self._refreshing = bool(refreshing)
+        # Same busy contract as analytics.DashboardPage.set_refreshing.
+        self._refresh_button.setEnabled(not self._refreshing)
+        self._render_topline()
+
+    def show_refresh_failure(self) -> None:
+        # Keep the last honest snapshot on screen; only the status line
+        # changes, exactly as DashboardPage does.
+        self._failed = True
+        self._render_topline()
+
+    # -- rendering ------------------------------------------------------------
+
+    def _render(self) -> None:
+        state, self._live_degraded = self._effective_state()
+        focus = self._effective_focus()
+        self._render_topline()
+        self._render_banner(state, focus)
+        self._render_stats(focus)
+        self._render_journey(state, focus)
+        self._render_outcomes(focus)
+
+        wants_tick = state == MIRL_STATE_ACTIVE
+        if wants_tick and not self._elapsed_timer.isActive():
+            self._elapsed_timer.start()
+        elif not wants_tick and self._elapsed_timer.isActive():
+            self._elapsed_timer.stop()
+
+    def _effective_state(self) -> tuple[str, bool]:
+        return _mirl_effective_state(
+            self._projection,
+            self._live_view,
+            self._live_view_last_seen,
+            self._constructed_at,
+        )
+
+    def _effective_focus(self):
+        return _mirl_effective_focus(
+            self._projection,
+            self._live_view,
+            self._live_view_last_seen,
+            self._constructed_at,
+        )
+
+    def _render_topline(self) -> None:
+        """Topline hint carries evidence scope, integrity and refresh status.
+
+        Integrity lives here, in muted body text, rather than as a coloured
+        alert: on real evidence most episodes carry an integrity issue, so
+        DEGRADED is the ordinary condition of this surface, not an emergency.
+        """
+
+        projection = self._projection
+        # Kept SHORT deliberately.  ``.mirl-topline``'s hint does not wrap, so
+        # a long sentence here widens the whole page past the window and forces
+        # a horizontal scrollbar across every block below it.  The full status
+        # message and every integrity issue live on the dashboard's Data
+        # Quality tab instead.
+        parts: list[str] = []
+        if self._failed:
+            parts.append(
+                "Refresh failed — last recorded evidence"
+                if projection is not None
+                else "Evidence unavailable"
+            )
+        elif self._refreshing:
+            parts.append("Refreshing…")
+        if self._live_degraded:
+            parts.append("Live signal unavailable")
+        if projection is None:
+            parts.append("No projection loaded yet")
+        else:
+            parts.append("All committed evidence")
+            integrity = getattr(projection, "integrity_status", None)
+            parts.append(
+                f"Integrity: {_mirl_text(getattr(integrity, 'value', integrity), 'UNKNOWN')}"
+            )
+            metadata = getattr(projection, "metadata", None)
+            exclusions = getattr(metadata, "exclusion_count", None)
+            if isinstance(exclusions, int):
+                parts.append(f"{exclusions} Exclusions")
+        _clear_layout(self._topline_host)
+        host = showcase_topline(
+            "Live MIRL \u2014 Authoritative Overview",
+            "  |  ".join(part for part in parts if part),
+        )
+        self._topline_host.addWidget(host)
+        _retheme_subtree(host)
+
+    def _render_banner(self, state: str, focus: object) -> None:
+        _clear_layout(self._banner_host)
+        outcome_label = "Latest Outcome"
+        detail = ""
+        if state == MIRL_STATE_ACTIVE:
+            status_value = "Episode Active"
+            outcome_value = "In Progress"
+            detail = f"Open for {_mirl_elapsed(getattr(focus, 'started_at', None))}"
+            ok = True
+        elif state == MIRL_STATE_IDLE:
+            status_value = "No Active Episode"
+            outcome_value = _mirl_text(getattr(focus, "final_outcome", None))
+            ok = False
+        elif state == MIRL_STATE_EMPTY:
+            status_value = "No Episode Evidence"
+            outcome_value = _mirl_text(
+                getattr(self._projection, "empty_state_reason", None)
+            )
+            outcome_label = ""
+            ok = False
+        else:  # entry -- nothing has been projected yet
+            status_value = "Not Loaded"
+            outcome_value = "\u2014"
+            ok = False
+        banner = showcase_episode_banner(
+            "Episode Status",
+            status_value,
+            outcome_label,
+            outcome_value,
+            ok=ok,
+            outcome_muted=state == MIRL_STATE_EMPTY,
+            detail=detail,
+        )
+        self._banner = banner
+        self._banner_host.addWidget(banner)
+        _retheme_subtree(banner)
+
+    def _render_stats(self, focus: object) -> None:
+        _clear_layout(self._stats_host)
+        values = (
+            (self._trigger_text(focus), "Trigger", 32.0),
+            (self._sine_stage_text(), "SINE Stage", 24.0),
+            (self._session_text(focus), "Session No.", 32.0),
+        )
+        for column, (number, caption, size) in enumerate(values):
+            # A word-shaped value ("Not Recorded") cannot ride the 32px mono
+            # figure size the mockup uses for a numeral.
+            shown_size = size if number.isdigit() or number.startswith("SINE-") else 15.0
+            cell = showcase_metric_stat(number, caption, "", "cyan", size=shown_size)
+            self._stats_host.addWidget(cell, 0, column)
+            self._stats_host.setColumnStretch(column, 1)
+            _retheme_subtree(cell)
+
+    def _render_journey(self, state: str, focus: object) -> None:
+        if focus is None:
+            self._journey_title.setText("Event Journey")
+            self._journey_hint.setText(
+                "No episode recorded"
+                if state == MIRL_STATE_EMPTY
+                else "Awaiting projection"
+            )
+        else:
+            self._journey_title.setText(
+                f"Event Journey \u2014 {_mirl_text(getattr(focus, 'short_display_id', None))}"
+            )
+            count = len(tuple(getattr(focus, "timeline", ()) or ()))
+            self._journey_hint.setText(f"{count} recorded events")
+        _mirl_fill_journey_strip(self._strip_layout, focus)
+        _retheme_subtree(self._strip_body)
+        has_steps = focus is not None and bool(getattr(focus, "timeline", ()))
+        self._journey_prev.setEnabled(has_steps)
+        self._journey_next.setEnabled(has_steps)
+
+    def _render_outcomes(self, focus: object) -> None:
+        """The four-tile outcome row.
+
+        "Candidate Return" was removed rather than left as a permanent em
+        dash: LiveMirlEpisodeRow carries no such field, so the tile could
+        never say anything.  The SINE timer took its slot -- it is the one
+        live reading on this row, and the only one that answers "what is SINE
+        doing right now" while a distraction sits in the foreground.
+        """
+
+        _clear_layout(self._outcome_host)
+        values = (
+            ("Return Latency", _mirl_return_latency_text(focus)),
+            ("SINE Timer", self._sine_timer_text()),
+            ("Verified Returns", _mirl_verified_return_count_text(self._projection)),
+            ("Stable Recovery", _mirl_mean_recovery_text(self._projection)),
+        )
+        for column, (caption, value) in enumerate(values):
+            measured = value != "\u2014"
+            cell = showcase_metric_stat(
+                value,
+                caption,
+                "",
+                "cyan" if measured else None,
+                # "NOT RETURNED" and "03:47 / 10:00" cannot ride the 22px mono
+                # figure size a bare latency uses.
+                size=22.0 if len(value) <= 8 else 15.0,
+                number_role=None if measured else "muted",
+            )
+            self._outcome_host.addWidget(cell, 0, column)
+            self._outcome_host.setColumnStretch(column, 1)
+            _retheme_subtree(cell)
+
+    def _tick_elapsed(self) -> None:
+        """Retitle the open-episode readout in place; never rebuild on a tick."""
+
+        if self._effective_state()[0] != MIRL_STATE_ACTIVE:
+            self._elapsed_timer.stop()
+            return
+        if not self.isVisible():
+            return
+        banner = self._banner
+        detail = getattr(banner, "detail_label", None) if banner is not None else None
+        if detail is None:
+            return
+        focus = self._effective_focus()
+        detail.setText(f"Open for {_mirl_elapsed(getattr(focus, 'started_at', None))}")
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        # Nothing off-screen needs a per-second readout.
+        self._elapsed_timer.stop()
+        super().hideEvent(event)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if self._effective_state()[0] == MIRL_STATE_ACTIVE:
+            self._elapsed_timer.start()
+
+    # -- journey card ---------------------------------------------------------
+
+    def _build_journey_card(self) -> QFrame:
+        card, body = make_card()
+
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        self._journey_title = label("Event Journey", 12.5, 700, "cyan", spacing=1.2)
+        head.addWidget(self._journey_title)
+        head.addStretch(1)
+        self._journey_hint = label("", 11.5, 400, "muted")
+        head.addWidget(self._journey_hint)
+        # ``.journey-nav`` -- the mockup draws two chevrons here and binds no
+        # handler to them.  With a real timeline the strip can overflow, so
+        # they scroll it; that is the only job for them that invents no data.
+        self._journey_prev = _showcase_chevron_button(False)
+        self._journey_next = _showcase_chevron_button(True)
+        self._journey_prev.clicked.connect(lambda: self._scroll_strip(-1))
+        self._journey_next.clicked.connect(lambda: self._scroll_strip(1))
+        head.addWidget(self._journey_prev)
+        head.addWidget(self._journey_next)
+        body.addLayout(head)
+        body.addSpacing(16)
+
+        self._strip_host = QScrollArea()
+        self._strip_host.setObjectName("showcaseScroll")
+        self._strip_host.setWidgetResizable(True)
+        self._strip_host.setFrameShape(QFrame.Shape.NoFrame)
+        self._strip_host.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._strip_host.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._strip_host.setMinimumHeight(150)
+
+        self._strip_body = QWidget()
+        self._strip_body.setObjectName("plainBox")
+        self._strip_layout = QHBoxLayout(self._strip_body)
+        self._strip_layout.setContentsMargins(0, 0, 0, 6)
+        self._strip_layout.setSpacing(6)
+        self._strip_host.setWidget(self._strip_body)
+        body.addWidget(self._strip_host)
+        return card
+
+    def _scroll_strip(self, direction: int) -> None:
+        bar = self._strip_host.horizontalScrollBar()
+        bar.setValue(bar.value() + direction * self._STRIP_STEP_PX)
+
+    # -- full dashboard -------------------------------------------------------
+
     def _open_full_dashboard(self) -> None:
-        """``#openFullDashboard`` -- open the dummy Live MIRL Dashboard.
+        """Open the Live MIRL Dashboard over the whole Control Station window.
 
         Lazily created once and reused on every later click, matching how
         ``AnalyticsController.open_composer`` keeps ``AnalyticsSheetDialog``
         alive across opens instead of rebuilding it.  It opens as a glass
-        overlay above the whole Control Station window, not a separate
-        top-level window, so it is parented to ``self.window()`` rather than
-        to this page.
+        overlay above the whole window, not a separate top-level window, so
+        it is parented to ``self.window()`` rather than to this page.
         """
 
         host = self.window()
         if self._dashboard_dialog is None:
             self._dashboard_dialog = LiveMirlDashboardDialog(host)
+            self._dashboard_dialog.apply_live_view(
+                self._live_view, self._live_view_last_seen, self._constructed_at
+            )
+            self._dashboard_dialog.apply_sine_view(
+                self._sine_view, self._sine_view_last_seen, self._constructed_at
+            )
+        self._dashboard_dialog.render_projection(self._projection)
         self._dashboard_dialog.open_over(host)
-
-    def _build_journey(self) -> QFrame:
-        card, body = make_card()
-
-        head = QHBoxLayout()
-        head.setSpacing(10)
-        title = label(
-            "Event Journey — EPI104-24072026-02", 12.5, 700, "cyan", spacing=1.2
-        )
-        head.addWidget(title)
-        head.addStretch(1)
-        head.addWidget(label("7 recorded events", 11.5, 400, "muted"))
-        body.addLayout(head)
-        body.addSpacing(16)
-
-        strip_host = QScrollArea()
-        strip_host.setObjectName("showcaseScroll")
-        strip_host.setWidgetResizable(True)
-        strip_host.setFrameShape(QFrame.Shape.NoFrame)
-        strip_host.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        strip_host.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        strip_host.setMinimumHeight(150)
-
-        strip = QWidget()
-        strip.setObjectName("plainBox")
-        lay = QHBoxLayout(strip)
-        lay.setContentsMargins(0, 0, 0, 6)
-        lay.setSpacing(6)
-
-        steps = _SHOWCASE_MIRL_JOURNEY
-        for position, entry in enumerate(steps):
-            last = position == len(steps) - 1
-            if last and entry[2] == "terminal":
-                lay.addWidget(
-                    showcase_flow_outcome(entry[1], f"{entry[4]} · {entry[5]}", "terminal-red"),
-                    0,
-                    Qt.AlignmentFlag.AlignVCenter,
-                )
-            else:
-                lay.addWidget(showcase_journey_step(entry))
-            if not last:
-                lay.addWidget(
-                    ShowcaseFlowLink(_showcase_delta(entry[5], steps[position + 1][5])),
-                    0,
-                    Qt.AlignmentFlag.AlignVCenter,
-                )
-        lay.addStretch(1)
-        strip_host.setWidget(strip)
-        body.addWidget(strip_host)
-        return card
-
-
-def _showcase_delta(first: str, second: str) -> str:
-    """Format the gap between two fixture stamps, mockup ``jflowTimeDelta``."""
-
-    def seconds(text: str) -> int:
-        hours, minutes, secs = (int(part) for part in text.split(":"))
-        return hours * 3600 + minutes * 60 + secs
-
-    gap = seconds(second) - seconds(first)
-    if gap < 0:
-        gap += 24 * 3600
-    return f"+{gap // 60:02d}:{gap % 60:02d}"
 
 
 class LiveMirlDashboardDialog(QWidget):
-    """Dummy Live MIRL Dashboard, reproduced from the mockup's glass overlay.
+    """Live MIRL Dashboard, reproduced from the mockup's glass overlay.
 
-    Showcase surface opened from ``LiveMirlShowcasePage``'s "Open Full
-    Dashboard" button: no ``read_model.py``, no ``MIRL/``, no live episode
-    state, no SQL. Every value below is the same fixed fixture the showcase
-    page already shows. Wiring this to real read-model data is separate,
-    later work.
+    Opened from ``LiveMirlShowcasePage``'s "Open Full Dashboard" button and
+    fed the SAME ``LiveMirlProjection`` that page already holds -- it never
+    reads persistence itself, never starts a refresh, and never recomputes an
+    episode.  It is a second view of one projection, not a second source.
 
     The mockup's ``.glass-overlay`` is a ``position:fixed; inset:0`` layer
     inside the SAME page, not a second browser window -- so this is a plain
@@ -2523,11 +3566,34 @@ class LiveMirlDashboardDialog(QWidget):
     # host's own size minus margin.
     PANEL_MAX_SIZE: Final = QSize(1800, 1100)
 
+    #: Journey strips drawn as soon as Episode History opens.  Every episode
+    #: still gets a card and every card can draw its strip on request; only
+    #: the up-front drawing is budgeted.  On real evidence 52 episodes carry
+    #: ~560 journey nodes, and building all of them for rows nobody has
+    #: scrolled to yet costs ~3 seconds.  The mockup pre-drew all 13 of its
+    #: fixtures, which does not survive contact with a real, growing history.
+    HISTORY_STRIPS_EXPANDED: Final = 3
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("liveMirlDashboardOverlay")
         self.hide()
         self._host: QWidget | None = None
+        self._projection: object | None = None
+        # Tabs render on first view, not all five up front: the history strip
+        # alone is ~550 journey nodes on real evidence, and paying for four
+        # hidden tabs would stall the open.
+        self._dirty_tabs: set = set()
+
+        # Mirrors LiveMirlShowcasePage's live engine snapshot -- forwarded by
+        # the page on every update via apply_live_view(), not read directly
+        # from the engine (see ruling 3.1/4.2).
+        self._live_view: object | None = None
+        self._live_view_last_seen: float | None = None
+        self._page_constructed_at: float = time.monotonic()
+        self._live_degraded = False
+        self._sine_view: object | None = None
+        self._sine_view_last_seen: float | None = None
 
         # The panel is positioned by hand in ``_layout_panel`` rather than
         # through a layout with an alignment flag: an aligned QBoxLayout item
@@ -2564,7 +3630,7 @@ class LiveMirlDashboardDialog(QWidget):
         body_row.addWidget(self._stack, 1)
         panel_root.addWidget(body, 1)
 
-        self._footer_time = label("Refreshed —", 11, 400, "muted", mono=True)
+        self._footer_time = label("Not loaded", 11, 400, "muted", mono=True)
         panel_root.addWidget(self._build_footer())
 
         def _retheme(tokens) -> None:
@@ -2573,11 +3639,14 @@ class LiveMirlDashboardDialog(QWidget):
         _retheme(DEFAULT_THEME)
         _remember_retheme(self, _retheme)
 
+        # One timer, and it no longer invents a "refreshed" time: the footer
+        # now shows the projection's own generated_at.  All this tick does is
+        # recover the overlay's geometry if the host resized in a way that
+        # produced no plain resize event (a maximize/restore transition).
         self._clock = QTimer(self)
         self._clock.setInterval(1000)
-        self._clock.timeout.connect(self._refresh_footer_time)
+        self._clock.timeout.connect(self._resync_if_stale)
         self._clock.start()
-        self._refresh_footer_time()
 
     # -- open/close -----------------------------------------------------------
 
@@ -2635,18 +3704,14 @@ class LiveMirlDashboardDialog(QWidget):
 
     # -- chrome -----------------------------------------------------------
 
-    def _refresh_footer_time(self) -> None:
-        self._footer_time.setText(f"Refreshed {time.strftime('%H:%M:%S')}")
-        self._resync_if_stale()
-
     def _resync_if_stale(self) -> None:
         """Recover if this overlay's geometry ever drifts from the host's.
 
         The ``eventFilter`` below re-syncs on a plain resize, but some host
         size changes (a maximize/restore window-state transition) are not
-        guaranteed to arrive as a plain ``QEvent.Resize``. The footer clock
-        already ticks every second while the overlay is open, so this
-        piggybacks on it rather than adding a second timer.
+        guaranteed to arrive as a plain ``QEvent.Resize``. One timer already
+        ticks every second while the overlay is open, so this piggybacks on
+        it rather than adding a second timer.
         """
 
         if not self.isVisible() or self._host is None:
@@ -2674,11 +3739,14 @@ class LiveMirlDashboardDialog(QWidget):
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         row.addWidget(title, 1)
 
+        # The three chips are rebuilt from the projection on every render,
+        # so they live in their own layout rather than being added once.
+        self._chip_host = QHBoxLayout()
+        self._chip_host.setContentsMargins(0, 0, 0, 0)
+        self._chip_host.setSpacing(10)
         right = QHBoxLayout()
         right.setSpacing(10)
-        right.addWidget(showcase_chip_pill("MIRL: No Open Episode", "red"))
-        right.addWidget(showcase_chip_pill("Source: Read Model", "green"))
-        right.addWidget(showcase_chip_pill("Projection: Authoritative", "cyan"))
+        right.addLayout(self._chip_host)
         right.addWidget(self._build_close_button())
         row.addLayout(right)
 
@@ -2718,7 +3786,8 @@ class LiveMirlDashboardDialog(QWidget):
         row.setContentsMargins(26, 10, 26, 10)
         row.setSpacing(14)
         row.addWidget(label("Authoritative Native MIRL Episode Evidence", 11, 400, "muted"))
-        row.addWidget(label("Exclusions: 3", 11, 400, "muted"))
+        self._subline_exclusions = label("Exclusions: \u2014", 11, 400, "muted")
+        row.addWidget(self._subline_exclusions)
         row.addStretch(1)
         row.addWidget(showcase_outline_button("Export MIRL Report", small=True))
 
@@ -2732,21 +3801,17 @@ class LiveMirlDashboardDialog(QWidget):
         bar = QFrame()
         bar.setObjectName("mirlDashboardTabbar")
         bar.setFrameShape(QFrame.Shape.NoFrame)
-        bar.setFixedWidth(206)
+        bar.setFixedWidth(190)
         lay = QVBoxLayout(bar)
         lay.setContentsMargins(10, 14, 10, 14)
-        lay.setSpacing(4)
+        lay.setSpacing(2)
 
         self._tab_group = QButtonGroup(self)
         self._tab_group.setExclusive(True)
-        # A single trailing stretch pins the 5 buttons to the top and dumps
-        # all of the tab bar's leftover height into one void below Data
-        # Quality -- next to the content column, which fills its own height
-        # with actual panel content, that reads as a mismatched, half-empty
-        # column. A stretch on both ends centres the button group instead,
-        # so the tab bar's used-vs-empty proportions track the content
-        # column's more evenly at any panel height.
-        lay.addStretch(1)
+        # The mockup's ``.glass-tabbar`` is a plain top-flowing flex column
+        # (``flex-direction: column; gap: 2px; overflow-y: auto``) with no
+        # centring, so the buttons start at the top and the leftover height
+        # falls below them.
         for index, title in enumerate(self.TAB_TITLES):
             button = self._build_tab_button(title)
             self._tab_group.addButton(button, index)
@@ -2765,22 +3830,23 @@ class LiveMirlDashboardDialog(QWidget):
         button = QPushButton(text)
         button.setObjectName("mirlDashboardTab")
         button.setCheckable(True)
-        button.setFont(make_font(13.5, 400))
+        button.setFont(make_font(12.5, 400))
         button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        button.setMinimumHeight(46)
+        button.setMinimumHeight(40)
 
         def _retheme(tokens) -> None:
-            active_bg = qalpha(QColor(tokens.cyan), 0.10).name(QColor.NameFormat.HexArgb)
-            active_border = qalpha(QColor(tokens.cyan), 0.35).name(QColor.NameFormat.HexArgb)
-            hover_bg = qalpha(QColor(tokens.text_primary), 0.05).name(QColor.NameFormat.HexArgb)
+            # ``.glass-tab`` carries no border in any state; the active tab is
+            # a 14% cyan wash alone.
+            active_bg = qalpha(QColor(tokens.cyan), 0.14).name(QColor.NameFormat.HexArgb)
+            hover_bg = _white_alpha(0.05)
             button.setStyleSheet(
                 f"QPushButton#mirlDashboardTab {{ text-align: left; background: transparent;"
-                f" color: {tokens.muted}; border: 1px solid transparent;"
-                f" border-radius: {RADIUS_SM}px; padding: 12px 14px; }}"
+                f" color: {tokens.muted}; border: none;"
+                f" border-radius: {RADIUS_SM}px; padding: 10px 12px; }}"
                 f"QPushButton#mirlDashboardTab:hover {{ background: {hover_bg};"
                 f" color: {tokens.text_primary}; }}"
                 f"QPushButton#mirlDashboardTab:checked {{ background: {active_bg};"
-                f" border: 1px solid {active_border}; color: {tokens.cyan}; font-weight: 700; }}"
+                f" color: {tokens.cyan}; font-weight: 700; }}"
             )
 
         _retheme(DEFAULT_THEME)
@@ -2789,6 +3855,7 @@ class LiveMirlDashboardDialog(QWidget):
 
     def _set_current_tab(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
+        self._render_visible_tab()
 
     @staticmethod
     def _wrap_scroll(page: QWidget) -> QScrollArea:
@@ -2826,90 +3893,33 @@ class LiveMirlDashboardDialog(QWidget):
 
     # -- tab content ----------------------------------------------------------
 
-    def _build_current_tab(self) -> QWidget:
+    def _tab_page(self, spacing: int = 0) -> tuple:
+        """One ``.glass-tabpage`` shell plus the layout its content lives in."""
+
         page = QWidget()
         page.setObjectName("plainBox")
         lay = QVBoxLayout(page)
         lay.setContentsMargins(26, 22, 26, 22)
-        lay.setSpacing(0)
+        lay.setSpacing(spacing)
+        return page, lay
 
-        lay.addWidget(
-            showcase_episode_banner(
-                "Episode Status",
-                "No Active Episode — Inspecting Closed Episode",
-                "Latest Outcome",
-                "Break",
-                status_size=16.0,
-            )
-        )
-        lay.addSpacing(18)
-
-        stats = QGridLayout()
-        stats.setHorizontalSpacing(14)
-        for column, (caption, value, size) in enumerate(
-            (
-                ("Trigger", "71", 22.0),
-                ("SINE Stage", "Not Recorded", 16.0),
-                ("Elapsed Time", "Not Available in Projection", 14.0),
-            )
-        ):
-            stats.addWidget(_glass_gstat(caption, value, size), 0, column)
-            stats.setColumnStretch(column, 1)
-        lay.addLayout(stats)
-        lay.addSpacing(18)
-
-        lay.addWidget(
-            showcase_kv_block(
-                "Episode: EPI104-24072026-02\n"
-                "State: Closed\n"
-                "Latest Outcome: Break\n"
-                "Source Event: 71\n"
-                "Opened: 2026-07-24T06:41:51.596176Z\n"
-                "Closed: 2026-07-24T06:41:59.176Z\n"
-                "Latest Event: episode_closed"
-            )
-        )
-        lay.addStretch(1)
+    def _build_current_tab(self) -> QWidget:
+        page, lay = self._tab_page()
+        self._current_host = lay
         return page
 
     def _build_history_tab(self) -> QWidget:
-        page = QWidget()
-        page.setObjectName("plainBox")
-        lay = QVBoxLayout(page)
-        lay.setContentsMargins(26, 22, 26, 22)
-        lay.setSpacing(0)
-        lay.addWidget(
-            label(
-                "No Active Episode — 13 historical episode(s) below.", 12, 400, "muted"
-            )
-        )
-        lay.addStretch(1)
+        page, lay = self._tab_page()
+        self._history_host = lay
         return page
 
     def _build_timeline_tab(self) -> QWidget:
-        page = QWidget()
-        page.setObjectName("plainBox")
-        lay = QVBoxLayout(page)
-        lay.setContentsMargins(26, 22, 26, 22)
-        lay.setSpacing(0)
-        lay.addWidget(
-            label(
-                "EPI104-24072026-02 · 7 authoritative event(s) — episode_seq order",
-                12,
-                400,
-                "muted",
-            )
-        )
-        lay.addStretch(1)
+        page, lay = self._tab_page()
+        self._timeline_host = lay
         return page
 
     def _build_evidence_tab(self) -> QWidget:
-        page = QWidget()
-        page.setObjectName("plainBox")
-        lay = QVBoxLayout(page)
-        lay.setContentsMargins(26, 22, 26, 22)
-        lay.setSpacing(0)
-
+        page, lay = self._tab_page()
         headers = (
             "#",
             "Episode ID",
@@ -2943,52 +3953,503 @@ class LiveMirlDashboardDialog(QWidget):
         _retheme(DEFAULT_THEME)
         _remember_retheme(table, _retheme)
 
+        self._evidence_caption = label("", 12, 400, "muted")
+        lay.addWidget(self._evidence_caption)
+        lay.addSpacing(14)
+        self._evidence_table = table
         lay.addWidget(table)
         lay.addStretch(1)
         return page
 
     def _build_quality_tab(self) -> QWidget:
-        page = QWidget()
-        page.setObjectName("plainBox")
-        lay = QVBoxLayout(page)
-        lay.setContentsMargins(26, 22, 26, 22)
-        lay.setSpacing(18)
+        page, lay = self._tab_page(spacing=18)
+        self._quality_host = lay
+        return page
+
+    # -- projection -> the five tabs ------------------------------------------
+
+    def render_projection(self, projection: object) -> None:
+        """Take one projection.  Chrome and the visible tab render now; the
+        other four are marked dirty and render when they are first shown."""
+
+        self._projection = projection
+        self._dirty_tabs = set(range(len(self.TAB_TITLES)))
+        self._render_chrome()
+        self._render_visible_tab()
+
+    def _render_visible_tab(self) -> None:
+        index = self._stack.currentIndex()
+        if index not in self._dirty_tabs:
+            return
+        self._dirty_tabs.discard(index)
+        renderer = (
+            self._render_current,
+            self._render_history,
+            self._render_timeline,
+            self._render_evidence,
+            self._render_quality,
+        )[index]
+        renderer()
+
+    def apply_live_view(
+        self,
+        live_view: object | None,
+        live_view_last_seen: float | None,
+        constructed_at: float,
+    ) -> None:
+        """Receive the page's forwarded live engine snapshot (ruling 3.1/4.2)."""
+
+        self._live_view = live_view
+        self._live_view_last_seen = live_view_last_seen
+        self._page_constructed_at = constructed_at
+        self._render_chrome()
+        if self._stack.currentIndex() == 0:
+            self._render_current()
+        else:
+            self._dirty_tabs.add(0)
+
+    def apply_sine_view(
+        self,
+        sine_view: object | None,
+        sine_view_last_seen: float | None,
+        constructed_at: float,
+    ) -> None:
+        """Receive the page's forwarded live SINE snapshot."""
+
+        self._sine_view = sine_view
+        self._sine_view_last_seen = sine_view_last_seen
+        self._page_constructed_at = constructed_at
+        if self._stack.currentIndex() == 0:
+            self._render_current()
+        else:
+            self._dirty_tabs.add(0)
+
+    def _sine_stage_text(self) -> str:
+        return _sine_stage_display(
+            self._sine_view, self._sine_view_last_seen, self._page_constructed_at
+        )
+
+    def _trigger_text(self, focus: object) -> str:
+        return _mirl_trigger_text(
+            self._live_view,
+            self._live_view_last_seen,
+            self._page_constructed_at,
+            fallback=getattr(focus, "source_event_id", None),
+        )
+
+    def _state(self) -> str:
+        state, self._live_degraded = _mirl_effective_state(
+            self._projection,
+            self._live_view,
+            self._live_view_last_seen,
+            self._page_constructed_at,
+        )
+        return state
+
+    def _focus(self):
+        return _mirl_effective_focus(
+            self._projection,
+            self._live_view,
+            self._live_view_last_seen,
+            self._page_constructed_at,
+        )
+
+    def _episodes(self) -> tuple:
+        projection = self._projection
+        active = tuple(getattr(projection, "active_episodes", ()) or ())
+        closed = tuple(getattr(projection, "recently_closed_episodes", ()) or ())
+        return active, closed
+
+    def _empty_text(self, fallback: str) -> str:
+        return _mirl_text(getattr(self._projection, "empty_state_reason", None), fallback)
+
+    def _render_chrome(self) -> None:
+        projection = self._projection
+        state = self._state()
+        _clear_layout(self._chip_host)
+        if state == MIRL_STATE_ACTIVE:
+            episode_chip = ("MIRL: Episode Open", "green")
+        elif state == MIRL_STATE_IDLE:
+            episode_chip = ("MIRL: No Open Episode", "red")
+        elif state == MIRL_STATE_EMPTY:
+            episode_chip = ("MIRL: No Evidence", None)
+        else:
+            episode_chip = ("MIRL: Not Loaded", None)
+        # Integrity rides a NEUTRAL chip.  Degraded evidence is the ordinary
+        # condition of this surface, so it is stated plainly rather than
+        # coloured like a fault.
+        integrity = getattr(projection, "integrity_status", None)
+        integrity_text = _mirl_text(getattr(integrity, "value", integrity), "UNKNOWN")
+        chips = (
+            episode_chip,
+            (f"Integrity: {integrity_text}", "green" if integrity_text == "CONFIRMED" else None),
+            ("Source: Read Model", "cyan"),
+        )
+        if self._live_degraded:
+            chips = chips + (("Live Signal: Unavailable", None),)
+        for text, role in chips:
+            chip = showcase_chip_pill(text, role)
+            self._chip_host.addWidget(chip)
+            _retheme_subtree(chip)
+
+        metadata = getattr(projection, "metadata", None)
+        exclusions = getattr(metadata, "exclusion_count", None)
+        self._subline_exclusions.setText(
+            f"Exclusions: {exclusions}" if isinstance(exclusions, int) else "Exclusions: \u2014"
+        )
+        generated = getattr(metadata, "generated_at", None)
+        self._footer_time.setText(
+            f"Projected {_mirl_stamp(generated)}" if generated else "Not loaded"
+        )
+
+    def _render_current(self) -> None:
+        _clear_layout(self._current_host)
+        lay = self._current_host
+        focus = self._focus()
+        if focus is None:
+            lay.addWidget(
+                label(self._empty_text("No projection loaded yet."), 12, 400, "muted", wrap=True)
+            )
+            lay.addStretch(1)
+            return
+
+        active = self._state() == MIRL_STATE_ACTIVE
+        outcome = getattr(focus, "final_outcome", None)
+        banner = showcase_episode_banner(
+            "Episode Status",
+            "Episode Active" if active else "No Active Episode \u2014 Inspecting Closed Episode",
+            "Latest Outcome",
+            "In Progress" if active else _mirl_text(outcome),
+            ok=active,
+            status_size=16.0,
+        )
+        lay.addWidget(banner)
+        lay.addSpacing(18)
+
+        stats = QGridLayout()
+        stats.setHorizontalSpacing(14)
+        cells = (
+            ("Trigger", self._trigger_text(focus), 22.0),
+            ("SINE Stage", self._sine_stage_text(), 16.0),
+            (
+                "Elapsed Time",
+                _mirl_elapsed(getattr(focus, "started_at", None))
+                if active
+                else _mirl_duration(getattr(focus, "stable_recovery_latency_seconds", None)),
+                16.0,
+            ),
+        )
+        for column, (caption, value, size) in enumerate(cells):
+            stats.addWidget(_glass_gstat(caption, value, size), 0, column)
+            stats.setColumnStretch(column, 1)
+        lay.addLayout(stats)
+        lay.addSpacing(18)
+
+        timeline = tuple(getattr(focus, "timeline", ()) or ())
+        latest = timeline[-1] if timeline else None
+        lay.addWidget(
+            showcase_kv_block(
+                f"Episode: {_mirl_text(getattr(focus, 'short_display_id', None))}\n"
+                f"State: {_mirl_text(getattr(focus, 'episode_status', None))}\n"
+                f"Latest Outcome: {_mirl_text(outcome, 'In Progress')}\n"
+                f"Source Event: {_mirl_text(getattr(focus, 'source_event_id', None))}\n"
+                f"Session: {_mirl_text(getattr(focus, 'session_id', None))}\n"
+                f"Application: {_mirl_text(getattr(focus, 'candidate_uid', None))}\n"
+                f"Opened: {_mirl_text(getattr(focus, 'started_at', None))}\n"
+                f"Latest Event: {_mirl_text(getattr(latest, 'event_name', None))}\n"
+                f"Recovery Attempts: {_mirl_text(getattr(focus, 'recovery_attempt_count', None))}\n"
+                f"Relapses: {_mirl_text(getattr(focus, 'relapse_count', None))}\n"
+                f"Integrity: {_mirl_text(getattr(getattr(focus, 'integrity_status', None), 'value', None))}"
+            )
+        )
+        lay.addStretch(1)
+        _retheme_subtree(self._current_host.parentWidget())
+
+    def _render_history(self) -> None:
+        _clear_layout(self._history_host)
+        lay = self._history_host
+        active, closed = self._episodes()
+        episodes = (*active, *closed)
+        if not episodes:
+            lay.addWidget(
+                label(self._empty_text("No episode has been recorded."), 12, 400, "muted", wrap=True)
+            )
+            lay.addStretch(1)
+            return
+
+        drawn = min(self.HISTORY_STRIPS_EXPANDED, len(episodes))
+        caption = (
+            f"{len(active)} open \u00b7 {len(closed)} closed episode(s), newest first."
+        )
+        if len(episodes) > drawn:
+            caption += (
+                f"  Journeys for the newest {drawn} are drawn; open any other "
+                "episode's journey with its own button."
+            )
+        lay.addWidget(label(caption, 12, 400, "muted", wrap=True))
+        lay.addSpacing(14)
+        for index, row in enumerate(episodes):
+            lay.addWidget(self._history_card(row, expanded=index < drawn))
+            lay.addSpacing(12)
+        lay.addStretch(1)
+
+    def _history_card(self, row: object, *, expanded: bool) -> QFrame:
+        """One episode: header always, journey strip on request.
+
+        Collapsing a strip hides nothing that is not stated on the card -- the
+        episode, its outcome, its opening stamp and its recorded event count
+        are all on the header, and History Evidence lists every episode in
+        full regardless.
+        """
+
+        card, body = _glass_gcard(padding=16)
+        timeline = tuple(getattr(row, "timeline", ()) or ())
+        outcome = getattr(row, "final_outcome", None)
+
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        head.addWidget(
+            label(_mirl_text(getattr(row, "short_display_id", None)), 12.5, 700, "cyan", spacing=1.2)
+        )
+        head.addStretch(1)
+        head.addWidget(label(f"{len(timeline)} recorded events", 11, 400, "muted"))
+        head.addWidget(
+            showcase_chip_pill(
+                _mirl_text(outcome, "In Progress"),
+                "green" if _mirl_recovered(outcome) else ("red" if outcome else "cyan"),
+            )
+        )
+        head.addWidget(label(_mirl_stamp(getattr(row, "started_at", None)), 11, 400, "muted"))
+        toggle = showcase_outline_button("Hide Journey" if expanded else "Show Journey", small=True)
+        toggle.setEnabled(bool(timeline))
+        toggle.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        head.addWidget(toggle)
+        body.addLayout(head)
+
+        strip_host = QScrollArea()
+        strip_host.setObjectName("showcaseScroll")
+        strip_host.setWidgetResizable(True)
+        strip_host.setFrameShape(QFrame.Shape.NoFrame)
+        strip_host.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        strip_host.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        strip_host.setMinimumHeight(150)
+        strip_host.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        strip_host.viewport().setStyleSheet("background: transparent;")
+        strip_body = QWidget()
+        strip_body.setObjectName("plainBox")
+        strip_layout = QHBoxLayout(strip_body)
+        strip_layout.setContentsMargins(0, 0, 0, 6)
+        strip_layout.setSpacing(6)
+        strip_host.setWidget(strip_body)
+        body.addSpacing(12)
+        body.addWidget(strip_host)
+
+        # ``shown`` is tracked explicitly rather than read back from
+        # ``strip_host.isVisible()``: a widget reports itself invisible
+        # whenever ANY ancestor is hidden, so querying it would make the
+        # toggle stick open while the overlay itself is closed.
+        state = {"built": False, "shown": bool(expanded)}
+
+        def build() -> None:
+            if state["built"]:
+                return
+            state["built"] = True
+            _mirl_fill_journey_strip(strip_layout, row)
+            _retheme_subtree(strip_body)
+
+        def toggled() -> None:
+            state["shown"] = not state["shown"]
+            if state["shown"]:
+                build()
+            strip_host.setVisible(state["shown"])
+            toggle.setText("Hide Journey" if state["shown"] else "Show Journey")
+
+        toggle.clicked.connect(toggled)
+        if expanded:
+            build()
+        else:
+            strip_host.setVisible(False)
+        _retheme_subtree(card)
+        return card
+
+    def _render_timeline(self) -> None:
+        _clear_layout(self._timeline_host)
+        lay = self._timeline_host
+        focus = self._focus()
+        timeline = tuple(getattr(focus, "timeline", ()) or ()) if focus is not None else ()
+        if not timeline:
+            lay.addWidget(label("No authoritative event to show.", 12, 400, "muted"))
+            lay.addStretch(1)
+            return
+        lay.addWidget(
+            label(
+                f"{_mirl_text(getattr(focus, 'short_display_id', None))} \u00b7 "
+                f"{len(timeline)} authoritative event(s) \u2014 episode_seq order",
+                12,
+                400,
+                "muted",
+            )
+        )
+        lay.addSpacing(14)
+        for event in timeline:
+            lay.addWidget(self._timeline_row(event))
+            lay.addSpacing(10)
+        lay.addStretch(1)
+
+    def _timeline_row(self, event: object) -> QFrame:
+        card, body = _glass_gcard(padding=14)
+        row = QHBoxLayout()
+        row.setSpacing(14)
+        row.addWidget(
+            label(f"#{_mirl_text(getattr(event, 'episode_seq', None))}", 11, 400, "muted", mono=True)
+        )
+        row.addWidget(label(_mirl_event_title(getattr(event, "event_name", None)), 12.5, 700, "text"))
+        row.addStretch(1)
+        pill_role, pill_text = _mirl_event_pill(getattr(event, "event_name", None))
+        row.addWidget(showcase_journey_pill(pill_role, pill_text))
+        row.addWidget(
+            showcase_chip_pill(
+                f"{str(getattr(event, 'observed_or_derived', '') or '').title()} "
+                f"{_mirl_clock(getattr(event, 'occurred_at', None))}",
+                "cyan",
+            )
+        )
+        code = getattr(event, "reason_or_outcome_code", None)
+        if code:
+            row.addWidget(showcase_chip_pill(_mirl_text(code), None))
+        if getattr(event, "reference", None):
+            row.addWidget(showcase_chip_pill("Has Evidence", None))
+        body.addLayout(row)
+        _retheme_subtree(card)
+        return card
+
+    def _render_evidence(self) -> None:
+        active, closed = self._episodes()
+        episodes = (*active, *closed)
+        self._evidence_caption.setText(
+            f"{len(episodes)} episode(s) in this projection \u2014 every column is a "
+            "recorded or projected value; nothing is estimated."
+            if episodes
+            else self._empty_text("No episode has been recorded.")
+        )
+        table = self._evidence_table
+        table.setRowCount(len(episodes))
+        for index, row in enumerate(episodes):
+            timeline = tuple(getattr(row, "timeline", ()) or ())
+            outcome = getattr(row, "final_outcome", None)
+            recovered = _mirl_recovered(outcome)
+            cells = (
+                str(index + 1),
+                _mirl_text(getattr(row, "short_display_id", None)),
+                _mirl_duration(getattr(row, "stable_recovery_latency_seconds", None)),
+                _mirl_stamp(getattr(timeline[-1], "occurred_at", None))
+                if timeline and recovered
+                else _MIRL_UNAVAILABLE,
+                _mirl_highest_sine(row),
+                _mirl_stamp(getattr(row, "started_at", None)),
+                _mirl_text(getattr(row, "candidate_uid", None), _MIRL_UNAVAILABLE),
+                _mirl_duration(getattr(row, "verified_return_latency_seconds", None)),
+            )
+            for column, value in enumerate(cells):
+                table.setItem(index, column, QTableWidgetItem(value))
+
+    def _render_quality(self) -> None:
+        _clear_layout(self._quality_host)
+        lay = self._quality_host
+        projection = self._projection
+        integrity = getattr(projection, "integrity_status", None)
+        integrity_text = _mirl_text(getattr(integrity, "value", integrity), "UNKNOWN")
+        metadata = getattr(projection, "metadata", None)
+        issues = tuple(getattr(projection, "integrity_issues", ()) or ())
+        exclusions = tuple(getattr(metadata, "exclusions", ()) or ())
 
         first, first_body = _glass_gcard(padding=20)
         first_body.addWidget(label("Authoritative Evidence Boundary", 14, 700, "text"))
         first_body.addSpacing(6)
-        first_body.addWidget(label("Read-model source available", 12, 600, "green"))
+        # CONFIRMED reads green; every other status reads muted, NOT red.
+        # Degraded evidence is still authoritative evidence -- it is reported,
+        # not alarmed about.
+        first_body.addWidget(
+            label(
+                _mirl_text(getattr(projection, "status_message", None), "No projection loaded"),
+                12,
+                600,
+                "green" if integrity_text == "CONFIRMED" else "muted",
+                wrap=True,
+            )
+        )
         first_body.addSpacing(8)
         first_body.addWidget(
             showcase_kv_block(
-                "Presentation mode: Design preview with sample data\n"
-                "Production rule: Every journey node must be projected from a "
-                "committed MIRL event\n"
-                "Missing evidence: Display as unavailable; never paint as completed\n"
+                f"Integrity status: {integrity_text}\n"
+                f"Integrity issues: {len(issues)}\n"
+                f"Metric exclusions: {_mirl_text(getattr(metadata, 'exclusion_count', None))}\n"
+                f"Evidence population: {_mirl_text(getattr(metadata, 'evidence_population', None))}\n"
+                f"Population scope: {_mirl_text(getattr(metadata, 'population_scope', None))}\n"
+                f"Range: {_mirl_text(getattr(metadata, 'selected_range_label', None))}\n"
+                f"Projected at: {_mirl_text(getattr(metadata, 'generated_at', None))}\n"
+                f"Projector: {_mirl_text(getattr(metadata, 'projector_version', None))}\n"
                 "Episode ordering: episode_seq\n"
+                "Missing evidence: Display as unavailable; never paint as completed\n"
                 "Scientific boundary: Behavioral and software evidence only"
             )
         )
         lay.addWidget(first)
 
+        counts = dict(getattr(projection, "native_outcome_counts", {}) or {})
+        availability = dict(getattr(projection, "evidence_availability", {}) or {})
         second, second_body = _glass_gcard(padding=20)
-        second_body.addWidget(label("Preview Integrity Notice", 14, 700, "text"))
+        second_body.addWidget(label("Recorded Outcome Population", 14, 700, "text"))
         second_body.addSpacing(6)
         second_body.addWidget(
             label(
-                "The values in this dialog demonstrate layout only. They are not "
-                "production evidence and must not be written to MYELIN databases, "
-                "telemetry, or reports.",
+                "Counts below come from the read model unchanged. An episode with "
+                "no closing event stays PENDING here even where Live MIRL shows it "
+                "as NOT_RETURNED, because no recorded event ever ended it.",
                 12,
                 400,
                 "muted",
                 wrap=True,
             )
         )
+        second_body.addSpacing(8)
+        second_body.addWidget(
+            showcase_kv_block(
+                "\n".join(f"{key}: {value}" for key, value in counts.items())
+                + ("\n" if counts and availability else "")
+                + "\n".join(f"{key}: {value}" for key, value in availability.items())
+                or "No counts published."
+            )
+        )
         lay.addWidget(second)
 
+        third, third_body = _glass_gcard(padding=20)
+        third_body.addWidget(label("Integrity Issues and Exclusions", 14, 700, "text"))
+        third_body.addSpacing(6)
+        if not issues and not exclusions:
+            third_body.addWidget(
+                label("No integrity issue or metric exclusion was recorded.", 12, 400, "muted")
+            )
+        else:
+            lines = [
+                f"[{_mirl_text(getattr(getattr(issue, 'severity', None), 'value', None))}] "
+                f"{_mirl_text(getattr(issue, 'code', None))} \u2014 "
+                f"{_mirl_text(getattr(issue, 'detail', None))}"
+                for issue in issues[:40]
+            ]
+            lines += [
+                f"[EXCLUDED] {_mirl_text(getattr(item, 'metric', None))} \u2014 "
+                f"{_mirl_text(getattr(item, 'reason', None))}"
+                for item in exclusions[:40]
+            ]
+            hidden = max(0, len(issues) - 40) + max(0, len(exclusions) - 40)
+            if hidden:
+                lines.append(f"\u2026 and {hidden} more not listed here.")
+            third_body.addWidget(showcase_kv_block("\n".join(lines)))
+        lay.addWidget(third)
+
         lay.addStretch(1)
-        return page
+        _retheme_subtree(self._quality_host.parentWidget())
 
 
 class CosineShowcasePage(QWidget):
@@ -4472,11 +5933,17 @@ class ControlStationWindow(QMainWindow):
                 notes_workspace=self.notes_workspace,
                 note_store=self.storage,
             ),
-            # Showcase visual body; the read-model page is reconnected in a
-            # later approved phase.  analytics.py itself is untouched.
+            # Showcase visual body; Metric Hub and COSINE are still fixture
+            # surfaces, reconnected in a later approved phase.  Live MIRL is
+            # now wired to the real read model: it is registered on the SAME
+            # shared refresh lane the analytics pages use, so navigating to
+            # it triggers exactly one coalesced projection read and no second
+            # reader is created.  analytics.py itself is untouched.
             metric_hub=MetricHubShowcasePage(),
             science_lab=self.analytics.create_science_lab_page(),
-            live_mirl=LiveMirlShowcasePage(),
+            live_mirl=self.analytics._create_page(  # noqa: SLF001 -- see above
+                PAGE_LIVE_MIRL, LiveMirlShowcasePage
+            ),
             mine=ComingSoonPage(
                 "MINE",
                 "Messaging Intervention Nudge Escalation",
@@ -4542,6 +6009,36 @@ class ControlStationWindow(QMainWindow):
         # interpret or recalculate any telemetry value.
         self.engine.control_view_changed.connect(self.pages.control.render)
         self.engine.sine_watch_status_changed.connect(self.pages.control.render_sine)
+        # Live MIRL's "Episode Active" badge must read the running engine,
+        # not be inferred from the read model's history -- see ruling
+        # 3.1/4.2 (myelin-mirl-live-signal-roadmap memory). The other four
+        # Live MIRL Dashboard tabs stay on the projection refresh lane above.
+        self.engine.mirl_health_status_changed.connect(self.pages.live_mirl.render_live_view)
+        # Live "SINE Stage" readout on the same page: a second subscriber on
+        # the SAME signal Control already uses (sine_watch_status_changed),
+        # not a new source of truth. "SINE INACTIVE" with no trigger, the
+        # real stage once one is in flight -- same build request as above.
+        self.engine.sine_watch_status_changed.connect(self.pages.live_mirl.render_sine_view)
+        # Event Journey must reflect the episode's real ending, not whatever
+        # it looked like mid-flight: request one real projection refresh the
+        # moment the engine reports STOPPED. engine_stopped only fires after
+        # Core Engine cleanup is confirmed factual (see
+        # EngineController._finish_worker_exit), so the terminal event
+        # (episode_closed / emergency_stopped) is already persisted by the
+        # time this fires -- no risk of reading ahead of the write. Reuses
+        # the SAME refresh lane a manual refresh or page navigation already
+        # uses (AnalyticsController._create_page wires refresh_requested to
+        # the real refresh); this is not a second refresh mechanism.
+        self.engine.engine_stopped.connect(self.pages.live_mirl.refresh_requested.emit)
+        # Session No. (and, so the three live readouts never disagree, the
+        # episode badge and SINE Stage too) must not sit on a frozen number
+        # left over from before Stop was pressed. The 5s staleness timeout
+        # in _mirl_effective_state / _sine_stage_display / _mirl_session_text
+        # would get there on its own, but engine_stopped already tells us
+        # definitively -- so clear both live snapshots immediately instead
+        # of leaving the UI stale for up to 5 more seconds.
+        self.engine.engine_stopped.connect(lambda: self.pages.live_mirl.render_live_view(None))
+        self.engine.engine_stopped.connect(lambda: self.pages.live_mirl.render_sine_view(None))
         self.engine.normal_break_fact_changed.connect(
             self.pages.control.render_normal_break_fact
         )
@@ -4749,6 +6246,7 @@ class ControlStationWindow(QMainWindow):
         if app is not None:
             app.setStyleSheet(build_application_stylesheet(theme))
         set_active_theme(theme)
+        _set_live_tokens(theme)
         self.navigation.apply_theme(theme)
         self.shell.apply_theme(theme)
         self.pages.study.apply_theme(theme)
