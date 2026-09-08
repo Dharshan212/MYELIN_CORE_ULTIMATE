@@ -50,6 +50,7 @@ LIVE_VIEW_KINDS: Final = frozenset(
         "study_runtime_view",
         "cosecant_view",
         "cosine_live_status",
+        "handover_live_status",
         "resource_intent_live_status",
         "sine_watch_status",
         "mine_watch_status",
@@ -71,6 +72,7 @@ TERMINAL_KINDS: Final = frozenset(
         "normal_break_fact",
         "resource_intent_fact",
         "cosine_effect",
+        "mine_effect",
         "cosecant_fact",
         # Final MIRL closure must survive queue pressure: losing it could
         # leave the common theme's Amber/Red warning stuck forever.
@@ -209,6 +211,8 @@ class ControlStationController(QObject):
     control_view_changed = pyqtSignal(object)
     study_view_changed = pyqtSignal(object)
     cosine_live_status_changed = pyqtSignal(object)
+    handover_live_status_changed = pyqtSignal(object)
+    handover_family_signal_received = pyqtSignal(object)
     resource_intent_live_status_changed = pyqtSignal(object)
     sine_watch_status_changed = pyqtSignal(object)
     mine_watch_status_changed = pyqtSignal(object)
@@ -329,9 +333,11 @@ class ControlStationController(QObject):
             install_popup_dispatcher as install_study,
         )
         from COSINE.popup import install_cosine_dispatcher
+        from MINE.popup import install_mine_dispatcher
         from SINE.popup import NormalBreakPresenter, SinePopupPresenter
 
-        install_cosine_dispatcher(app)
+        install_cosine_dispatcher(app, owner=owner)
+        install_mine_dispatcher(app, owner=owner)
         install_study(app)
         presenter = SinePopupPresenter(owner=owner, parent=self)
         presenter.popup_shown.connect(
@@ -552,6 +558,17 @@ class ControlStationController(QObject):
         except queue.Empty as exc:
             raise RuntimeError("COSINE command acknowledgement timed out") from exc
 
+    def submit_mine_command(self, command):
+        """Synchronously return the exact backend MINE command result."""
+
+        response: queue.Queue = queue.Queue(maxsize=1)
+        if not self._enqueue_command("mine_command", command, response):
+            raise RuntimeError("MINE command queue is full")
+        try:
+            return response.get(timeout=1.5)
+        except queue.Empty as exc:
+            raise RuntimeError("MINE command acknowledgement timed out") from exc
+
     # ------------------------------------------------------------------
     # Study / COSECANT requests
     #
@@ -761,6 +778,7 @@ class ControlStationController(QObject):
         # Clear old replace-in-place cards immediately.  This is presentation
         # cleanup only; it does not reset any Core Engine state.
         self.cosine_live_status_changed.emit(None)
+        self.handover_live_status_changed.emit(None)
         self.resource_intent_live_status_changed.emit(None)
         self.sine_watch_status_changed.emit(None)
         self.mine_watch_status_changed.emit(None)
@@ -952,6 +970,7 @@ class ControlStationController(QObject):
             "study_runtime_view": self.study_view_changed,
             "cosecant_view": self.study_view_changed,
             "cosine_live_status": self.cosine_live_status_changed,
+            "handover_live_status": self.handover_live_status_changed,
             "resource_intent_live_status": self.resource_intent_live_status_changed,
             "sine_watch_status": self.sine_watch_status_changed,
             "mine_watch_status": self.mine_watch_status_changed,
@@ -960,6 +979,10 @@ class ControlStationController(QObject):
         signal = routes.get(kind)
         if signal is not None:
             signal.emit(raw.get("live_view"))
+            return True
+
+        if kind == "handover_family_signal":
+            self.handover_family_signal_received.emit(raw)
             return True
 
         if kind == "sine_fact":
@@ -1020,9 +1043,29 @@ class ControlStationController(QObject):
                 effect, submit_command=self.submit_cosine_command
             )
             if not delivered and getattr(effect, "kind", None) in {
-                EffectKind.SHOW_CHECKIN, EffectKind.SHOW_WELCOME
+                EffectKind.SHOW_INTENT_GATE,
+                EffectKind.SHOW_DURATION_ENTRY,
+                EffectKind.SHOW_BREAK_ACK,
+                EffectKind.SHOW_FINAL_CALLBACK,
             }:
                 self._emit_failure("COSINE popup dispatcher rejected a show effect")
+            return True
+
+        if kind == "mine_effect":
+            effect = raw.get("effect")
+            if effect is None:
+                return True
+            from MINE.mine import MineEffectKind
+            from MINE.popup import dispatch_mine_effect
+            delivered = dispatch_mine_effect(
+                effect, submit_command=self.submit_mine_command
+            )
+            if not delivered and getattr(effect, "kind", None) in {
+                MineEffectKind.SHOW_MINE1,
+                MineEffectKind.SHOW_IMPORTANT_DURATION,
+                MineEffectKind.SHOW_MINE2,
+            }:
+                self._emit_failure("MINE popup dispatcher rejected a show effect")
             return True
 
         if kind == "protected_red_status":
@@ -1105,6 +1148,11 @@ class ControlStationController(QObject):
         try:
             from COSINE.popup import shutdown_cosine_dispatcher
             shutdown_cosine_dispatcher()
+        except Exception:
+            pass
+        try:
+            from MINE.popup import shutdown_mine_dispatcher
+            shutdown_mine_dispatcher()
         except Exception:
             pass
         """Release Qt resources after lifecycle.py approves shutdown.

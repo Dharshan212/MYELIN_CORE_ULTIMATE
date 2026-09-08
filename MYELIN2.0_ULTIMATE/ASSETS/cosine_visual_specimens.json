@@ -1,0 +1,2096 @@
+{
+  "metadata": {
+    "fixture_kind": "PHASE_2AT1_STATIC_REAL_EVIDENCE_SNAPSHOT",
+    "phase": "2@.1",
+    "created_at_utc": "2026-09-03T05:04:50Z",
+    "source_database": "%APPDATA%\\MYELIN\\myelin2.0_session.db (canonical MYELIN 2.0 runtime database)",
+    "source_database_sha256": "4a63b2b4d6a2079d2e0d22ebfdfc2055fb0878c0b3a550492880a1d4706b428d",
+    "source_database_access": "sqlite3 URI mode=ro; write probe rejected; source byte-identical before and after",
+    "source_snapshot_file": "cosine_evidence_snapshot.db",
+    "source_snapshot_sha256": "6b567e43d6842323d63122b030104201b8a92c6977a759f292c5ed599bcf0d14",
+    "source_schema": "myelin-cosine-v3-parent-session",
+    "source_table": "cosine_events",
+    "production_archive": "MYELIN2.0_ULTIMATE_COSINE_PHASE_1K_BADGE_COLOR_SEPARATION_CANDIDATE_20260903.zip",
+    "production_archive_sha256": "d085a233cc875684b3646a5e73631775e01337ef590cd826a9bd211926ad0c02",
+    "production_archive_hash_verified": true,
+    "total_cosine_events": 118,
+    "total_episodes": 8,
+    "evidence_window_utc": [
+      "2026-09-02T15:15:42.536444+00:00",
+      "2026-09-02T20:40:52.375643+00:00"
+    ],
+    "timestamp_format_observed": "ISO-8601 with '+00:00' suffix in cosine_events (0 of 118 rows use 'Z'); sessions.started_at_utc uses 'Z'. The Phase-2 read model must parse both forms.",
+    "warning": "STATIC VISUAL LAB DATA - NOT LIVE MYELIN TRUTH",
+    "no_fabrication_statement": "Every specimen below is verbatim durable evidence. No episode, event, timestamp, platform key or payload was invented, edited or reordered."
+  },
+  "specimens": [
+    {
+      "specimen_id": "REAL-COSINE-EP01-SIMPLE-RETURN",
+      "specimen_type": "SIMPLE_RETURN",
+      "selection_role": "PRIMARY",
+      "satisfies_target_specimens": [
+        "A"
+      ],
+      "also_demonstrates": [],
+      "evidence_status": "REAL_DURABLE_EVIDENCE",
+      "parent_session_id": 78,
+      "cosine_session_id": "aff4c4f113e30439b82a289cdb0bdc2c",
+      "generation": 1,
+      "sequence_range": [
+        1,
+        13
+      ],
+      "event_count": 13,
+      "first_event_utc": "2026-09-02T15:15:42.536444+00:00",
+      "last_event_utc": "2026-09-02T15:30:57.492605+00:00",
+      "platform_keys_observed": [
+        "prime_video"
+      ],
+      "closure_payload_as_recorded": {
+        "chosen_break_minutes": null,
+        "closure_outcome": "RETURNED_AFTER_INTENT",
+        "closure_reason": "RETURN_CONFIRMED",
+        "foreground_ott_seconds": 320.365743,
+        "hopper_count": 0,
+        "platform_seconds": {
+          "prime_video": 320.365743
+        }
+      },
+      "episode_is_closed": true,
+      "analyst_note": "Intent gate displayed, user chose RETURN_INTENTION, return candidate verified, closure confirmed, closed RETURNED_AFTER_INTENT. Single platform, no hopper.",
+      "events": [
+        {
+          "sequence": 1,
+          "event_name": "COSINE_SESSION_STARTED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T15:15:42.536444+00:00",
+          "monotonic_ns": 357406738031200,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: Watch movies, TV shows, sports, and live TV",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {
+            "evidence_source": "CERTIFIED_HOST"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 2,
+          "event_name": "OTT_PLATFORM_ENTERED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T15:15:42.536548+00:00",
+          "monotonic_ns": 357406738031200,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: Watch movies, TV shows, sports, and live TV",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 3,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T15:15:42.547899+00:00",
+          "monotonic_ns": 357406738031200,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: Watch movies, TV shows, sports, and live TV",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 4,
+          "event_name": "INTENT_GATE_ELIGIBLE",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T15:29:21.544613+00:00",
+          "monotonic_ns": 358225737161500,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-intent-1-d7e76b0ca6a8",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 5,
+          "event_name": "INTENT_GATE_REQUESTED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T15:29:21.544653+00:00",
+          "monotonic_ns": 358225737161500,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-intent-1-d7e76b0ca6a8",
+          "evidence_token_present": false,
+          "payload": {
+            "request_id": "cosine-intent-1-d7e76b0ca6a8"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 6,
+          "event_name": "INTENT_GATE_DISPLAYED",
+          "event_class": "PRESENTATION",
+          "occurred_at_utc": "2026-09-02T15:29:22.998562+00:00",
+          "monotonic_ns": 358226033095000,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-intent-1-d7e76b0ca6a8",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 7,
+          "event_name": "RETURN_INTENT_RECORDED",
+          "event_class": "USER_ACTION",
+          "occurred_at_utc": "2026-09-02T15:29:41.002167+00:00",
+          "monotonic_ns": 358244552810400,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-intent-1-d7e76b0ca6a8",
+          "evidence_token_present": false,
+          "payload": {
+            "choice": "RETURN_INTENTION"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 8,
+          "event_name": "RETURN_INTENT_WINDOW_STARTED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T15:29:41.002374+00:00",
+          "monotonic_ns": 358244552810400,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-intent-1-d7e76b0ca6a8",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 9,
+          "event_name": "RETURN_CANDIDATE_STARTED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T15:29:45.492265+00:00",
+          "monotonic_ns": 358249739814200,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "RETURN_INTENT"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 10,
+          "event_name": "RETURN_VERIFICATION_COMPLETED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T15:29:56.001413+00:00",
+          "monotonic_ns": 358260248697500,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "RETURN_INTENT"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 11,
+          "event_name": "CLOSURE_CONFIRMATION_STARTED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T15:29:56.001467+00:00",
+          "monotonic_ns": 358260248697500,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "RETURN_INTENT"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 12,
+          "event_name": "RETURN_CONFIRMED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T15:30:57.492457+00:00",
+          "monotonic_ns": 358321738612000,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "closure_outcome": "RETURNED_AFTER_INTENT"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 13,
+          "event_name": "COSINE_SESSION_CLOSED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T15:30:57.492605+00:00",
+          "monotonic_ns": 358321738612000,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "chosen_break_minutes": null,
+            "closure_outcome": "RETURNED_AFTER_INTENT",
+            "closure_reason": "RETURN_CONFIRMED",
+            "foreground_ott_seconds": 320.365743,
+            "hopper_count": 0,
+            "platform_seconds": {
+              "prime_video": 320.365743
+            }
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        }
+      ]
+    },
+    {
+      "specimen_id": "REAL-COSINE-EP02-SINE-HANDOFF-CLOSURE",
+      "specimen_type": "CONTEXT_ONLY_HOLD_AREA",
+      "selection_role": "CONTEXT_ONLY",
+      "satisfies_target_specimens": [],
+      "also_demonstrates": [],
+      "evidence_status": "REAL_DURABLE_EVIDENCE",
+      "parent_session_id": 78,
+      "cosine_session_id": "0eb424d763e8eaa5e6b3d2ee39226d77",
+      "generation": 2,
+      "sequence_range": [
+        1,
+        4
+      ],
+      "event_count": 4,
+      "first_event_utc": "2026-09-02T15:31:08.037895+00:00",
+      "last_event_utc": "2026-09-02T15:38:06.492085+00:00",
+      "platform_keys_observed": [
+        "prime_video"
+      ],
+      "closure_payload_as_recorded": {
+        "chosen_break_minutes": null,
+        "closure_outcome": "HANDOVER",
+        "closure_reason": "SINE_HANDOFF",
+        "foreground_ott_seconds": 1.492766,
+        "hopper_count": 0,
+        "platform_seconds": {
+          "prime_video": 1.492766
+        }
+      },
+      "episode_is_closed": true,
+      "analyst_note": "Episode closed with closure_reason SINE_HANDOFF and closure_outcome HANDOVER. RECORDED VERBATIM ONLY. The SINE<->COSINE handoff seam is a Phase-2@.1 HOLD area and was NOT investigated, inferred, tested or diagnosed.",
+      "events": [
+        {
+          "sequence": 1,
+          "event_name": "COSINE_SESSION_STARTED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T15:31:08.037895+00:00",
+          "monotonic_ns": 358332244438500,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: Watch movies, TV shows, sports, and live TV",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {
+            "evidence_source": "CERTIFIED_HOST"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 2,
+          "event_name": "OTT_PLATFORM_ENTERED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T15:31:08.037930+00:00",
+          "monotonic_ns": 358332244438500,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: Watch movies, TV shows, sports, and live TV",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 3,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T15:31:08.039374+00:00",
+          "monotonic_ns": 358332244438500,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: Watch movies, TV shows, sports, and live TV",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 4,
+          "event_name": "COSINE_SESSION_CLOSED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T15:38:06.492085+00:00",
+          "monotonic_ns": 358749498357300,
+          "platform_key": "prime_video",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "chosen_break_minutes": null,
+            "closure_outcome": "HANDOVER",
+            "closure_reason": "SINE_HANDOFF",
+            "foreground_ott_seconds": 1.492766,
+            "hopper_count": 0,
+            "platform_seconds": {
+              "prime_video": 1.492766
+            }
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        }
+      ]
+    },
+    {
+      "specimen_id": "REAL-COSINE-EP03-BREAK-CALLBACK-RELAPSE-RETURN",
+      "specimen_type": "INTENTIONAL_BREAK_CALLBACK_RETURN",
+      "selection_role": "PRIMARY",
+      "satisfies_target_specimens": [
+        "B",
+        "C",
+        "D"
+      ],
+      "also_demonstrates": [
+        "HOPPER",
+        "RELAPSE_RESTORED_CALLBACK"
+      ],
+      "evidence_status": "REAL_DURABLE_EVIDENCE",
+      "parent_session_id": 79,
+      "cosine_session_id": "905453513e417dc0f8cb024fdba1f502",
+      "generation": 1,
+      "sequence_range": [
+        1,
+        42
+      ],
+      "event_count": 42,
+      "first_event_utc": "2026-09-02T16:49:12.666806+00:00",
+      "last_event_utc": "2026-09-02T17:12:05.088322+00:00",
+      "platform_keys_observed": [
+        "prime_video",
+        "netflix"
+      ],
+      "closure_payload_as_recorded": {
+        "chosen_break_minutes": 15,
+        "closure_outcome": "RETURNED_AFTER_CALLBACK",
+        "closure_reason": "RETURN_CONFIRMED",
+        "foreground_ott_seconds": 1208.145666,
+        "hopper_count": 2,
+        "platform_seconds": {
+          "netflix": 28.451354,
+          "prime_video": 1179.694312
+        }
+      },
+      "episode_is_closed": true,
+      "analyst_note": "Richest real episode. Direct INTENTIONAL_BREAK, 15 minutes committed and acknowledged, break deadline reached, final callback displayed, three FINAL_CALLBACK_RESTORED_AFTER_RELAPSE cycles, verified return, closed RETURNED_AFTER_CALLBACK. Also contains a prime_video <-> netflix hopper inside the same logical episode.",
+      "events": [
+        {
+          "sequence": 1,
+          "event_name": "COSINE_SESSION_STARTED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T16:49:12.666806+00:00",
+          "monotonic_ns": 363016846358000,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: Watch movies, TV shows, sports, and live TV",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {
+            "evidence_source": "CERTIFIED_HOST"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 2,
+          "event_name": "OTT_PLATFORM_ENTERED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T16:49:12.666870+00:00",
+          "monotonic_ns": 363016846358000,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: Watch movies, TV shows, sports, and live TV",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 3,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T16:49:12.944071+00:00",
+          "monotonic_ns": 363016846358000,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: Watch movies, TV shows, sports, and live TV",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 4,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T16:49:24.694053+00:00",
+          "monotonic_ns": 363028840815300,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: The Chosen - Season 1",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 5,
+          "event_name": "HOPPER_TRANSITION",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T16:49:48.660077+00:00",
+          "monotonic_ns": 363052832337700,
+          "platform_key": "netflix",
+          "content_title": "Netflix - Home - Netflix - School",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {
+            "from_platform": "prime_video",
+            "to_platform": "netflix"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 6,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T16:49:48.661718+00:00",
+          "monotonic_ns": 363052832337700,
+          "platform_key": "netflix",
+          "content_title": "Netflix - Home - Netflix - School",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 7,
+          "event_name": "HOPPER_TRANSITION",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T16:50:17.143279+00:00",
+          "monotonic_ns": 363081342509700,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: The Chosen - Season 1",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {
+            "from_platform": "netflix",
+            "to_platform": "prime_video"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 8,
+          "event_name": "INTENT_GATE_ELIGIBLE",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T16:54:14.122050+00:00",
+          "monotonic_ns": 363318342684100,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-intent-1-115403f9161c",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 9,
+          "event_name": "INTENT_GATE_REQUESTED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T16:54:14.122084+00:00",
+          "monotonic_ns": 363318342684100,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-intent-1-115403f9161c",
+          "evidence_token_present": false,
+          "payload": {
+            "request_id": "cosine-intent-1-115403f9161c"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 10,
+          "event_name": "INTENT_GATE_DISPLAYED",
+          "event_class": "PRESENTATION",
+          "occurred_at_utc": "2026-09-02T16:54:15.587154+00:00",
+          "monotonic_ns": 363318462079800,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-intent-1-115403f9161c",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 11,
+          "event_name": "BREAK_INTENT_RECORDED",
+          "event_class": "USER_ACTION",
+          "occurred_at_utc": "2026-09-02T16:54:20.083456+00:00",
+          "monotonic_ns": 363323617264700,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-intent-1-115403f9161c",
+          "evidence_token_present": false,
+          "payload": {
+            "choice": "INTENTIONAL_BREAK"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 12,
+          "event_name": "DURATION_REQUESTED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T16:54:20.083544+00:00",
+          "monotonic_ns": 363323617264700,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-intent-1-115403f9161c",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "DIRECT_BREAK",
+            "request_id": "cosine-duration-1-214b18c95d11"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 13,
+          "event_name": "BREAK_DURATION_COMMITTED",
+          "event_class": "USER_ACTION",
+          "occurred_at_utc": "2026-09-02T16:54:45.591796+00:00",
+          "monotonic_ns": 363349385357700,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-duration-1-214b18c95d11",
+          "evidence_token_present": false,
+          "payload": {
+            "duration_minutes": 15
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 14,
+          "event_name": "BREAK_STARTED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T16:54:45.592004+00:00",
+          "monotonic_ns": 363349385357700,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-duration-1-214b18c95d11",
+          "evidence_token_present": false,
+          "payload": {
+            "break_deadline_effective_ns": 364249385357700,
+            "break_start_effective_ns": 363349385357700,
+            "duration_minutes": 15
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 15,
+          "event_name": "BREAK_ACK_REQUESTED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T16:54:45.592126+00:00",
+          "monotonic_ns": 363349385357700,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-duration-1-214b18c95d11",
+          "evidence_token_present": false,
+          "payload": {
+            "request_id": "cosine-break-ack-1-d5a6e660b33f"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 16,
+          "event_name": "BREAK_ACK_DISPLAYED",
+          "event_class": "PRESENTATION",
+          "occurred_at_utc": "2026-09-02T16:54:47.083350+00:00",
+          "monotonic_ns": 363350261420900,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-break-ack-1-d5a6e660b33f",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 17,
+          "event_name": "BREAK_ACKNOWLEDGED",
+          "event_class": "USER_ACTION",
+          "occurred_at_utc": "2026-09-02T16:54:50.088014+00:00",
+          "monotonic_ns": 363354047610000,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-break-ack-1-d5a6e660b33f",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 18,
+          "event_name": "RETURN_CANDIDATE_STARTED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T17:08:59.085089+00:00",
+          "monotonic_ns": 364203332517800,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "EARLY_BREAK"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 19,
+          "event_name": "RETURN_VERIFICATION_INTERRUPTED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T17:09:05.126828+00:00",
+          "monotonic_ns": 364209335923600,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "EARLY_BREAK",
+            "reason": "OTT_RELAPSE"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 20,
+          "event_name": "BREAK_DEADLINE_REACHED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T17:09:45.617400+00:00",
+          "monotonic_ns": 364249830826900,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-final-1-fb861645cc02",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 21,
+          "event_name": "FINAL_CALLBACK_REQUESTED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T17:09:45.617430+00:00",
+          "monotonic_ns": 364249830826900,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-final-1-fb861645cc02",
+          "evidence_token_present": false,
+          "payload": {
+            "request_id": "cosine-final-1-fb861645cc02"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 22,
+          "event_name": "FINAL_CALLBACK_DISPLAYED",
+          "event_class": "PRESENTATION",
+          "occurred_at_utc": "2026-09-02T17:09:47.084714+00:00",
+          "monotonic_ns": 364249899321900,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-final-1-fb861645cc02",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 23,
+          "event_name": "RETURN_CANDIDATE_STARTED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T17:09:56.088943+00:00",
+          "monotonic_ns": 364260336511700,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "FINAL_CALLBACK"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 24,
+          "event_name": "FINAL_CALLBACK_HIDDEN_FOR_FOCUS",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T17:09:59.093180+00:00",
+          "monotonic_ns": 364263340638400,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-final-1-fb861645cc02",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 25,
+          "event_name": "RETURN_VERIFICATION_INTERRUPTED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T17:10:05.176086+00:00",
+          "monotonic_ns": 364269336519900,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "FINAL_CALLBACK",
+            "reason": "OTT_RELAPSE"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 26,
+          "event_name": "FINAL_CALLBACK_RESTORED_AFTER_RELAPSE",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T17:10:05.176176+00:00",
+          "monotonic_ns": 364269336519900,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "request_id": "cosine-final-1-fb861645cc02"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 27,
+          "event_name": "RETURN_CANDIDATE_STARTED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T17:10:09.589567+00:00",
+          "monotonic_ns": 364273836791900,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "FINAL_CALLBACK"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 28,
+          "event_name": "FINAL_CALLBACK_HIDDEN_FOR_FOCUS",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T17:10:14.094121+00:00",
+          "monotonic_ns": 364278341610700,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-final-1-fb861645cc02",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 29,
+          "event_name": "RETURN_VERIFICATION_INTERRUPTED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T17:10:18.627029+00:00",
+          "monotonic_ns": 364282839901900,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "FINAL_CALLBACK",
+            "reason": "OTT_RELAPSE"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 30,
+          "event_name": "FINAL_CALLBACK_RESTORED_AFTER_RELAPSE",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T17:10:18.627066+00:00",
+          "monotonic_ns": 364282839901900,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "request_id": "cosine-final-1-fb861645cc02"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 31,
+          "event_name": "RETURN_CANDIDATE_STARTED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T17:10:27.590575+00:00",
+          "monotonic_ns": 364291837995400,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "FINAL_CALLBACK"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 32,
+          "event_name": "FINAL_CALLBACK_HIDDEN_FOR_FOCUS",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T17:10:32.086343+00:00",
+          "monotonic_ns": 364296333572600,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-final-1-fb861645cc02",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 33,
+          "event_name": "RETURN_VERIFICATION_COMPLETED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T17:10:38.083755+00:00",
+          "monotonic_ns": 364302330898900,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "FINAL_CALLBACK"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 34,
+          "event_name": "CLOSURE_CONFIRMATION_STARTED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T17:10:38.083842+00:00",
+          "monotonic_ns": 364302330898900,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "FINAL_CALLBACK"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 35,
+          "event_name": "CLOSURE_CONFIRMATION_INTERRUPTED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T17:10:44.115515+00:00",
+          "monotonic_ns": 364308336105800,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "FINAL_CALLBACK",
+            "reason": "OTT_RELAPSE"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 36,
+          "event_name": "FINAL_CALLBACK_RESTORED_AFTER_RELAPSE",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T17:10:44.115553+00:00",
+          "monotonic_ns": 364308336105800,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "request_id": "cosine-final-1-fb861645cc02"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 37,
+          "event_name": "RETURN_CANDIDATE_STARTED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T17:10:53.088145+00:00",
+          "monotonic_ns": 364317335653700,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "FINAL_CALLBACK"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 38,
+          "event_name": "FINAL_CALLBACK_HIDDEN_FOR_FOCUS",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T17:10:57.590698+00:00",
+          "monotonic_ns": 364321837667500,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-final-1-fb861645cc02",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 39,
+          "event_name": "RETURN_VERIFICATION_COMPLETED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T17:11:03.589907+00:00",
+          "monotonic_ns": 364327837633300,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "FINAL_CALLBACK"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 40,
+          "event_name": "CLOSURE_CONFIRMATION_STARTED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T17:11:03.589941+00:00",
+          "monotonic_ns": 364327837633300,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "FINAL_CALLBACK"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 41,
+          "event_name": "RETURN_CONFIRMED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T17:12:05.088280+00:00",
+          "monotonic_ns": 364389335730900,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "closure_outcome": "RETURNED_AFTER_CALLBACK"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 42,
+          "event_name": "COSINE_SESSION_CLOSED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T17:12:05.088322+00:00",
+          "monotonic_ns": 364389335730900,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "chosen_break_minutes": 15,
+            "closure_outcome": "RETURNED_AFTER_CALLBACK",
+            "closure_reason": "RETURN_CONFIRMED",
+            "foreground_ott_seconds": 1208.145666,
+            "hopper_count": 2,
+            "platform_seconds": {
+              "netflix": 28.451354,
+              "prime_video": 1179.694312
+            }
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        }
+      ]
+    },
+    {
+      "specimen_id": "REAL-COSINE-EP04-FAILED-INTENT-CONVERTED-BREAK",
+      "specimen_type": "INTENTIONAL_BREAK_CALLBACK_RETURN",
+      "selection_role": "ALTERNATE",
+      "satisfies_target_specimens": [],
+      "also_demonstrates": [
+        "B",
+        "C"
+      ],
+      "evidence_status": "REAL_DURABLE_EVIDENCE",
+      "parent_session_id": 80,
+      "cosine_session_id": "557cdda0ea4ef8277c843503cdb127b5",
+      "generation": 1,
+      "sequence_range": [
+        1,
+        39
+      ],
+      "event_count": 39,
+      "first_event_utc": "2026-09-02T18:18:07.327142+00:00",
+      "last_event_utc": "2026-09-02T18:42:52.939310+00:00",
+      "platform_keys_observed": [
+        "prime_video",
+        "jiohotstar"
+      ],
+      "closure_payload_as_recorded": {
+        "chosen_break_minutes": 11,
+        "closure_outcome": "RETURNED_AFTER_CALLBACK",
+        "closure_reason": "RETURN_CONFIRMED",
+        "foreground_ott_seconds": 1266.482825,
+        "hopper_count": 2,
+        "platform_seconds": {
+          "jiohotstar": 597.410884,
+          "prime_video": 669.071941
+        }
+      },
+      "episode_is_closed": true,
+      "analyst_note": "RETURN_INTENTION chosen but not honoured; RETURN_INTENT_CONVERTED_TO_BREAK fired after the intent window, 11 minutes committed, final callback, verified return, closed RETURNED_AFTER_CALLBACK. Also contains a prime_video <-> jiohotstar hopper.",
+      "events": [
+        {
+          "sequence": 1,
+          "event_name": "COSINE_SESSION_STARTED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:18:07.327142+00:00",
+          "monotonic_ns": 368350690694100,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: The Chosen - Season 1",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {
+            "evidence_source": "WINDOWS_APP"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 2,
+          "event_name": "OTT_PLATFORM_ENTERED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:18:07.327184+00:00",
+          "monotonic_ns": 368350690694100,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: The Chosen - Season 1",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 3,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:18:07.328852+00:00",
+          "monotonic_ns": 368350690694100,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: The Chosen - Season 1",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 4,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:18:19.103403+00:00",
+          "monotonic_ns": 368362685571000,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: Watch movies, TV shows, sports, and live TV",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 5,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:19:05.112706+00:00",
+          "monotonic_ns": 368409184324000,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: The Chosen - Season 1",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 6,
+          "event_name": "HOPPER_TRANSITION",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:19:10.999499+00:00",
+          "monotonic_ns": 368415186980100,
+          "platform_key": "jiohotstar",
+          "content_title": "JioHotstar - Watch TV Shows, Movies, Specials, Live Cricket & Football",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {
+            "from_platform": "prime_video",
+            "to_platform": "jiohotstar"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 7,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:19:11.003623+00:00",
+          "monotonic_ns": 368415186980100,
+          "platform_key": "jiohotstar",
+          "content_title": "JioHotstar - Watch TV Shows, Movies, Specials, Live Cricket & Football",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 8,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:19:29.008200+00:00",
+          "monotonic_ns": 368433183490000,
+          "platform_key": "jiohotstar",
+          "content_title": "hulu - Google Search",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 9,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:19:30.730512+00:00",
+          "monotonic_ns": 368434681518500,
+          "platform_key": "jiohotstar",
+          "content_title": "JioHotstar - Watch TV Shows, Movies, Specials, Live Cricket & Football",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 10,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:19:36.484089+00:00",
+          "monotonic_ns": 368440687205900,
+          "platform_key": "jiohotstar",
+          "content_title": "hulu - Google Search",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 11,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:19:42.650855+00:00",
+          "monotonic_ns": 368446687988400,
+          "platform_key": "jiohotstar",
+          "content_title": "JioHotstar - Watch TV Shows, Movies, Specials, Live Cricket & Football",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 12,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:19:54.482576+00:00",
+          "monotonic_ns": 368458688289300,
+          "platform_key": "jiohotstar",
+          "content_title": "hulu - Google Search",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 13,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:20:06.475897+00:00",
+          "monotonic_ns": 368470687647400,
+          "platform_key": "jiohotstar",
+          "content_title": "DISNEY PLUS - Google Search",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 14,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:20:09.561387+00:00",
+          "monotonic_ns": 368473686215100,
+          "platform_key": "jiohotstar",
+          "content_title": "JioHotstar - Watch TV Shows, Movies, Specials, Live Cricket & Football",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 15,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:20:17.005467+00:00",
+          "monotonic_ns": 368481180874300,
+          "platform_key": "jiohotstar",
+          "content_title": "DISNEY PLUS - Google Search",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 16,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:20:24.577856+00:00",
+          "monotonic_ns": 368488683899100,
+          "platform_key": "jiohotstar",
+          "content_title": "Prime Video: Watch movies, TV shows, sports, and live TV",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 17,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:21:29.033664+00:00",
+          "monotonic_ns": 368553184282100,
+          "platform_key": "jiohotstar",
+          "content_title": "JioHotstar - Watch TV Shows, Movies, Specials, Live Cricket & Football",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 18,
+          "event_name": "INTENT_GATE_ELIGIBLE",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T18:24:45.474234+00:00",
+          "monotonic_ns": 368749690232300,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-intent-1-16cab950f5e7",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 19,
+          "event_name": "INTENT_GATE_REQUESTED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T18:24:45.474272+00:00",
+          "monotonic_ns": 368749690232300,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-intent-1-16cab950f5e7",
+          "evidence_token_present": false,
+          "payload": {
+            "request_id": "cosine-intent-1-16cab950f5e7"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 20,
+          "event_name": "INTENT_GATE_DISPLAYED",
+          "event_class": "PRESENTATION",
+          "occurred_at_utc": "2026-09-02T18:24:46.939651+00:00",
+          "monotonic_ns": 368750029591700,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-intent-1-16cab950f5e7",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 21,
+          "event_name": "RETURN_INTENT_RECORDED",
+          "event_class": "USER_ACTION",
+          "occurred_at_utc": "2026-09-02T18:25:00.432545+00:00",
+          "monotonic_ns": 368764632678800,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-intent-1-16cab950f5e7",
+          "evidence_token_present": false,
+          "payload": {
+            "choice": "RETURN_INTENTION"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 22,
+          "event_name": "RETURN_INTENT_WINDOW_STARTED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T18:25:00.432644+00:00",
+          "monotonic_ns": 368764632678800,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-intent-1-16cab950f5e7",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 23,
+          "event_name": "RETURN_INTENT_CONVERTED_TO_BREAK",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T18:30:03.466426+00:00",
+          "monotonic_ns": 369067684383100,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-duration-1-20ddcf9eddb8",
+          "evidence_token_present": false,
+          "payload": {
+            "observed_ott_seconds": 300.9348712
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 24,
+          "event_name": "DURATION_REQUESTED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T18:30:03.466465+00:00",
+          "monotonic_ns": 369067684383100,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-duration-1-20ddcf9eddb8",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "FAILED_RETURN_INTENTION",
+            "request_id": "cosine-duration-1-20ddcf9eddb8"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 25,
+          "event_name": "BREAK_DURATION_COMMITTED",
+          "event_class": "USER_ACTION",
+          "occurred_at_utc": "2026-09-02T18:30:27.439648+00:00",
+          "monotonic_ns": 369090266730000,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-duration-1-20ddcf9eddb8",
+          "evidence_token_present": false,
+          "payload": {
+            "duration_minutes": 11
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 26,
+          "event_name": "BREAK_STARTED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T18:30:27.439805+00:00",
+          "monotonic_ns": 369090266730000,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-duration-1-20ddcf9eddb8",
+          "evidence_token_present": false,
+          "payload": {
+            "break_deadline_effective_ns": 369750266730000,
+            "break_start_effective_ns": 369090266730000,
+            "duration_minutes": 11
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 27,
+          "event_name": "BREAK_ACK_REQUESTED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T18:30:27.439894+00:00",
+          "monotonic_ns": 369090266730000,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-duration-1-20ddcf9eddb8",
+          "evidence_token_present": false,
+          "payload": {
+            "request_id": "cosine-break-ack-1-9934666285f2"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 28,
+          "event_name": "BREAK_ACK_DISPLAYED",
+          "event_class": "PRESENTATION",
+          "occurred_at_utc": "2026-09-02T18:30:28.931275+00:00",
+          "monotonic_ns": 369091774906300,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-break-ack-1-9934666285f2",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 29,
+          "event_name": "BREAK_ACKNOWLEDGED",
+          "event_class": "USER_ACTION",
+          "occurred_at_utc": "2026-09-02T18:30:33.444245+00:00",
+          "monotonic_ns": 369097294846500,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-break-ack-1-9934666285f2",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 30,
+          "event_name": "HOPPER_TRANSITION",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:30:48.490002+00:00",
+          "monotonic_ns": 369112689243400,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: The Chosen - Season 1",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {
+            "from_platform": "jiohotstar",
+            "to_platform": "prime_video"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 31,
+          "event_name": "BREAK_DEADLINE_REACHED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T18:41:27.478580+00:00",
+          "monotonic_ns": 369751691934700,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-final-1-d195e85174b3",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 32,
+          "event_name": "FINAL_CALLBACK_REQUESTED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T18:41:27.478619+00:00",
+          "monotonic_ns": 369751691934700,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-final-1-d195e85174b3",
+          "evidence_token_present": false,
+          "payload": {
+            "request_id": "cosine-final-1-d195e85174b3"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 33,
+          "event_name": "FINAL_CALLBACK_DISPLAYED",
+          "event_class": "PRESENTATION",
+          "occurred_at_utc": "2026-09-02T18:41:28.939149+00:00",
+          "monotonic_ns": 369752010057600,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-final-1-d195e85174b3",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 34,
+          "event_name": "RETURN_CANDIDATE_STARTED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:41:40.933590+00:00",
+          "monotonic_ns": 369765180972300,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "FINAL_CALLBACK"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 35,
+          "event_name": "FINAL_CALLBACK_HIDDEN_FOR_FOCUS",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T18:41:45.441369+00:00",
+          "monotonic_ns": 369769688394100,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "cosine-final-1-d195e85174b3",
+          "evidence_token_present": false,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 36,
+          "event_name": "RETURN_VERIFICATION_COMPLETED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T18:41:51.441860+00:00",
+          "monotonic_ns": 369775689217900,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "FINAL_CALLBACK"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 37,
+          "event_name": "CLOSURE_CONFIRMATION_STARTED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T18:41:51.441923+00:00",
+          "monotonic_ns": 369775689217900,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "branch": "FINAL_CALLBACK"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 38,
+          "event_name": "RETURN_CONFIRMED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T18:42:52.939267+00:00",
+          "monotonic_ns": 369837186638300,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "closure_outcome": "RETURNED_AFTER_CALLBACK"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 39,
+          "event_name": "COSINE_SESSION_CLOSED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T18:42:52.939310+00:00",
+          "monotonic_ns": 369837186638300,
+          "platform_key": "",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "chosen_break_minutes": 11,
+            "closure_outcome": "RETURNED_AFTER_CALLBACK",
+            "closure_reason": "RETURN_CONFIRMED",
+            "foreground_ott_seconds": 1266.482825,
+            "hopper_count": 2,
+            "platform_seconds": {
+              "jiohotstar": 597.410884,
+              "prime_video": 669.071941
+            }
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        }
+      ]
+    },
+    {
+      "specimen_id": "REAL-COSINE-EP05-HOPPER-INCOMPLETE",
+      "specimen_type": "HOPPER",
+      "selection_role": "ALTERNATE",
+      "satisfies_target_specimens": [],
+      "also_demonstrates": [
+        "C"
+      ],
+      "evidence_status": "REAL_DURABLE_EVIDENCE",
+      "parent_session_id": 81,
+      "cosine_session_id": "b0e7d80efaed8586d7c279c5535c0b92",
+      "generation": 1,
+      "sequence_range": [
+        1,
+        7
+      ],
+      "event_count": 7,
+      "first_event_utc": "2026-09-02T18:57:05.051158+00:00",
+      "last_event_utc": "2026-09-02T18:57:24.552730+00:00",
+      "platform_keys_observed": [
+        "prime_video",
+        "jiohotstar"
+      ],
+      "closure_payload_as_recorded": {
+        "chosen_break_minutes": null,
+        "closure_outcome": "INCOMPLETE",
+        "closure_reason": "STOPPED",
+        "foreground_ott_seconds": 7.47279,
+        "hopper_count": 2,
+        "platform_seconds": {
+          "jiohotstar": 1.492129,
+          "prime_video": 5.980661
+        }
+      },
+      "episode_is_closed": true,
+      "analyst_note": "Two HOPPER_TRANSITION events (prime_video -> jiohotstar -> prime_video) inside one logical episode, closed STOPPED / INCOMPLETE before any intent gate.",
+      "events": [
+        {
+          "sequence": 1,
+          "event_name": "COSINE_SESSION_STARTED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:57:05.051158+00:00",
+          "monotonic_ns": 370688699609700,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: The Chosen - Season 1",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {
+            "evidence_source": "WINDOWS_APP"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 2,
+          "event_name": "OTT_PLATFORM_ENTERED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:57:05.051214+00:00",
+          "monotonic_ns": 370688699609700,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: The Chosen - Season 1",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 3,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:57:05.052992+00:00",
+          "monotonic_ns": 370688699609700,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: The Chosen - Season 1",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 4,
+          "event_name": "HOPPER_TRANSITION",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:57:09.018651+00:00",
+          "monotonic_ns": 370693209322900,
+          "platform_key": "jiohotstar",
+          "content_title": "JioHotstar - Watch TV Shows, Movies, Specials, Live Cricket & Football",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {
+            "from_platform": "prime_video",
+            "to_platform": "jiohotstar"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 5,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:57:09.022430+00:00",
+          "monotonic_ns": 370693209322900,
+          "platform_key": "jiohotstar",
+          "content_title": "JioHotstar - Watch TV Shows, Movies, Specials, Live Cricket & Football",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 6,
+          "event_name": "HOPPER_TRANSITION",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T18:57:22.565474+00:00",
+          "monotonic_ns": 370706711681100,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: The Chosen - Season 1",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {
+            "from_platform": "jiohotstar",
+            "to_platform": "prime_video"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 7,
+          "event_name": "COSINE_SESSION_CLOSED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T18:57:24.552730+00:00",
+          "monotonic_ns": 370708800958000,
+          "platform_key": "prime_video",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "chosen_break_minutes": null,
+            "closure_outcome": "INCOMPLETE",
+            "closure_reason": "STOPPED",
+            "foreground_ott_seconds": 7.47279,
+            "hopper_count": 2,
+            "platform_seconds": {
+              "jiohotstar": 1.492129,
+              "prime_video": 5.980661
+            }
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        }
+      ]
+    },
+    {
+      "specimen_id": "REAL-COSINE-EP06-SHORT-INCOMPLETE",
+      "specimen_type": "SHORT_INCOMPLETE",
+      "selection_role": "CONTEXT_ONLY",
+      "satisfies_target_specimens": [],
+      "also_demonstrates": [],
+      "evidence_status": "REAL_DURABLE_EVIDENCE",
+      "parent_session_id": 83,
+      "cosine_session_id": "bd3f24288c6d589d9f4c81ca7b3469d0",
+      "generation": 1,
+      "sequence_range": [
+        1,
+        5
+      ],
+      "event_count": 5,
+      "first_event_utc": "2026-09-02T19:39:51.562733+00:00",
+      "last_event_utc": "2026-09-02T19:40:36.755766+00:00",
+      "platform_keys_observed": [
+        "prime_video"
+      ],
+      "closure_payload_as_recorded": {
+        "chosen_break_minutes": null,
+        "closure_outcome": "INCOMPLETE",
+        "closure_reason": "STOPPED",
+        "foreground_ott_seconds": 14.98299,
+        "hopper_count": 0,
+        "platform_seconds": {
+          "prime_video": 14.98299
+        }
+      },
+      "episode_is_closed": true,
+      "analyst_note": "Short observation closed STOPPED / INCOMPLETE before intent-gate eligibility.",
+      "events": [
+        {
+          "sequence": 1,
+          "event_name": "COSINE_SESSION_STARTED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T19:39:51.562733+00:00",
+          "monotonic_ns": 373255088314900,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: The Chosen - Season 1",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {
+            "evidence_source": "WINDOWS_APP"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 2,
+          "event_name": "OTT_PLATFORM_ENTERED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T19:39:51.562808+00:00",
+          "monotonic_ns": 373255088314900,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: The Chosen - Season 1",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 3,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T19:39:51.567877+00:00",
+          "monotonic_ns": 373255088314900,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: The Chosen - Season 1",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 4,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T19:40:04.375921+00:00",
+          "monotonic_ns": 373268591632500,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: Watch movies, TV shows, sports, and live TV",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 5,
+          "event_name": "COSINE_SESSION_CLOSED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T19:40:36.755766+00:00",
+          "monotonic_ns": 373301004023800,
+          "platform_key": "prime_video",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "chosen_break_minutes": null,
+            "closure_outcome": "INCOMPLETE",
+            "closure_reason": "STOPPED",
+            "foreground_ott_seconds": 14.98299,
+            "hopper_count": 0,
+            "platform_seconds": {
+              "prime_video": 14.98299
+            }
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        }
+      ]
+    },
+    {
+      "specimen_id": "REAL-COSINE-EP07-SHORT-INCOMPLETE",
+      "specimen_type": "SHORT_INCOMPLETE",
+      "selection_role": "CONTEXT_ONLY",
+      "satisfies_target_specimens": [],
+      "also_demonstrates": [],
+      "evidence_status": "REAL_DURABLE_EVIDENCE",
+      "parent_session_id": 84,
+      "cosine_session_id": "38c112698e97dc5ffb5edae9f2ceb296",
+      "generation": 1,
+      "sequence_range": [
+        1,
+        4
+      ],
+      "event_count": 4,
+      "first_event_utc": "2026-09-02T20:09:34.524450+00:00",
+      "last_event_utc": "2026-09-02T20:10:24.655094+00:00",
+      "platform_keys_observed": [
+        "prime_video"
+      ],
+      "closure_payload_as_recorded": {
+        "chosen_break_minutes": null,
+        "closure_outcome": "INCOMPLETE",
+        "closure_reason": "STOPPED",
+        "foreground_ott_seconds": 29.936913,
+        "hopper_count": 0,
+        "platform_seconds": {
+          "prime_video": 29.936913
+        }
+      },
+      "episode_is_closed": true,
+      "analyst_note": "Short observation closed STOPPED / INCOMPLETE. Parent MYELIN session profile_type is 'study'.",
+      "events": [
+        {
+          "sequence": 1,
+          "event_name": "COSINE_SESSION_STARTED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T20:09:34.524450+00:00",
+          "monotonic_ns": 375038198112100,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: The Chosen - Season 1",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {
+            "evidence_source": "WINDOWS_APP"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 2,
+          "event_name": "OTT_PLATFORM_ENTERED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T20:09:34.524522+00:00",
+          "monotonic_ns": 375038198112100,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: The Chosen - Season 1",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 3,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T20:09:34.531017+00:00",
+          "monotonic_ns": 375038198112100,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: The Chosen - Season 1",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 4,
+          "event_name": "COSINE_SESSION_CLOSED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T20:10:24.655094+00:00",
+          "monotonic_ns": 375088903321600,
+          "platform_key": "prime_video",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "chosen_break_minutes": null,
+            "closure_outcome": "INCOMPLETE",
+            "closure_reason": "STOPPED",
+            "foreground_ott_seconds": 29.936913,
+            "hopper_count": 0,
+            "platform_seconds": {
+              "prime_video": 29.936913
+            }
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        }
+      ]
+    },
+    {
+      "specimen_id": "REAL-COSINE-EP08-SHORT-INCOMPLETE",
+      "specimen_type": "SHORT_INCOMPLETE",
+      "selection_role": "CONTEXT_ONLY",
+      "satisfies_target_specimens": [],
+      "also_demonstrates": [],
+      "evidence_status": "REAL_DURABLE_EVIDENCE",
+      "parent_session_id": 85,
+      "cosine_session_id": "c10b2a28763a203f2f0f3d74fdcefae3",
+      "generation": 1,
+      "sequence_range": [
+        1,
+        4
+      ],
+      "event_count": 4,
+      "first_event_utc": "2026-09-02T20:39:33.501372+00:00",
+      "last_event_utc": "2026-09-02T20:40:52.375643+00:00",
+      "platform_keys_observed": [
+        "prime_video"
+      ],
+      "closure_payload_as_recorded": {
+        "chosen_break_minutes": null,
+        "closure_outcome": "INCOMPLETE",
+        "closure_reason": "STOPPED",
+        "foreground_ott_seconds": 67.377831,
+        "hopper_count": 0,
+        "platform_seconds": {
+          "prime_video": 67.377831
+        }
+      },
+      "episode_is_closed": true,
+      "analyst_note": "Short observation closed STOPPED / INCOMPLETE before intent-gate eligibility.",
+      "events": [
+        {
+          "sequence": 1,
+          "event_name": "COSINE_SESSION_STARTED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T20:39:33.501372+00:00",
+          "monotonic_ns": 376837237414700,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: The Chosen - Season 1",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {
+            "evidence_source": "WINDOWS_APP"
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 2,
+          "event_name": "OTT_PLATFORM_ENTERED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T20:39:33.501410+00:00",
+          "monotonic_ns": 376837237414700,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: The Chosen - Season 1",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 3,
+          "event_name": "CONTENT_OBSERVED",
+          "event_class": "OBSERVED",
+          "occurred_at_utc": "2026-09-02T20:39:33.505663+00:00",
+          "monotonic_ns": 376837237414700,
+          "platform_key": "prime_video",
+          "content_title": "Prime Video: The Chosen - Season 1",
+          "request_id": "",
+          "evidence_token_present": true,
+          "payload": {},
+          "schema_version": "myelin-cosine-v3-parent-session"
+        },
+        {
+          "sequence": 4,
+          "event_name": "COSINE_SESSION_CLOSED",
+          "event_class": "DERIVED",
+          "occurred_at_utc": "2026-09-02T20:40:52.375643+00:00",
+          "monotonic_ns": 376916623903800,
+          "platform_key": "prime_video",
+          "content_title": "",
+          "request_id": "",
+          "evidence_token_present": false,
+          "payload": {
+            "chosen_break_minutes": null,
+            "closure_outcome": "INCOMPLETE",
+            "closure_reason": "STOPPED",
+            "foreground_ott_seconds": 67.377831,
+            "hopper_count": 0,
+            "platform_seconds": {
+              "prime_video": 67.377831
+            }
+          },
+          "schema_version": "myelin-cosine-v3-parent-session"
+        }
+      ]
+    }
+  ],
+  "unavailable_target_specimens": [
+    {
+      "target": "E",
+      "name": "EVIDENCE_GAP_DEGRADED_INCOMPLETE",
+      "status": "NO_REAL_SPECIMEN_AVAILABLE",
+      "reason": "Zero rows in the snapshot carry any degradation marker. Probes for EVIDENCE_GAP, REGRESSED_MONOTONIC_TIME, NON_ADJACENT_OBSERVATION_SEQUENCE, durable_health, durable_detail and NO_EVIDENCE each returned 0 matching rows across event_name and payload_json.",
+      "explicitly_not_done": "No degraded or failed-persistence specimen was simulated."
+    },
+    {
+      "target": "F",
+      "name": "ACTIVE_IN_PROGRESS",
+      "status": "NO_REAL_SPECIMEN_AVAILABLE",
+      "reason": "All 8 captured episodes contain a terminal COSINE_SESSION_CLOSED event. Episodes without a closing event: 0.",
+      "explicitly_not_done": "No live or in-progress episode was fabricated."
+    },
+    {
+      "target": "G",
+      "name": "EMPTY_STATE",
+      "status": "VISUAL_STATE",
+      "reason": "Empty state is a rendering condition, not a historical user episode. Tagged VISUAL_STATE and deliberately carries no events.",
+      "explicitly_not_done": "Not presented as a REAL_EPISODE."
+    }
+  ],
+  "field_contract_summary": {
+    "note": "Full per-field definitions live in COSINE_PHASE_2AT1_VISUAL_FIELD_CONTRACT.txt. Counts below are of contract entries, not of dashboard pixels.",
+    "DIRECT_FACT": 16,
+    "SAFE_PRESENTATION": 9,
+    "DERIVED_LATER": 13,
+    "UNSUPPORTED": 8,
+    "phase_when_real_wiring_allowed": "Phase 2A read model and later. Phase 2@.1 wires nothing."
+  }
+}

@@ -401,6 +401,19 @@ class SineLiveView:
     post_normal_break_completion_kind: str = ""
     post_normal_break_return_pending: bool = False
     activity_clock_paused: bool = False
+    popup_hwnd: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SineMonitorStatus:
+    """Narrow Mom-facing status with no sibling or handover policy."""
+
+    factual_episode: bool
+    source_eligible: bool
+    held: bool
+    termination_pending: bool
+    episode_key: tuple[str, str] | None
+    phase: SinePhase
 
 
 @dataclass(slots=True)
@@ -473,6 +486,11 @@ class _Episode:
     post_normal_break_return_pending: bool = False
     post_normal_break_gate_request_id: str = ""
     post_normal_break_gate_retry_due_monotonic_ns: int | None = None
+    # Phase 2C Mom artery only. No sibling identity, target, or 120-second timer.
+    monitor_held: bool = False
+    monitor_hold_started_monotonic_ns: int | None = None
+    monitor_hold_target_stage: SineStage = SineStage.NONE
+    monitor_hold_remaining_ns: int | None = None
 
     @property
     def terminal(self) -> bool:
@@ -603,6 +621,8 @@ class SineAuthority:
             # observations cannot resolve, cancel, or advance the episode.
             if episode.normal_break_held:
                 return
+            if episode.monitor_held:
+                return
 
             foreground = _field(context, "foreground")
             snapshot = _field(context, "resource_intent")
@@ -638,10 +658,6 @@ class SineAuthority:
                     # the user can work in the Study resource while it is up
                     # and MIRL can observe that work.
                     self._announce_study_alignment_hold(episode, now_ns)
-                return
-
-            if bool(_field(snapshot, "cosine_active", False)):
-                self._cancel_episode("cosine_precedence", now_ns)
                 return
 
             if classification == "APPROVED_BREAK":
@@ -857,6 +873,8 @@ class SineAuthority:
 
             episode = self._episode
             if episode is not None and not episode.terminal:
+                if episode.monitor_held:
+                    return self._take_facts()
                 # MIRL has verified recovery ENTRY but not final stability.
                 # The relevant escalation deadline is genuinely paused while
                 # presentation is withheld, then re-anchored only by a factual
@@ -1137,6 +1155,8 @@ class SineAuthority:
             occurrence = self._current_occurrence(request_id)
             episode = self._episode
             if occurrence is None or episode is None or episode.terminal:
+                return False
+            if episode.monitor_held:
                 return False
             if not self._valid_event_time(
                 occurred_monotonic_ns,
@@ -1621,6 +1641,122 @@ class SineAuthority:
             )
             return True
 
+    def monitor_status(self, *, now_ns: int | None = None) -> SineMonitorStatus:
+        """Return only the facts Mom needs to control this son safely."""
+
+        del now_ns
+        with self._lock:
+            episode = self._episode
+            if episode is None:
+                return SineMonitorStatus(False, False, False, False, None, SinePhase.IDLE)
+            factual = bool(
+                not episode.terminal
+                and episode.first_displayed_monotonic_ns is not None
+                and episode.current_stage in {SineStage.SINE_1, SineStage.SINE_2, SineStage.SINE_3}
+            )
+            eligible = bool(
+                factual
+                and episode.phase is SinePhase.ACTIVE
+                and episode.current_stage in {SineStage.SINE_1, SineStage.SINE_2}
+                and not episode.study_mode
+                and not episode.protected_red
+                and not episode.normal_break_held
+                and not episode.post_normal_break_return_pending
+                and not episode.presentation_withheld_for_recovery
+            )
+            key = (episode.episode_uid, episode.candidate_uid) if factual else None
+            return SineMonitorStatus(
+                factual, eligible, episode.monitor_held, False, key, episode.phase
+            )
+
+    def monitor_hold(self, *, episode_key: object, now_ns: int) -> bool:
+        """Freeze one exact Normal SINE episode at Mom's generic request."""
+
+        with self._lock:
+            status = self.monitor_status(now_ns=now_ns)
+            episode = self._episode
+            if episode is None or not status.source_eligible or status.episode_key != episode_key:
+                return False
+            if not self._valid_event_time(now_ns, int(episode.first_displayed_monotonic_ns or 0)):
+                return False
+            if episode.monitor_held:
+                return True
+            target_stage, remaining_ns = self._capture_escalation_deadline(episode, now_ns)
+            episode.monitor_held = True
+            episode.monitor_hold_started_monotonic_ns = now_ns
+            episode.monitor_hold_target_stage = target_stage
+            episode.monitor_hold_remaining_ns = remaining_ns
+            episode.retry_stage = SineStage.NONE
+            episode.retry_due_monotonic_ns = None
+            occurrence = self._current_popup(episode)
+            if occurrence is not None and occurrence.state in {PopupState.REQUESTED, PopupState.DISPLAYED}:
+                self._request_popup_close(episode, occurrence, now_ns, "monitor_hold")
+            return True
+
+    def monitor_resume(self, *, episode_key: object, now_ns: int) -> bool:
+        """Resume the same exact SINE episode from its preserved native remainder."""
+
+        with self._lock:
+            episode = self._episode
+            if (
+                episode is None
+                or episode.terminal
+                or not episode.monitor_held
+                or (episode.episode_uid, episode.candidate_uid) != episode_key
+                or episode.monitor_hold_started_monotonic_ns is None
+                or now_ns < episode.monitor_hold_started_monotonic_ns
+            ):
+                return False
+            self._restore_escalation_deadline(
+                episode,
+                target_stage=episode.monitor_hold_target_stage,
+                remaining_ns=episode.monitor_hold_remaining_ns,
+                occurred_monotonic_ns=now_ns,
+            )
+            self._clear_monitor_hold(episode)
+            return True
+
+    def monitor_terminate(self, *, episode_key: object, now_ns: int) -> bool:
+        """End one exact Mom-held episode with a generic non-recovery terminal."""
+
+        with self._lock:
+            episode = self._episode
+            if (
+                episode is None
+                or episode.terminal
+                or not episode.monitor_held
+                or (episode.episode_uid, episode.candidate_uid) != episode_key
+                or not self._valid_event_time(now_ns, int(episode.first_displayed_monotonic_ns or 0))
+            ):
+                return False
+            self._cancel_episode("monitor_terminated", now_ns)
+            return bool(self._episode is not None and self._episode.terminal)
+
+    def preempt_for_study(self, *, now_ns: int | None = None) -> bool:
+        """Immediately end the current SINE episode when Dad/Study takes ownership.
+
+        Study is a stronger owner, not a sibling.  This operation therefore
+        creates no handover, saves no SINE remainder, and never restores the
+        old episode after Study ends.  It is deliberately one-shot rather than
+        a Study suppression latch because SINE may later admit fresh Study-mode
+        distraction episodes under the normal Study context.
+        """
+
+        with self._lock:
+            episode = self._episode
+            if episode is None or episode.terminal:
+                return True
+
+            occurred_ns = self._now_ns() if now_ns is None else now_ns
+            if not self._valid_event_time(
+                occurred_ns,
+                episode.accepted_monotonic_ns,
+            ):
+                return False
+
+            self._cancel_episode("STUDY_MODE_ACTIVATED", occurred_ns)
+            return bool(self._episode is not None and self._episode.terminal)
+
     def confirm_verified_return(
         self,
         *,
@@ -2020,7 +2156,10 @@ class SineAuthority:
                 )
             occurrence = self._current_popup(episode)
             now_ns = self._now_ns() if self._active_session() else 0
-            if episode.normal_break_held or episode.post_normal_break_return_pending:
+            if (
+                episode.normal_break_held
+                or episode.post_normal_break_return_pending
+            ):
                 remaining = None
             elif (
                 episode.presentation_withheld_for_recovery
@@ -2046,6 +2185,7 @@ class SineAuthority:
                 session_id=self._session_id,
                 profile_type=self._profile_type,
                 phase=episode.phase,
+                popup_hwnd=occurrence.popup_hwnd if occurrence else 0,
                 stage=episode.current_stage,
                 episode_uid=episode.episode_uid,
                 candidate_uid=episode.candidate_uid,
@@ -2468,6 +2608,7 @@ class SineAuthority:
         self._clear_post_normal_break_gate(episode)
         self._clear_recovery_timer_pause(episode)
         self._clear_activity_timer_pause(episode)
+        self._clear_monitor_hold(episode)
         episode.phase = SinePhase.RESOLVED
         episode.terminal_reason = reason
         if was_red:
@@ -2503,6 +2644,7 @@ class SineAuthority:
         self._clear_post_normal_break_gate(episode)
         self._clear_recovery_timer_pause(episode)
         self._clear_activity_timer_pause(episode)
+        self._clear_monitor_hold(episode)
         episode.phase = SinePhase.CANCELLED
         episode.terminal_reason = reason
         self._emit(
@@ -2981,6 +3123,13 @@ class SineAuthority:
         episode.activity_pause_started_monotonic_ns = None
         episode.activity_pause_target_stage = SineStage.NONE
         episode.activity_pause_remaining_ns = None
+
+    @staticmethod
+    def _clear_monitor_hold(episode: _Episode) -> None:
+        episode.monitor_held = False
+        episode.monitor_hold_started_monotonic_ns = None
+        episode.monitor_hold_target_stage = SineStage.NONE
+        episode.monitor_hold_remaining_ns = None
 
     def _active_session(self) -> bool:
         """Return whether SINE will accept observations and new triggers.

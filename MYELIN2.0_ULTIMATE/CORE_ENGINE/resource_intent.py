@@ -64,7 +64,11 @@ from COSECANT_STUDY_MODE.study_alignment import study_evidence
 # until algorithmic or human clarification.  It no longer ages into
 # distraction through ordinary off-task dwell, and user confirmation is kept
 # separately from the measured classifier result.
-CLASSIFIER_VERSION: Final = "myelin-resource-intent-v5"
+# v6: certified OTT identity is now transported separately from COSINE
+# ownership.  ACTIVE Study and its COSECANT break classify factual OTT and
+# Messaging collisions as DISTRACTION and share the existing off-task dwell.
+# Stored v5 verdicts cannot claim those ownership/routing semantics.
+CLASSIFIER_VERSION: Final = "myelin-resource-intent-v6"
 OBSERVATION_FRESHNESS_NS: Final = 5_000_000_000
 STUDY_UNCERTAINTY_INTERVAL_SECONDS: Final = 300
 STUDY_UNCERTAINTY_INTERVAL_NS: Final = (
@@ -322,6 +326,7 @@ class ResourceObservation:
     browser_marker: str
     browser_redacted_address: str
     browser_resource_token: str
+    certified_ott_platform_key: str = ""
     cosine_owned: bool = False
 
 
@@ -565,6 +570,12 @@ _LEARNING_PROCESSES: Final = frozenset(
 _MESSAGING_PROCESSES: Final = frozenset(
     {"whatsapp", "discord", "telegram", "slack", "teams", "ms-teams"}
 )
+# Exact proven Windows process-name variants that are the same native app as
+# their canonical key.  Alias lookup only -- never a substring/startswith
+# match -- so a lookalike process (e.g. "whatsapp.fake") is never admitted.
+_NATIVE_PROCESS_ALIASES: Final = {
+    "whatsapp.root": "whatsapp",
+}
 _SOCIAL_PROCESSES: Final = frozenset(
     {"instagram", "facebook", "reddit", "tiktok", "twitter"}
 )
@@ -731,12 +742,14 @@ def observation_token(observation: ResourceObservation) -> str:
         observation.browser_evidence_kind,
         observation.browser_marker,
         observation.browser_resource_token,
+        observation.certified_ott_platform_key,
         length=24,
     )
 
 
 def _process_name(value: object) -> str:
-    return normalise_text(value).removesuffix(".exe")
+    name = normalise_text(value).removesuffix(".exe")
+    return _NATIVE_PROCESS_ALIASES.get(name, name)
 
 
 def _browser_family(process_name: str) -> str:
@@ -778,6 +791,7 @@ def build_observation(
     browser_evidence: object,
     *,
     cosine_owned: bool,
+    certified_ott_platform_key: str = "",
 ) -> ResourceObservation:
     """Join monitor and browser facts without performing a second observation."""
 
@@ -812,6 +826,7 @@ def build_observation(
         browser_resource_token=str(
             getattr(browser_result, "resource_token", "") or ""
         ),
+        certified_ott_platform_key=str(certified_ott_platform_key or ""),
         cosine_owned=bool(cosine_owned),
     )
 
@@ -858,6 +873,7 @@ def build_resource_identity(observation: ResourceObservation) -> ResourceIdentit
         observation.browser_evidence_kind,
         observation.browser_marker,
         observation.browser_resource_token,
+        observation.certified_ott_platform_key,
         title,
         length=32,
     )
@@ -866,7 +882,10 @@ def build_resource_identity(observation: ResourceObservation) -> ResourceIdentit
         hwnd=observation.hwnd,
         browser_family=_browser_family(process),
         surface=surface,
-        platform_key=observation.browser_platform,
+        platform_key=(
+            observation.certified_ott_platform_key
+            or observation.browser_platform
+        ),
         route_marker=observation.browser_marker,
         opaque_resource_token=observation.browser_resource_token,
         normalised_title=title,
@@ -941,6 +960,7 @@ class ResourceIntentAuthority:
         self._sine_episode_active = False
         self._cosine_active = False
         self._cosine_owned = False
+        self._certified_ott_platform_key = ""
         self._dwell_key: tuple[str, str] | None = None
         self._dwell_started_ns = -1
         self._dwell_last_ns = -1
@@ -1102,11 +1122,18 @@ class ResourceIntentAuthority:
                 self._latest = None
                 self._reset_dwell()
 
+    def set_certified_ott_platform_key(self, platform_key: str) -> None:
+        """Accept Monitor's factual OTT identity without granting ownership."""
+
+        with self._lock:
+            self._certified_ott_platform_key = str(platform_key or "")
+
     def observe(
         self,
         *,
         foreground: object,
         browser_evidence: object,
+        certified_ott_platform_key: str = "",
     ) -> ResourceIntentSnapshot:
         """Evaluate one monitor cycle without another Windows/browser read."""
 
@@ -1116,6 +1143,10 @@ class ResourceIntentAuthority:
                 foreground,
                 browser_evidence,
                 cosine_owned=self._cosine_owned,
+                certified_ott_platform_key=(
+                    certified_ott_platform_key
+                    or self._certified_ott_platform_key
+                ),
             )
             if (
                 self._uncertainty_popup_hwnd > 0
@@ -1467,6 +1498,12 @@ class ResourceIntentAuthority:
         context = self._context
         context_token = context.context_token if context else ""
         token = observation_token(observation)
+        certified_ott = bool(observation.certified_ott_platform_key)
+        messaging = identity.surface is ResourceSurface.MESSAGING
+        study_owned = bool(
+            context is not None
+            and (context.active or context.approved_break)
+        )
 
         # Protected Red is an EFFERENT intervention state.  It must not cut the
         # AFFERENT nerve that reports what the user is factually looking at:
@@ -1479,11 +1516,40 @@ class ResourceIntentAuthority:
         # it is active, and monitor refuses to start a managed break.
         # ``snapshot.protected_red_active`` remains the separate published fact.
         if context is None or not context.block_id:
+            if messaging:
+                return self._verdict(
+                    ResourceIntent.UNCERTAIN,
+                    1.0,
+                    (),
+                    (IntentReason.MESSAGING_SEPARATE_POLICY,),
+                    context_token,
+                    token,
+                    identity,
+                )
             return self._verdict(
                 ResourceIntent.UNCERTAIN,
                 1.0,
                 (),
                 (IntentReason.NO_ACTIVE_STUDY_BLOCK,),
+                context_token,
+                token,
+                identity,
+            )
+        # OTT and Messaging are identity facts, not organ permissions.  While
+        # ACTIVE Study or its COSECANT break owns the moment, these two factual
+        # collisions must reach Study's existing distraction pathway before
+        # APPROVED_BREAK or COSINE/Messaging lifecycle precedence can hide them.
+        if study_owned and (certified_ott or messaging):
+            reason = (
+                IntentReason.ENTERTAINMENT
+                if certified_ott
+                else IntentReason.STRONG_DISTRACTION
+            )
+            return self._verdict(
+                ResourceIntent.DISTRACTION,
+                1.0,
+                (),
+                (reason,),
                 context_token,
                 token,
                 identity,
@@ -2025,8 +2091,15 @@ class ResourceIntentAuthority:
         context = self._context
         candidate = bool(
             context is not None
-            and context.active
-            and verdict.resource_identity.surface is ResourceSurface.YOUTUBE_WATCH
+            and (context.active or context.approved_break)
+            and (
+                verdict.resource_identity.surface
+                in {
+                    ResourceSurface.YOUTUBE_WATCH,
+                    ResourceSurface.MESSAGING,
+                }
+                or bool(observation.certified_ott_platform_key)
+            )
             # Phase 3: 50% uncertainty owns an independent clarification clock.
             # Only factual confirmed distraction may consume SINE dwell.
             and verdict.classification is ResourceIntent.DISTRACTION
@@ -2362,6 +2435,7 @@ class ResourceIntentAuthority:
         self._sine_episode_active = False
         self._cosine_active = False
         self._cosine_owned = False
+        self._certified_ott_platform_key = ""
         self._clear_uncertainty_state()
         self._facts.clear()
         self._reset_dwell()

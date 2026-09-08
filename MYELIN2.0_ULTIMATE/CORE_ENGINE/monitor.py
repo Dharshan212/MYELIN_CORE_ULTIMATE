@@ -46,6 +46,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final, Protocol, runtime_checkable
 
+from CORE_ENGINE.app_identity import ForegroundAppIdentity, read_foreground_app_identity
+from ME.handover import HandoverLayer, HandoverResult
+
 
 DEFAULT_POLL_SECONDS: Final = 1.5
 # The recovery-evidence semantic generation THIS monitor implementation knows
@@ -102,6 +105,30 @@ MESSAGING_PROCESS_LABELS: Final = {
     "ms-teams": "Microsoft Teams",
 }
 
+#: Phase 4 Case B locked badge system.  MINE (red) = escalation/messaging-
+#: lock/organ-owned phases.  RETURN (green) = genuine recovery/return
+#: phases only.  MESSAGING (a separate, pre-existing foreground-identity
+#: badge from Phase 4 Case A) is never touched by this table.
+MINE_TRANSITION_RETURN_PHASES: Final = frozenset(
+    {
+        "RETURN_INTENT_ACTIVE",
+        "RETURN_VISUAL_CONFIRMING",
+        "RETURN_VERIFYING",
+        "CLOSURE_CONFIRMING",
+    }
+)
+
+#: A CLOSED row only earns the RETURN badge when the factual closure
+#: evidence proves a verified return -- never for Study preemption, an
+#: incomplete session or an emergency stop.
+MINE_VERIFIED_RETURN_OUTCOMES: Final = frozenset(
+    {
+        "RETURNED_AFTER_INTENT",
+        "EARLY_RETURN_DURING_IMPORTANT_ALLOWANCE",
+        "RETURNED_AFTER_CALLBACK",
+    }
+)
+
 COMMITTED_STATE: Final = "COMMITTED"
 RUNNING_STATE: Final = "RUNNING"
 
@@ -118,6 +145,7 @@ class ForegroundObservation:
     observed_monotonic_ns: int
     observed_wall_time_utc: str
     idle_seconds: float
+    app_identity: ForegroundAppIdentity | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +156,8 @@ class MonitorContext:
     browser_evidence: object
     resource_intent: object
     cosine_platform: object | None = None
+    cosine_owned: bool = False
+    study_owned: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,11 +202,14 @@ class ResourceIntentAuthority(Protocol):
         *,
         foreground: ForegroundObservation,
         browser_evidence: object,
+        certified_ott_platform_key: str = "",
     ) -> object: ...
 
     def live_view(self) -> object: ...
 
     def set_sine_episode_active(self, active: bool) -> None: ...
+
+    def set_certified_ott_platform_key(self, platform_key: str) -> None: ...
 
     def drain_facts(self) -> tuple[object, ...]: ...
 
@@ -373,6 +406,16 @@ class SineAuthority(Protocol):
 
     def restore_protected_red(self) -> bool: ...
 
+    def monitor_status(self, *, now_ns: int | None = None) -> object: ...
+
+    def monitor_hold(self, *, episode_key: object, now_ns: int) -> bool: ...
+
+    def monitor_resume(self, *, episode_key: object, now_ns: int) -> bool: ...
+
+    def monitor_terminate(self, *, episode_key: object, now_ns: int) -> bool: ...
+
+    def preempt_for_study(self, *, now_ns: int | None = None) -> bool: ...
+
     def live_view(self) -> object: ...
 
     def protected_red_active(self) -> bool: ...
@@ -384,9 +427,13 @@ class SineAuthority(Protocol):
 
 @runtime_checkable
 class CosineAuthority(Protocol):
+    def bind_parent_session(self, session_id: int) -> bool: ...
+
     def observe(self, observation: object) -> tuple[object, ...]: ...
 
     def advance(self, *, now_ns: int | None = None) -> tuple[object, ...]: ...
+
+    def set_global_paused(self, paused: bool, now_ns: int | None = None) -> bool: ...
 
     def submit_command(self, command: object) -> object: ...
 
@@ -394,8 +441,34 @@ class CosineAuthority(Protocol):
 
     def snapshot(self, *, now_ns: int | None = None) -> object: ...
 
+    def monitor_status(self, *, now_ns: int | None = None) -> object: ...
+    def monitor_hold(self, *, episode_key: object, now_ns: int) -> bool: ...
+    def monitor_resume(self, *, episode_key: object, now_ns: int) -> bool: ...
+    def monitor_terminate(self, *, episode_key: object, now_ns: int) -> bool: ...
+
     def close(self, reason: object, *, now_ns: int | None = None) -> tuple[object, ...]: ...
 
+    def preempt_for_study(self, *, now_ns: int | None = None) -> tuple[object, ...]: ...
+
+    def shutdown(self, *, now_ns: int | None = None) -> bool: ...
+
+
+@runtime_checkable
+class MineAuthority(Protocol):
+    def bind_parent_session(self, session_id: int) -> bool: ...
+    def observe(self, observation: object) -> tuple[object, ...]: ...
+    def advance(self, *, now_ns: int | None = None) -> tuple[object, ...]: ...
+    def set_global_paused(self, paused: bool, now_ns: int | None = None) -> bool: ...
+    def submit_command(self, command: object) -> object: ...
+    def drain_effects(self) -> tuple[object, ...]: ...
+    def snapshot(self, *, now_ns: int | None = None) -> object: ...
+    def monitor_status(self, *, now_ns: int | None = None) -> object: ...
+    def monitor_hold(self, *, episode_key: object, now_ns: int) -> bool: ...
+    def monitor_resume(self, *, episode_key: object, now_ns: int) -> bool: ...
+    def monitor_terminate(self, *, episode_key: object, now_ns: int) -> bool: ...
+    def preempt_for_study(self, *, now_ns: int | None = None) -> tuple[object, ...]: ...
+    def release_study_preemption(self, *, now_ns: int | None = None) -> bool: ...
+    def close(self, reason: object, *, now_ns: int | None = None) -> tuple[object, ...]: ...
     def shutdown(self, *, now_ns: int | None = None) -> bool: ...
 
 
@@ -499,6 +572,8 @@ class StorageAuthority(Protocol):
 
     def append_sine_facts(self, facts: tuple[object, ...]) -> bool: ...
 
+    def append_mine_events(self, events: tuple[object, ...]) -> bool: ...
+
     def append_normal_break_facts(self, facts: tuple[object, ...]) -> bool: ...
 
     def append_mirl_events(self, events: tuple[object, ...]) -> bool: ...
@@ -549,6 +624,7 @@ class MonitorServices:
     cosecant: CosecantAuthority
     normal_break: NormalBreakAuthority
     storage: StorageAuthority
+    mine: MineAuthority | None = None
 
 
 class WindowsForegroundReader:
@@ -613,7 +689,8 @@ class WindowsForegroundReader:
     def observe(self) -> ForegroundObservation:
         self._sequence += 1
         now_ns = time.monotonic_ns()
-        hwnd = int(self._user32.GetForegroundWindow())
+        raw_hwnd = self._user32.GetForegroundWindow()
+        hwnd = 0 if raw_hwnd is None else int(raw_hwnd)
         if hwnd <= 0:
             return ForegroundObservation(
                 sequence=self._sequence,
@@ -628,15 +705,23 @@ class WindowsForegroundReader:
 
         process_id = ctypes.wintypes.DWORD()
         self._user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+        process_name = self._process_name(int(process_id.value))
+        app_identity = read_foreground_app_identity(
+            hwnd=hwnd,
+            process_id=int(process_id.value),
+            process_name=process_name,
+            observed_monotonic_ns=now_ns,
+        )
         return ForegroundObservation(
             sequence=self._sequence,
             hwnd=hwnd,
             process_id=int(process_id.value),
-            process_name=self._process_name(int(process_id.value)),
+            process_name=process_name,
             window_title=self._window_title(hwnd),
             observed_monotonic_ns=now_ns,
             observed_wall_time_utc=_utc_now(),
             idle_seconds=self._idle_seconds(),
+            app_identity=app_identity,
         )
 
     def _window_title(self, hwnd: int) -> str:
@@ -881,11 +966,25 @@ def _telemetry(
 def _activity_display_app(context: MonitorContext) -> str:
     """Return a human-readable factual foreground label for telemetry only.
 
+    A certified same-sample Windows app fact takes precedence, regardless
+    of which organ owns the moment.  No episode memory is consulted.
     Browser platform names are used only when the exact foreground browser
     sample has an authoritative host read.  Window-title text is deliberately
-    not used to decide platform identity.  If no certified platform label is
-    available, this falls back to the observed process identity.
+    not used to decide platform identity.  A certified same-sample native
+    Messaging identity (Resource Intent's canonical process, not the raw
+    Windows variant) is used next, so "whatsapp.root" still projects as
+    "WhatsApp" here even though it never becomes a second alias table.  If no
+    certified platform label is available, this falls back to the observed
+    process identity.
     """
+
+    from COSINE.cosine import EvidenceSource, PLATFORM_LABELS
+
+    platform = _field(context, "cosine_platform")
+    if _field(platform, "source") is EvidenceSource.WINDOWS_APP:
+        label = PLATFORM_LABELS.get(_field(platform, "platform_key", ""), "")
+        if label:
+            return label
 
     browser_snapshot = context.browser_evidence
     browser_evidence = _field(browser_snapshot, "evidence")
@@ -896,6 +995,18 @@ def _activity_display_app(context: MonitorContext) -> str:
         host = str(_field(browser_evidence, "certified_host", "") or "").strip().casefold()
         if host:
             return host.removeprefix("www.")
+
+    from CORE_ENGINE.resource_intent import ResourceSurface
+
+    verdict = _field(context.resource_intent, "verdict")
+    resource_identity = _field(verdict, "resource_identity")
+    if _field(resource_identity, "surface", None) is ResourceSurface.MESSAGING:
+        canonical_process = str(
+            _field(resource_identity, "process_name", "") or ""
+        ).strip().casefold()
+        label = MESSAGING_PROCESS_LABELS.get(canonical_process, "")
+        if label:
+            return label
 
     process = str(context.foreground.process_name or "").strip().casefold()
     if process.endswith(".exe"):
@@ -972,6 +1083,7 @@ def _build_services(*, profile_type: str) -> MonitorServices:
     from CORE_ENGINE.resource_intent import ResourceIntentAuthority as Intent
     from CORE_ENGINE.trigger import TriggerAuthority as Trigger
     from COSINE.cosine import CosineRuntime
+    from MINE.mine import MineRuntime
     from MIRL.mirl import MirlAuthority as Mirl
     from PERSISTENCE.storage import EngineStorage
     from SINE.normal_break import NormalBreakAuthority as NormalBreak
@@ -986,6 +1098,7 @@ def _build_services(*, profile_type: str) -> MonitorServices:
         trigger=Trigger(profile_type=profile_type),
         sine=Sine(storage=storage),
         cosine=CosineRuntime(event_sink=storage),
+        mine=MineRuntime(event_sink=storage),
         mirl=Mirl(),
         study=StudyRuntime(),
         cosecant=CosecantRuntime(context_authority=intent),
@@ -1018,6 +1131,7 @@ class WindowsMonitorCoordinator:
             raise ValueError("poll_seconds must be positive")
         self.profile_type = str(profile_type)
         self.services = services
+        self._mine_authority = getattr(services, "mine", None)
         self.foreground_reader = foreground_reader
         self.stop_event = stop_event
         self.pause_event = pause_event
@@ -1031,6 +1145,11 @@ class WindowsMonitorCoordinator:
         # monotonic authority.  Kept as an instance seam for deterministic
         # external physiology tests; production resolves to time.monotonic_ns.
         self._monotonic_ns = time.monotonic_ns
+
+        # Phase 2B: Mom owns exactly one legal relationship with the thin
+        # sibling-continuity layer.  The layer owns its 120-second clock;
+        # Monitor must never mirror that timer, source, target, or pause state.
+        self._handover = HandoverLayer()
 
         self.session_id: int | None = None
         self._pending_trigger: PendingTriggerWorkflow | None = None
@@ -1054,8 +1173,19 @@ class WindowsMonitorCoordinator:
         self._messaging_dwell_key: str = ""
         self._messaging_dwell_started_ns: int = -1
         self._messaging_dwell_last_ns: int = -1
+        self._cosine_study_preemption_pending = False
         self._last_study_completion_signature: tuple[str, int] | None = None
         self._last_mirl_console_signature: tuple[object, ...] | None = None
+        # Phase 1I.  The COSINE live view is published every cycle and replaced
+        # in place, so it never spams the UI.  Meaningful COSINE transitions,
+        # however, belong in the append-only Live Telemetry feed exactly once
+        # each -- this remembers the last published transition signature so a
+        # countdown that merely ticks cannot become a hundred history rows.
+        self._last_cosine_transition_signature: tuple[object, ...] | None = None
+        # Same presentation principle for MINE (Phase 4 Case A): remember the
+        # last published MINE transition signature so a countdown-only poll
+        # cannot become a Live Telemetry row.
+        self._last_mine_transition_signature: tuple[object, ...] | None = None
         self._emergency_requested = False
         self._emergency_durable = False
         self._cleanup_errors: list[str] = []
@@ -1120,6 +1250,13 @@ class WindowsMonitorCoordinator:
             operation="session open",
         )
         self.session_id = _receipt_session_id(committed)
+        if not self.services.cosine.bind_parent_session(self.session_id):
+            raise RuntimeError("COSINE rejected the durable Monitor parent session")
+        if self._mine_authority is None:
+            from MINE.mine import MineRuntime
+            self._mine_authority = MineRuntime(event_sink=self.services.storage)
+        if not self._mine_authority.bind_parent_session(self.session_id):
+            raise RuntimeError("MINE rejected the durable Monitor parent session")
 
         # Load only committed learning after the new session row is durable.
         # Missing learning remains None; monitor never manufactures a fallback.
@@ -1325,6 +1462,148 @@ class WindowsMonitorCoordinator:
         for line in lines:
             self._console_banner(line)
 
+    def _finish_handover_for_study(self, now_ns: int) -> HandoverResult:
+        """Terminate Mr Hand because factual Dad/Study owns the moment."""
+
+        return self._handover.finish("STUDY_MODE_ACTIVATED", now_ns)
+
+    def _publish_handover_result_telemetry(
+        self,
+        result: HandoverResult,
+        observation: ForegroundObservation | None,
+    ) -> None:
+        """Project an existing Mr Hand result into the two presentation feeds."""
+
+        action = str(_field(result, "action", "") or "").upper()
+        if not action or action == "NOOP":
+            return
+
+        source = str(_field(result, "source", "") or "")
+        target = str(_field(result, "target", "") or "")
+        reason = str(_field(result, "reason", "") or "")
+        telemetry_queue = getattr(self, "telemetry_queue", None)
+        if telemetry_queue is None:
+            return
+
+        if action == "STARTED":
+            _telemetry(
+                telemetry_queue,
+                "handover_lifecycle",
+                observation=observation,
+                feed_text=f"Handing over from {source} to {target}",
+                badge="HANDOVER",
+                tone="muted",
+            )
+            _telemetry(
+                telemetry_queue,
+                "handover_family_signal",
+                observation=observation,
+                feed_text=f"START · {source} -> {target}",
+                badge="MONITOR",
+                tone="cyan",
+            )
+            _telemetry(
+                telemetry_queue,
+                "handover_family_signal",
+                observation=observation,
+                feed_text="STARTED",
+                badge="HANDOVER",
+                tone="muted",
+            )
+            return
+
+        if action in {"FINISHED", "EXPIRED", "SOURCE_RETURNED"}:
+            _telemetry(
+                telemetry_queue,
+                "handover_lifecycle",
+                observation=observation,
+                feed_text="Handover finished",
+                badge="HANDOVER",
+                tone="muted",
+            )
+
+        if action == "TARGET_SWITCHED":
+            detail_rows = (("HANDOVER", "muted", f"TARGET SWITCHED · {source} -> {target}"),)
+        elif action == "FROZEN":
+            detail_rows = (("HANDOVER", "muted", "FROZEN · GLOBAL PAUSE"),)
+        elif action == "RESUMED":
+            detail_rows = (("HANDOVER", "muted", "RESUMED · GLOBAL PAUSE RELEASED"),)
+        elif action == "SOURCE_RETURNED":
+            detail_rows = (("HANDOVER", "muted", "SOURCE RETURNED"),)
+        elif action == "EXPIRED":
+            detail_rows = (("HANDOVER", "muted", "EXPIRED"),)
+        elif action == "FINISHED" and reason == "STUDY_MODE_ACTIVATED":
+            detail_rows = (
+                ("STUDY", "green", "STUDY OWNERSHIP ACTIVE"),
+                ("HANDOVER", "muted", "FINISHED · STUDY MODE ACTIVATED"),
+            )
+        elif action == "FINISHED":
+            detail_rows = (
+                ("HANDOVER", "muted", f"FINISHED · {reason.replace('_', ' ').upper()}"),
+            )
+        else:
+            detail_rows = ()
+
+        for badge, tone, feed_text in detail_rows:
+            _telemetry(
+                telemetry_queue,
+                "handover_family_signal",
+                observation=observation,
+                feed_text=feed_text,
+                badge=badge,
+                tone=tone,
+            )
+
+    def _publish_handover_live_status(
+        self,
+        *,
+        now_ns: int,
+        observation: ForegroundObservation | None,
+        territory: str | None,
+        study_authority: bool,
+        global_pause: bool,
+    ) -> None:
+        """Publish one replace-in-place view made only from existing facts."""
+
+        handover = getattr(self, "_handover", None)
+        if handover is None:
+            return
+        _telemetry(
+            self.telemetry_queue,
+            "handover_live_status",
+            observation=observation,
+            live_view={
+                "territory": territory,
+                "handover": handover.snapshot(now_ns),
+                "study_authority": bool(study_authority),
+                "global_pause": bool(global_pause),
+            },
+        )
+
+    def _sync_handover_clock(
+        self,
+        *,
+        now_ns: int,
+        global_paused: bool,
+    ) -> HandoverResult:
+        """Give Dad first refusal, then synchronize Mr Hand's ordinary clock.
+
+        Study/COSECANT ownership is stronger than sibling continuity.  If Dad
+        already owns the moment, Mom terminates the one Mr Hand relationship
+        before Global Pause or the ordinary 120-second clock can advance.
+        Otherwise the existing pause/advance physiology is unchanged.
+        """
+
+        if self._study_owns_moment():
+            return self._finish_handover_for_study(now_ns)
+
+        pause_result = self._handover.set_paused(global_paused, now_ns)
+        if pause_result.action != "NOOP":
+            return pause_result
+        if global_paused:
+            return pause_result
+        return self._handover.advance(now_ns)
+
     def _monitor_loop(self) -> None:
         next_cycle = time.monotonic()
         while not self.stop_event.is_set():
@@ -1335,15 +1614,90 @@ class WindowsMonitorCoordinator:
                 # Global Pause inhibits ordinary monitoring cycles, but it is
                 # not authority to extend a factual Normal Break deadline.
                 # Advance only the independent break clock; no sensing occurs.
-                self._advance_normal_break(time.monotonic_ns(), None)
+                paused_now_ns = time.monotonic_ns()
+                handover_clock_result = self._sync_handover_clock(
+                    now_ns=paused_now_ns,
+                    global_paused=True,
+                )
+                self._apply_handover_clock_result(
+                    handover_clock_result, now_ns=paused_now_ns, observation=None
+                )
+                self._publish_handover_result_telemetry(
+                    handover_clock_result, observation=None
+                )
+                paused_study_authority = self._study_owns_moment()
+                self._publish_handover_live_status(
+                    now_ns=paused_now_ns,
+                    observation=None,
+                    territory=None,
+                    study_authority=paused_study_authority,
+                    global_pause=True,
+                )
+                self.services.cosine.set_global_paused(True, paused_now_ns)
+                mine_authority = getattr(self, "_mine_authority", None)
+                if mine_authority is not None:
+                    mine_authority.set_global_paused(True, paused_now_ns)
+                # I-062.  Publish COSINE PRESENTATION TRUTH while paused.  This
+                # is a projection of the already-paused CosineRuntime and
+                # nothing else.  No sensing of any kind happens here: the
+                # foreground is not sampled, the browser is not read, no
+                # resource is classified, Trigger and SINE do not run, and no
+                # second clock is created -- the snapshot is taken at the
+                # paused_now_ns this branch already established.  Without this
+                # the live card and the transition feed could never observe
+                # global_paused=True, because the paused branch deliberately
+                # never reaches the full live-view publication.
+                paused_cosine_snapshot = self.services.cosine.snapshot(
+                    now_ns=paused_now_ns
+                )
+                _telemetry(
+                    self.telemetry_queue,
+                    "cosine_live_status",
+                    observation=None,
+                    live_view=paused_cosine_snapshot,
+                )
+                self._publish_cosine_transition(paused_cosine_snapshot, None)
+                if mine_authority is not None:
+                    _telemetry(
+                        self.telemetry_queue,
+                        "mine_watch_status",
+                        observation=None,
+                        live_view=mine_authority.snapshot(now_ns=paused_now_ns),
+                    )
+                self._advance_normal_break(paused_now_ns, None)
                 self.stop_event.wait(min(self.poll_seconds, 0.25))
                 next_cycle = time.monotonic()
                 continue
 
+            resumed_now_ns = time.monotonic_ns()
+            handover_clock_result = self._sync_handover_clock(
+                now_ns=resumed_now_ns,
+                global_paused=False,
+            )
+            self._apply_handover_clock_result(
+                handover_clock_result, now_ns=resumed_now_ns, observation=None
+            )
+            self._publish_handover_result_telemetry(
+                handover_clock_result, observation=None
+            )
+            self.services.cosine.set_global_paused(False, resumed_now_ns)
+            mine_authority = getattr(self, "_mine_authority", None)
+            if mine_authority is not None:
+                mine_authority.set_global_paused(False, resumed_now_ns)
             self._reconcile_pending_trigger()
             observation = self.foreground_reader.observe()
             context = self._classify_observation(observation)
-            self._route_context(context)
+            blacklist_result = self.services.blacklist.observe(context)
+            self._reconcile_handover_before_routing(context, blacklist_result)
+            self._route_context(context, blacklist_result)
+            self._reconcile_handover_after_routing(context)
+            self._publish_handover_live_status(
+                now_ns=context.foreground.observed_monotonic_ns,
+                observation=context.foreground,
+                territory=self._sibling_territory(context, blacklist_result),
+                study_authority=context.study_owned,
+                global_pause=False,
+            )
             self._publish_live_views(context)
 
             next_cycle += self.poll_seconds
@@ -1375,21 +1729,49 @@ class WindowsMonitorCoordinator:
                 _field(browser_evidence, "certified_host", "") or ""
             ),
             window_title=observation.window_title,
+            app_identity=_field(observation, "app_identity", None),
         )
 
+        study_owned = self._study_owns_moment()
+        preemption_settled = self._settle_study_son_preemption(
+            study_owned=study_owned,
+            observation=observation,
+            cosine_platform=cosine_platform,
+        )
+
+        sine_monitor = self.services.sine.monitor_status(
+            now_ns=observation.observed_monotonic_ns
+        )
+        cosine_monitor = self.services.cosine.monitor_status(
+            now_ns=observation.observed_monotonic_ns
+        )
+        protected_red_active = bool(
+            self.services.sine.protected_red_active()
+            and not bool(_field(sine_monitor, "held", False))
+        )
+        cosine_owned = bool(
+            cosine_platform is not None
+            and not study_owned
+            and preemption_settled
+            and not protected_red_active
+        )
         cosine_snapshot = self.services.cosine.snapshot(
             now_ns=observation.observed_monotonic_ns
         )
-        cosine_phase = str(_field(cosine_snapshot, "phase", ""))
-        if hasattr(_field(cosine_snapshot, "phase", None), "value"):
-            cosine_phase = str(_field(cosine_snapshot, "phase").value)
-        cosine_active = cosine_phase not in {"", "IDLE", "CLOSED", "SHUTDOWN"}
+        cosine_phase = _enum_text(_field(cosine_snapshot, "phase", ""))
+        cosine_active = bool(
+            not study_owned
+            and preemption_settled
+            and not protected_red_active
+            and not bool(_field(cosine_monitor, "held", False))
+            and cosine_phase not in {"", "IDLE", "CLOSED", "SHUTDOWN"}
+        )
 
         # Resource Intent owns Study/idle classification, but it must know
         # when higher-precedence SINE/COSINE authorities currently own the
         # observed surface. These setters do not perform classification.
         self.services.resource_intent.set_protected_red(
-            bool(self.services.sine.protected_red_active())
+            protected_red_active
         )
         set_sine_active = getattr(
             self.services.resource_intent, "set_sine_episode_active", None
@@ -1398,8 +1780,17 @@ class WindowsMonitorCoordinator:
             set_sine_active(self._sine_owns_intervention())
         self.services.resource_intent.set_cosine_active(cosine_active)
         self.services.resource_intent.set_cosine_resource_owned(
-            cosine_platform is not None
+            cosine_owned
         )
+        set_ott_identity = getattr(
+            self.services.resource_intent,
+            "set_certified_ott_platform_key",
+            None,
+        )
+        if callable(set_ott_identity):
+            set_ott_identity(
+                str(_field(cosine_platform, "platform_key", "") or "")
+            )
 
         intent = self.services.resource_intent.observe(
             foreground=observation,
@@ -1410,31 +1801,511 @@ class WindowsMonitorCoordinator:
             browser_evidence=browser_evidence,
             resource_intent=intent,
             cosine_platform=cosine_platform,
+            cosine_owned=cosine_owned,
+            study_owned=study_owned,
         )
 
-    def _route_context(self, context: MonitorContext) -> None:
+    def _son_authority(self, son: str):
+        if son == "SINE":
+            return self.services.sine
+        if son == "COSINE":
+            return self.services.cosine
+        if son == "MINE":
+            return getattr(self, "_mine_authority", None)
+        raise ValueError("son must be SINE, COSINE, or MINE")
+
+    def _son_status(self, son: str, now_ns: int):
+        authority = self._son_authority(son)
+        if authority is None:
+            return None
+        return authority.monitor_status(now_ns=now_ns)
+
+    def _drain_monitor_son_outputs(
+        self,
+        son: str,
+        *,
+        now_ns: int,
+        observation: ForegroundObservation | None,
+    ) -> None:
+        if son == "SINE":
+            for fact in self.services.sine.advance(now_monotonic_ns=now_ns):
+                self._route_sine_fact(fact, observation)
+            return
+        authority = self._son_authority(son)
+        if authority is None:
+            return
+        for effect in tuple(authority.drain_effects() or ()):
+            if son == "COSINE":
+                self._route_cosine_effect(effect, observation)
+            else:
+                self._route_mine_effect(effect, observation)
+
+    def _monitor_hold_son(
+        self,
+        son: str,
+        episode_key: object,
+        *,
+        now_ns: int,
+        observation: ForegroundObservation | None,
+    ) -> bool:
+        authority = self._son_authority(son)
+        if authority is None:
+            return False
+        accepted = bool(authority.monitor_hold(episode_key=episode_key, now_ns=now_ns))
+        self._drain_monitor_son_outputs(
+            son, now_ns=now_ns, observation=observation
+        )
+        return accepted
+
+    def _monitor_resume_son(
+        self,
+        son: str,
+        episode_key: object,
+        *,
+        now_ns: int,
+        observation: ForegroundObservation | None,
+    ) -> bool:
+        authority = self._son_authority(son)
+        if authority is None:
+            return False
+        accepted = bool(authority.monitor_resume(episode_key=episode_key, now_ns=now_ns))
+        self._drain_monitor_son_outputs(
+            son, now_ns=now_ns, observation=observation
+        )
+        return accepted
+
+    def _monitor_terminate_son(
+        self,
+        son: str,
+        episode_key: object,
+        *,
+        now_ns: int,
+        observation: ForegroundObservation | None,
+    ) -> bool:
+        authority = self._son_authority(son)
+        if authority is None:
+            return False
+        accepted = bool(authority.monitor_terminate(episode_key=episode_key, now_ns=now_ns))
+        self._drain_monitor_son_outputs(
+            son, now_ns=now_ns, observation=observation
+        )
+        return accepted
+
+    def _apply_handover_clock_result(
+        self,
+        result: HandoverResult,
+        *,
+        now_ns: int,
+        observation: ForegroundObservation | None,
+    ) -> None:
+        """Apply only terminal clock outcomes; Mr Hand still owns the clock."""
+
+        if result.action != "EXPIRED":
+            return
+        if result.source is None or result.source_episode_key is None:
+            raise RuntimeError("expired handover lost its protected source identity")
+        self._monitor_terminate_son(
+            result.source,
+            result.source_episode_key,
+            now_ns=now_ns,
+            observation=observation,
+        )
+
+    @staticmethod
+    def _sibling_territory(
+        context: MonitorContext,
+        blacklist_result: object,
+    ) -> str | None:
+        """Map Mom's already-certified current fact to one son, or no sibling."""
+
+        if context.study_owned:
+            return None
+        from CORE_ENGINE.resource_intent import ResourceSurface
+
+        verdict = _field(context.resource_intent, "verdict")
+        identity = _field(verdict, "resource_identity")
+        surface = _field(identity, "surface")
+        if surface is ResourceSurface.MESSAGING:
+            return "MINE"
+        if context.cosine_platform is not None:
+            return "COSINE"
+        blacklist_verdict = _field(blacklist_result, "verdict")
+        if bool(_field(blacklist_verdict, "actionable", False)):
+            return "SINE"
+        return None
+
+    @staticmethod
+    def _handover_exit_reason(context: MonitorContext) -> str:
+        from CORE_ENGINE.resource_intent import ResourceSurface
+
+        verdict = _field(context.resource_intent, "verdict")
+        identity = _field(verdict, "resource_identity")
+        surface = _field(identity, "surface")
+        if surface in {ResourceSurface.DOCUMENT, ResourceSurface.LEARNING_APP}:
+            return "FOCUS"
+        return "NEUTRAL"
+
+    def _reconcile_handover_before_routing(
+        self,
+        context: MonitorContext,
+        blacklist_result: object = None,
+    ) -> None:
+        """Start/return/retarget the one relationship before sons consume this fact."""
+
+        if context.study_owned:
+            # Observation-level second fence: sons are already preempted by
+            # Dad through _settle_study_son_preemption(); this factual
+            # ownership also ends Mr Hand, idempotently if the earlier
+            # clock-junction fence already did so this cycle.
+            result = self._finish_handover_for_study(
+                context.foreground.observed_monotonic_ns
+            )
+            self._publish_handover_result_telemetry(result, context.foreground)
+            return
+        now_ns = context.foreground.observed_monotonic_ns
+        clock_result = self._handover.advance(now_ns)
+        self._apply_handover_clock_result(
+            clock_result, now_ns=now_ns, observation=context.foreground
+        )
+        self._publish_handover_result_telemetry(clock_result, context.foreground)
+        snapshot = self._handover.snapshot(now_ns)
+        territory = self._sibling_territory(context, blacklist_result)
+
+        if snapshot.active:
+            source = str(snapshot.source or "")
+            target = str(snapshot.target or "")
+            key = snapshot.source_episode_key
+            source_status = self._son_status(source, now_ns)
+            if (
+                source_status is None
+                or not bool(_field(source_status, "factual_episode", False))
+                or _field(source_status, "episode_key") != key
+            ):
+                result = self._handover.finish("SOURCE_NO_LONGER_FACTUAL", now_ns)
+                self._publish_handover_result_telemetry(result, context.foreground)
+                return
+            if bool(_field(source_status, "termination_pending", False)):
+                return
+            if territory == source:
+                result = self._handover.source_returned(now_ns)
+                if result.action == "EXPIRED":
+                    self._apply_handover_clock_result(
+                        result, now_ns=now_ns, observation=context.foreground
+                    )
+                    self._publish_handover_result_telemetry(
+                        result, context.foreground
+                    )
+                    return
+                if result.action == "SOURCE_RETURNED":
+                    self._monitor_resume_son(
+                        source, key, now_ns=now_ns, observation=context.foreground
+                    )
+                    self._publish_handover_result_telemetry(
+                        result, context.foreground
+                    )
+                return
+            if territory is None:
+                if self._monitor_resume_son(
+                    source, key, now_ns=now_ns, observation=context.foreground
+                ):
+                    result = self._handover.finish(
+                        self._handover_exit_reason(context), now_ns
+                    )
+                    self._publish_handover_result_telemetry(
+                        result, context.foreground
+                    )
+                return
+            if territory != target:
+                result = self._handover.switch_target(territory, now_ns)
+                self._publish_handover_result_telemetry(result, context.foreground)
+            return
+
+        if territory is None:
+            return
+        statuses = {
+            son: self._son_status(son, now_ns)
+            for son in ("SINE", "COSINE", "MINE")
+        }
+        target_status = statuses.get(territory)
+        if bool(_field(target_status, "factual_episode", False)):
+            return
+        candidates = [
+            (son, status)
+            for son, status in statuses.items()
+            if son != territory
+            and status is not None
+            and bool(_field(status, "source_eligible", False))
+            and not bool(_field(status, "held", False))
+        ]
+        if len(candidates) != 1:
+            return
+        source, status = candidates[0]
+        key = _field(status, "episode_key")
+        if key is None:
+            return
+        if not self._monitor_hold_son(
+            source, key, now_ns=now_ns, observation=context.foreground
+        ):
+            return
+        try:
+            result = self._handover.start(source, territory, key, now_ns)
+        except Exception:
+            self._monitor_resume_son(
+                source, key, now_ns=now_ns, observation=context.foreground
+            )
+            raise
+        self._publish_handover_result_telemetry(result, context.foreground)
+
+    def _reconcile_handover_after_routing(self, context: MonitorContext) -> None:
+        """Close the protected source when the target becomes factually real."""
+
+        if context.study_owned:
+            return
+        now_ns = context.foreground.observed_monotonic_ns
+        snapshot = self._handover.snapshot(now_ns)
+        if not snapshot.active:
+            return
+        source = str(snapshot.source or "")
+        target = str(snapshot.target or "")
+        key = snapshot.source_episode_key
+        source_status = self._son_status(source, now_ns)
+        target_status = self._son_status(target, now_ns)
+        if (
+            source_status is None
+            or not bool(_field(source_status, "factual_episode", False))
+            or _field(source_status, "episode_key") != key
+        ):
+            result = self._handover.finish("SOURCE_NO_LONGER_FACTUAL", now_ns)
+            self._publish_handover_result_telemetry(result, context.foreground)
+            return
+        if not bool(_field(target_status, "factual_episode", False)):
+            return
+        if self._monitor_terminate_son(
+            source, key, now_ns=now_ns, observation=context.foreground
+        ):
+            result = self._handover.finish("TARGET_ACTIVATED", now_ns)
+            self._publish_handover_result_telemetry(result, context.foreground)
+
+    def _study_owns_moment(self) -> bool:
+        """Read the two existing lifecycle authorities; detect nothing anew."""
+
+        from COSECANT_STUDY_MODE.cosecant import CosecantState
+        from COSECANT_STUDY_MODE.study import StudyState
+
+        study = self.services.study.snapshot()
+        cosecant = self.services.cosecant.snapshot()
+        return bool(
+            _field(study, "state", None) is StudyState.ACTIVE
+            or _field(cosecant, "state", None)
+            in {
+                CosecantState.BREAK_ACTIVE,
+                CosecantState.BREAK_COMPLETE,
+                CosecantState.BREAK_ALREADY_OVER,
+                CosecantState.FINAL_LOCK,
+                CosecantState.RETURN_CONFIRMING,
+            }
+        )
+
+    def _settle_study_son_preemption(
+        self,
+        *,
+        study_owned: bool,
+        observation: ForegroundObservation,
+        cosine_platform: object | None = None,
+    ) -> bool:
+        """Route Dad's factual ownership through Mom to all three sons.
+
+        Study is stronger than SINE, COSINE and MINE, but it is not a sibling.
+        This junction therefore invokes only each son's native Dad artery.  It
+        never starts, settles, pauses or otherwise mutates Mr Hand; Mr Hand's
+        own Dad-preemption is handled independently by Mom's established
+        _finish_handover_for_study() / _sync_handover_clock() boundary.
+
+        SINE is intentionally one-shot: an old Normal-mode SINE episode is
+        terminated, while a fresh Study-mode SINE episode is allowed to live
+        under the existing Study-distraction physiology.  COSINE preserves the
+        exact first Study-owned boundary sample before terminal preemption, and
+        its private pending flag remains only a durability-retry latch.  MINE
+        keeps its native Study latch and retries terminal durability through its
+        own preempt_for_study() implementation.
+        """
+
+        now_ns = observation.observed_monotonic_ns
+
+        if study_owned:
+            sine_view = self.services.sine.live_view()
+            if (
+                str(_field(sine_view, "episode_uid", "") or "").strip()
+                and not bool(_field(sine_view, "study_mode", False))
+            ):
+                try:
+                    sine_preempted = bool(
+                        self.services.sine.preempt_for_study(now_ns=now_ns)
+                    )
+                except Exception as exc:
+                    sine_preempted = False
+                    _telemetry(
+                        self.telemetry_queue,
+                        "sine_study_preemption_pending",
+                        observation=observation,
+                        message=(
+                            "SINE Study preemption could not complete: "
+                            f"{_safe_telemetry_text(exc)}"
+                        ),
+                    )
+                self._drain_monitor_son_outputs(
+                    "SINE", now_ns=now_ns, observation=observation
+                )
+                if not sine_preempted:
+                    _telemetry(
+                        self.telemetry_queue,
+                        "sine_study_preemption_pending",
+                        observation=observation,
+                        message=(
+                            "SINE still owns a pre-Study episode; Dad preemption "
+                            "will retry on the next factual Study sample."
+                        ),
+                    )
+
+        cosine_snapshot = self.services.cosine.snapshot(now_ns=now_ns)
+        cosine_phase = _enum_text(_field(cosine_snapshot, "phase", ""))
+        cosine_active = cosine_phase not in {"", "IDLE", "CLOSED", "SHUTDOWN"}
+        entering_cosine_preemption = bool(
+            study_owned
+            and cosine_active
+            and not self._cosine_study_preemption_pending
+        )
+        if study_owned and cosine_active:
+            self._cosine_study_preemption_pending = True
+
+        if entering_cosine_preemption and cosine_platform is not None:
+            # Preserve only the supported interval ending exactly at Dad's
+            # ownership boundary.  Retry cycles must never credit Study time.
+            from COSINE.cosine import CosineObservation
+
+            for effect in self.services.cosine.observe(
+                CosineObservation(
+                    platform=cosine_platform,
+                    focus_confirmed=False,
+                    sine_popup_displayed=False,
+                    observed_monotonic_ns=now_ns,
+                    observation_sequence=observation.sequence,
+                    supported_interval_ns=int(
+                        float(getattr(self, "poll_seconds", DEFAULT_POLL_SECONDS))
+                        * NANOSECONDS_PER_SECOND
+                    ),
+                )
+            ):
+                self._route_cosine_effect(effect, observation)
+
+        cosine_settled = True
+        if self._cosine_study_preemption_pending:
+            if not cosine_active:
+                self._cosine_study_preemption_pending = False
+            else:
+                try:
+                    effects = self.services.cosine.preempt_for_study(now_ns=now_ns)
+                except Exception as exc:
+                    cosine_settled = False
+                    _telemetry(
+                        self.telemetry_queue,
+                        "cosine_study_preemption_pending",
+                        observation=observation,
+                        message=(
+                            "COSINE Study preemption remains suppressed: "
+                            f"{_safe_telemetry_text(exc)}"
+                        ),
+                    )
+                else:
+                    for effect in effects:
+                        self._route_cosine_effect(effect, observation)
+                    after = self.services.cosine.snapshot(now_ns=now_ns)
+                    after_phase = _enum_text(_field(after, "phase", ""))
+                    cosine_settled = after_phase in {
+                        "",
+                        "IDLE",
+                        "CLOSED",
+                        "SHUTDOWN",
+                    }
+                    self._cosine_study_preemption_pending = not cosine_settled
+                    if not cosine_settled:
+                        _telemetry(
+                            self.telemetry_queue,
+                            "cosine_study_preemption_pending",
+                            observation=observation,
+                            message=(
+                                "COSINE Dad preemption was not durably accepted; "
+                                "specialist authority remains suppressed and "
+                                "closure will retry."
+                            ),
+                        )
+
+        if study_owned:
+            mine_authority = getattr(self, "_mine_authority", None)
+            if mine_authority is not None:
+                try:
+                    effects = mine_authority.preempt_for_study(now_ns=now_ns)
+                except Exception as exc:
+                    _telemetry(
+                        self.telemetry_queue,
+                        "mine_study_preemption_pending",
+                        observation=observation,
+                        message=(
+                            "MINE Study preemption could not complete: "
+                            f"{_safe_telemetry_text(exc)}"
+                        ),
+                    )
+                else:
+                    for effect in effects:
+                        self._route_mine_effect(effect, observation)
+
+        return cosine_settled
+
+    def _route_context(
+        self,
+        context: MonitorContext,
+        blacklist_result: object,
+    ) -> None:
         from COSINE.cosine import CosineObservation
+        from CORE_ENGINE.resource_intent import ResourceSurface
 
         now_ns = context.foreground.observed_monotonic_ns
         self._drain_resource_intent_facts(context.foreground)
         verdict = _field(context.resource_intent, "verdict")
-        focus_confirmed = bool(_field(verdict, "study_idle_allowed", False))
-        sine_view = self.services.sine.live_view()
-        popup_state = _field(sine_view, "popup_state")
-        popup_state_text = (
-            str(popup_state.value) if hasattr(popup_state, "value") else str(popup_state or "")
+        resource_identity = _field(verdict, "resource_identity")
+        resource_surface = _field(resource_identity, "surface")
+        # NEW COSINE recovery uses the two already-published normal-mode
+        # productive surfaces. Unknown/neutral context is deliberately false.
+        focus_confirmed = bool(
+            not context.study_owned
+            and resource_surface
+            in {ResourceSurface.DOCUMENT, ResourceSurface.LEARNING_APP}
         )
 
         cosine_observation = CosineObservation(
-            platform=context.cosine_platform,
+            platform=(context.cosine_platform if context.cosine_owned else None),
             focus_confirmed=focus_confirmed,
-            sine_popup_displayed=popup_state_text == "DISPLAYED",
+            # Retained constructor field is staged compatibility only.  SINE
+            # popup presentation no longer drives COSINE physiology.
+            sine_popup_displayed=False,
             observed_monotonic_ns=now_ns,
+            observation_sequence=context.foreground.sequence,
+            supported_interval_ns=int(
+                float(getattr(self, "poll_seconds", DEFAULT_POLL_SECONDS))
+                * 1_000_000_000
+            ),
         )
-        for effect in self.services.cosine.observe(cosine_observation):
-            self._route_cosine_effect(effect, context.foreground)
-        for effect in self.services.cosine.advance(now_ns=now_ns):
-            self._route_cosine_effect(effect, context.foreground)
+        if not context.study_owned and not self._cosine_study_preemption_pending:
+            for effect in self.services.cosine.observe(cosine_observation):
+                self._route_cosine_effect(effect, context.foreground)
+            for effect in self.services.cosine.advance(now_ns=now_ns):
+                self._route_cosine_effect(effect, context.foreground)
+
+        self._route_mine_context(
+            context,
+            resource_surface=resource_surface,
+            resource_identity=resource_identity,
+        )
 
         # Break completion is decided before MIRL interprets this observation.
         # If the break remains active, one explicit NEUTRAL observation replaces
@@ -1444,7 +2315,6 @@ class WindowsMonitorCoordinator:
         self._persist_mirl_events(tuple(mirl_events), context.foreground)
 
         self.services.sine.observe(context)
-        blacklist_result = self.services.blacklist.observe(context)
         self._prepare_dwell_telemetry(blacklist_result)
         self._sync_sine_activity_clock(context, blacklist_result)
 
@@ -1469,6 +2339,7 @@ class WindowsMonitorCoordinator:
         if (
             self._pending_trigger is None
             and not self._sine_owns_intervention()
+            and not self._mine_owns_intervention()
             and not self._normal_break_owns_pause()
             and self._study_trigger_admission_open(context)
         ):
@@ -1484,6 +2355,81 @@ class WindowsMonitorCoordinator:
         self._reconcile_pending_normal_break_selector(
             occurred_monotonic_ns=now_ns,
             observation=context.foreground,
+        )
+
+    def _route_mine_context(
+        self,
+        context: MonitorContext,
+        *,
+        resource_surface: object,
+        resource_identity: object,
+    ) -> None:
+        """Coordinate siblings, then give MINE the one current certified fact."""
+
+        from CORE_ENGINE.resource_intent import ResourceSurface
+        from MINE.mine import MineObservation, MineObservationKind
+
+        if getattr(self, "_mine_authority", None) is None:
+            return
+        now_ns = context.foreground.observed_monotonic_ns
+        if context.study_owned:
+            # Dad preemption was already routed centrally by
+            # _settle_study_son_preemption() before Resource Intent routing.
+            return
+
+        mine_before = self._mine_authority.snapshot(now_ns=now_ns)
+        if bool(_field(mine_before, "study_preempted", False)):
+            if not self._mine_authority.release_study_preemption(now_ns=now_ns):
+                for effect in self._mine_authority.advance(now_ns=now_ns):
+                    self._route_mine_effect(effect, context.foreground)
+                return
+
+        messaging = resource_surface is ResourceSurface.MESSAGING
+
+        mine = self._mine_authority.snapshot(now_ns=now_ns)
+        phase = _enum_text(_field(mine, "phase", ""))
+        formal = bool(str(_field(mine, "mine_episode_id", "") or ""))
+
+        if messaging:
+            process = str(_field(resource_identity, "process_name", "") or "").casefold()
+            platform_key = str(_field(resource_identity, "platform_key", "") or "").strip()
+            if not platform_key:
+                platform_key = process.removesuffix(".exe")
+            platform_label = MESSAGING_PROCESS_LABELS.get(
+                platform_key,
+                MESSAGING_PROCESS_LABELS.get(process.removesuffix(".exe"), platform_key),
+            )
+            kind = MineObservationKind.MESSAGING
+            evidence_token = str(_field(resource_identity, "stable_key", "") or "")
+        elif resource_surface in {ResourceSurface.DOCUMENT, ResourceSurface.LEARNING_APP}:
+            kind = MineObservationKind.FOCUS
+            platform_key = platform_label = evidence_token = ""
+        else:
+            kind = MineObservationKind.NEUTRAL
+            platform_key = platform_label = evidence_token = ""
+
+        observation = MineObservation(
+            kind=kind,
+            observed_monotonic_ns=now_ns,
+            observation_sequence=context.foreground.sequence,
+            supported_interval_ns=int(self.poll_seconds * NANOSECONDS_PER_SECOND),
+            platform_key=platform_key,
+            platform_label=platform_label,
+            evidence_token=evidence_token,
+        )
+        for effect in self._mine_authority.observe(observation):
+            self._route_mine_effect(effect, context.foreground)
+        for effect in self._mine_authority.advance(now_ns=now_ns):
+            self._route_mine_effect(effect, context.foreground)
+
+    def _mine_owns_intervention(self) -> bool:
+        if getattr(self, "_mine_authority", None) is None:
+            return False
+        now_ns = max(1, self._monotonic_ns())
+        status = self._mine_authority.monitor_status(now_ns=now_ns)
+        return bool(
+            _field(status, "factual_episode", False)
+            and not _field(status, "held", False)
         )
 
     def _study_trigger_admission_open(self, context: MonitorContext) -> bool:
@@ -1507,11 +2453,18 @@ class WindowsMonitorCoordinator:
         live_view = self.services.sine.live_view()
         episode_uid = str(_field(live_view, "episode_uid", "") or "").strip()
         phase = _field(live_view, "phase")
-        return bool(episode_uid) and phase in {
-            SinePhase.WAITING_FOR_DISPLAY,
-            SinePhase.ACTIVE,
-            SinePhase.PROTECTED_RED,
-        }
+        status = self.services.sine.monitor_status(
+            now_ns=max(1, self._monotonic_ns())
+        )
+        return bool(
+            episode_uid
+            and phase in {
+                SinePhase.WAITING_FOR_DISPLAY,
+                SinePhase.ACTIVE,
+                SinePhase.PROTECTED_RED,
+            }
+            and not _field(status, "held", False)
+        )
 
     def _normal_break_owns_pause(self) -> bool:
         """Defence-in-depth gate for active or failed-close break ownership."""
@@ -1875,6 +2828,19 @@ class WindowsMonitorCoordinator:
             "cosine_effect",
             observation=observation,
             message=_field(effect, "message", "COSINE presentation effect"),
+            effect=effect,
+        )
+
+    def _route_mine_effect(
+        self,
+        effect: object,
+        observation: ForegroundObservation | None = None,
+    ) -> None:
+        _telemetry(
+            self.telemetry_queue,
+            "mine_effect",
+            observation=observation,
+            message=_field(effect, "message", "MINE presentation effect"),
             effect=effect,
         )
 
@@ -3031,7 +3997,7 @@ class WindowsMonitorCoordinator:
         Precedence -- exact resource, not platform, drives STUDY:
         1. Resource Intent confirmed STUDY_ALIGNED (exact resource, not
            just "Study Mode is on") -> STUDY, exempt from SINE.
-        2. An active COSINE OTT session (Netflix/Prime/Disney+/...) -> OTT.
+        2. This sample's certified OTT platform (not episode memory) -> OTT.
         3. Resource Intent's MESSAGING surface (native WhatsApp/Discord/
            Telegram/Slack/Teams by process, or a certified browser
            messaging route such as Instagram/Facebook/LinkedIn/X Direct
@@ -3045,6 +4011,7 @@ class WindowsMonitorCoordinator:
         """
 
         from CORE_ENGINE.resource_intent import ResourceIntent, ResourceSurface
+        from COSINE.cosine import PLATFORM_LABELS
 
         resource_view = self.services.resource_intent.live_view()
 
@@ -3069,15 +4036,20 @@ class WindowsMonitorCoordinator:
             self._messaging_dwell_key = ""
             return
 
-        cosine_snapshot = self.services.cosine.snapshot(
-            now_ns=context.foreground.observed_monotonic_ns
-        )
-        cosine_phase = _enum_text(_field(cosine_snapshot, "phase", "")).upper()
-        if cosine_phase not in {"", "IDLE", "CLOSED", "SHUTDOWN"}:
-            label = str(_field(cosine_snapshot, "current_platform_label", "") or "").strip()
+        platform = _field(context, "cosine_platform")
+        if platform is not None:
+            platform_key = _field(platform, "platform_key", "")
+            label = PLATFORM_LABELS.get(platform_key, "")
             if label:
-                title = str(_field(cosine_snapshot, "current_content_title", "") or "").strip()
-                elapsed = float(_field(cosine_snapshot, "current_platform_seconds", 0.0) or 0.0)
+                title = str(_field(platform, "content_title", "") or "").strip()
+                # The snapshot supplies duration only AFTER current identity
+                # is proved. Never borrow another platform's label or time.
+                cosine_snapshot = self.services.cosine.snapshot(
+                    now_ns=context.foreground.observed_monotonic_ns
+                )
+                elapsed = 0.0
+                if _field(cosine_snapshot, "current_platform_key", "") == platform_key:
+                    elapsed = float(_field(cosine_snapshot, "current_platform_seconds", 0.0) or 0.0)
                 self._console_classification(
                     "OTT", f"{label}: {title}" if title else label, elapsed, context.foreground
                 )
@@ -3281,12 +4253,34 @@ class WindowsMonitorCoordinator:
             observation=foreground,
             live_view=self.services.sine.live_view(),
         )
+        # Phase 1I.  Take ONE immutable COSINE snapshot for this cycle and
+        # reuse it for the live view, the transition signature and the prepared
+        # control view.  Reading the runtime once means those three consumers
+        # can never disagree with each other by a few hundred nanoseconds.
+        cosine_snapshot = self.services.cosine.snapshot(
+            now_ns=foreground.observed_monotonic_ns
+        )
         _telemetry(
             self.telemetry_queue,
             "cosine_live_status",
             observation=foreground,
-            live_view=self.services.cosine.snapshot(now_ns=foreground.observed_monotonic_ns),
+            live_view=cosine_snapshot,
         )
+        self._publish_cosine_transition(cosine_snapshot, foreground)
+        mine_authority = getattr(self, "_mine_authority", None)
+        mine_snapshot = (
+            mine_authority.snapshot(now_ns=foreground.observed_monotonic_ns)
+            if mine_authority is not None
+            else None
+        )
+        if mine_snapshot is not None:
+            _telemetry(
+                self.telemetry_queue,
+                "mine_watch_status",
+                observation=foreground,
+                live_view=mine_snapshot,
+            )
+            self._publish_mine_transition(mine_snapshot, foreground)
         _telemetry(
             self.telemetry_queue,
             "mirl_health_status",
@@ -3326,11 +4320,245 @@ class WindowsMonitorCoordinator:
                 "blacklist": self.services.blacklist.live_view(),
                 "trigger": self.services.trigger.live_view(),
                 "sine": self.services.sine.live_view(),
-                "cosine": self.services.cosine.snapshot(now_ns=foreground.observed_monotonic_ns),
+                "cosine": cosine_snapshot,
+                "mine": mine_snapshot,
                 "mirl": self.services.mirl.live_view(),
             },
         )
         self._publish_console_live_status(context)
+
+    def _publish_cosine_transition(
+        self,
+        snapshot: object,
+        observation: ForegroundObservation | None,
+    ) -> None:
+        """Publish one append-only COSINE row per MEANINGFUL transition.
+
+        Monitor stays the semantics/preparation boundary: this reads the
+        snapshot COSINE already produced and decides nothing about physiology.
+        It starts no timer, changes no phase and calls nothing on the runtime.
+
+        The signature deliberately contains only facts whose change is an
+        actual event -- phase, certified platform, Hopper count, the committed
+        break length, Global Pause, final-callback visibility, closure outcome
+        and durable health.  Every high-frequency value is excluded on purpose:
+        the countdowns (initial gate, return intent, break, return
+        verification, closure confirmation), ``foreground_ott_seconds``,
+        ``current_platform_seconds``, ``qualification_seconds`` and the content
+        title all change on almost every poll, and including any one of them
+        would turn this feed into one row per monitor cycle.
+
+        The private ``current_content_title`` never reaches the feed text.
+        """
+
+        signature = (
+            _field(snapshot, "generation", None),
+            _enum_text(_field(snapshot, "phase", "")).upper(),
+            str(_field(snapshot, "current_platform_key", "") or ""),
+            _field(snapshot, "hopper_count", None),
+            _field(snapshot, "chosen_break_minutes", None),
+            bool(_field(snapshot, "global_paused", False)),
+            bool(_field(snapshot, "final_callback_visible", False)),
+            str(_field(snapshot, "closure_outcome", "") or ""),
+            bool(_field(snapshot, "durable_health", True)),
+        )
+        if signature == self._last_cosine_transition_signature:
+            return
+
+        self._last_cosine_transition_signature = signature
+
+        phase = signature[1]
+        # An IDLE COSINE is never an event, and it is skipped EVERY time rather
+        # than only on the first signature (I-062 2A).  Once Global Pause
+        # publishes a paused snapshot, pausing an idle session would otherwise
+        # change the signature and emit "COSINE - IDLE - PAUSED" for a session
+        # that never had an episode at all.  The newest IDLE signature is still
+        # remembered above, so a later real transition compares against current
+        # truth rather than a stale one.
+        if phase in {"", "IDLE"}:
+            return
+
+        _telemetry(
+            self.telemetry_queue,
+            "cosine_transition",
+            observation=observation,
+            message="COSINE state transition",
+            badge="COSINE",
+            tone="cyan",
+            feed_text=self._cosine_transition_text(snapshot, signature),
+        )
+
+    @staticmethod
+    def _cosine_transition_text(
+        snapshot: object,
+        signature: tuple[object, ...],
+    ) -> str:
+        """Compose the factual transition line; no clinical claim is derived."""
+
+        phase = str(signature[1])
+        parts = ["COSINE \u2014 " + (phase.replace("_", " ") or "UNKNOWN")]
+
+        minutes = _field(snapshot, "chosen_break_minutes", None)
+        if isinstance(minutes, int) and not isinstance(minutes, bool) and minutes > 0:
+            parts.append(f"{minutes} min")
+
+        platform = str(_field(snapshot, "current_platform_label", "") or "").strip()
+        if platform:
+            parts.append(platform)
+
+        outcome = str(_field(snapshot, "closure_outcome", "") or "").strip()
+        if outcome:
+            parts.append(outcome.replace("_", " "))
+
+        # Section 5 ruling, option B.  Three signature components were invisible
+        # in this text, so two different signatures could render two identical
+        # rows.  hopper_count is safe -- COSINE increments it only on a
+        # HOPPER_TRANSITION, which changes current_platform_key and therefore
+        # the platform word above.  The other two are made explicit here.  This
+        # is telemetry readability only: no state is invented and no recovery
+        # physiology is implied.
+        if bool(_field(snapshot, "final_callback_visible", False)):
+            parts.append("CALLBACK VISIBLE")
+
+        if bool(_field(snapshot, "global_paused", False)):
+            parts.append("PAUSED")
+
+        if not bool(_field(snapshot, "durable_health", True)):
+            parts.append("DURABILITY DEGRADED")
+
+        return " \u00b7 ".join(parts)
+
+    def _publish_mine_transition(
+        self,
+        snapshot: object,
+        observation: ForegroundObservation | None,
+    ) -> None:
+        """Publish one append-only MINE row per MEANINGFUL transition.
+
+        Structural donor: ``_publish_cosine_transition``.  Monitor prepares
+        this row from the immutable MineSnapshot MINE already produced this
+        cycle; it starts no timer, changes no phase and calls nothing on the
+        runtime.  MESSAGING identity and MINE organ state stay two separate
+        rows -- this never replaces the foreground activity/MESSAGING row.
+
+        Every countdown (initial gate, return intent, important allowance,
+        return visual, return verification, closure confirmation) is
+        excluded on purpose: those change on almost every poll and would
+        turn this feed into one row per monitor cycle.
+        """
+
+        signature = (
+            _field(snapshot, "generation", None),
+            _enum_text(_field(snapshot, "phase", "")).upper(),
+            str(_field(snapshot, "current_platform_key", "") or ""),
+            str(_field(snapshot, "selected_branch", "") or ""),
+            _field(snapshot, "important_chosen_minutes", None),
+            bool(_field(snapshot, "mine1_requested", False)),
+            bool(_field(snapshot, "mine1_displayed", False)),
+            bool(_field(snapshot, "mine1_visible", False)),
+            str(_field(snapshot, "mine2_variant", "") or ""),
+            bool(_field(snapshot, "mine2_requested", False)),
+            bool(_field(snapshot, "mine2_displayed", False)),
+            bool(_field(snapshot, "mine2_visible", False)),
+            bool(_field(snapshot, "global_paused", False)),
+            bool(_field(snapshot, "study_preempted", False)),
+            str(_field(snapshot, "closure_outcome", "") or ""),
+            bool(_field(snapshot, "durable_health", True)),
+        )
+        if signature == self._last_mine_transition_signature:
+            return
+
+        self._last_mine_transition_signature = signature
+
+        phase = signature[1]
+        # A MINE that never opened a candidate/episode is not an
+        # intervention event.  Skipped every time, not only on the first
+        # signature, mirroring the COSINE IDLE-skip-every-time rule: a later
+        # unrelated meaningful change (e.g. Global Pause) must not fabricate
+        # a "MINE -- IDLE -- PAUSED" row for an organ that never started.
+        if phase in {"", "IDLE"}:
+            return
+
+        badge, tone = self._mine_transition_badge(snapshot, phase)
+        _telemetry(
+            self.telemetry_queue,
+            "mine_transition",
+            observation=observation,
+            message="MINE state transition",
+            badge=badge,
+            tone=tone,
+            feed_text=self._mine_transition_text(snapshot, signature),
+        )
+
+    @staticmethod
+    def _mine_transition_badge(snapshot: object, phase: str) -> tuple[str, str]:
+        """Return (badge, tone) for one MINE transition row.
+
+        MINE/red is escalation pressure: the organ is holding/observing/
+        requesting.  RETURN/green is a genuine recovery phase.  A CLOSED row
+        earns RETURN only when the factual closure evidence -- reason or
+        outcome -- proves a verified return; every other closure (Study
+        preemption, incomplete, emergency) stays MINE/red.  ``feed_text``
+        keeps its existing "MINE — ..." organ prefix
+        either way (section 19): RETURN is a Live Telemetry badge, not a
+        rename of the organ.
+        """
+
+        if phase == "CLOSED":
+            reason = _enum_text(_field(snapshot, "closure_reason", "")).upper()
+            outcome = _enum_text(_field(snapshot, "closure_outcome", "")).upper()
+            if reason == "VERIFIED_RETURN" or outcome in MINE_VERIFIED_RETURN_OUTCOMES:
+                return "RETURN", "green"
+            return "MINE", "red"
+        if phase in MINE_TRANSITION_RETURN_PHASES:
+            return "RETURN", "green"
+        return "MINE", "red"
+
+    @staticmethod
+    def _mine_transition_text(
+        snapshot: object,
+        signature: tuple[object, ...],
+    ) -> str:
+        """Compose the factual transition line; no clinical claim is derived."""
+
+        phase = str(signature[1])
+        parts = ["MINE \u2014 " + (phase.replace("_", " ") or "UNKNOWN")]
+
+        platform = str(_field(snapshot, "current_platform_label", "") or "").strip()
+        if platform:
+            parts.append(platform)
+
+        branch = str(_field(snapshot, "selected_branch", "") or "").strip()
+        if branch:
+            parts.append(branch.replace("_", " "))
+
+        minutes = _field(snapshot, "important_chosen_minutes", None)
+        if isinstance(minutes, int) and not isinstance(minutes, bool) and minutes > 0:
+            parts.append(f"{minutes} min")
+
+        variant = str(_field(snapshot, "mine2_variant", "") or "").strip()
+        if variant and variant not in phase:
+            parts.append(variant)
+
+        if bool(_field(snapshot, "mine1_visible", False)) or bool(
+            _field(snapshot, "mine2_visible", False)
+        ):
+            parts.append("POPUP VISIBLE")
+
+        outcome = str(_field(snapshot, "closure_outcome", "") or "").strip()
+        if outcome:
+            parts.append(outcome.replace("_", " "))
+
+        if bool(_field(snapshot, "study_preempted", False)):
+            parts.append("STUDY PREEMPTED")
+
+        if bool(_field(snapshot, "global_paused", False)):
+            parts.append("PAUSED")
+
+        if not bool(_field(snapshot, "durable_health", True)):
+            parts.append("DURABILITY DEGRADED")
+
+        return " \u00b7 ".join(parts)
 
     def _activity_telemetry_semantics(
         self,
@@ -3348,11 +4576,7 @@ class WindowsMonitorCoordinator:
         ):
             return "STUDY", "green"
 
-        cosine = self.services.cosine.snapshot(
-            now_ns=context.foreground.observed_monotonic_ns
-        )
-        cosine_phase = _enum_text(_field(cosine, "phase", "")).upper()
-        if cosine_phase not in {"", "IDLE", "CLOSED", "SHUTDOWN"}:
+        if _field(context, "cosine_platform") is not None:
             return "OTT", "cyan"
 
         if (
@@ -3398,6 +4622,12 @@ class WindowsMonitorCoordinator:
                 result = self.services.cosine.submit_command(payload)
                 for effect in self.services.cosine.drain_effects():
                     self._route_cosine_effect(effect)
+                self._answer_command(response_queue, result)
+                continue
+            if kind == "mine_command":
+                result = self._mine_authority.submit_command(payload)
+                for effect in self._mine_authority.drain_effects():
+                    self._route_mine_effect(effect)
                 self._answer_command(response_queue, result)
                 continue
             if kind.startswith("normal_break_"):
@@ -3747,13 +4977,6 @@ class WindowsMonitorCoordinator:
                 shown_monotonic_ns=occurred_ns,
                 popup_hwnd=int(_field(payload, "popup_hwnd", 0) or 0),
             )
-            if accepted:
-                from COSINE.cosine import ClosureReason
-                for effect in self.services.cosine.close(
-                    ClosureReason.SINE_HANDOFF,
-                    now_ns=occurred_ns,
-                ):
-                    self._route_cosine_effect(effect)
         elif kind == "sine_popup_failed":
             accepted = self.services.sine.popup_failed(
                 request_id=request_id,
@@ -4525,6 +5748,11 @@ class WindowsMonitorCoordinator:
             ClosureReason.EMERGENCY, now_ns=time.monotonic_ns()
         ):
             self._route_cosine_effect(effect)
+        from MINE.mine import MineClosureReason
+        for effect in self._mine_authority.close(
+            MineClosureReason.EMERGENCY, now_ns=time.monotonic_ns()
+        ):
+            self._route_mine_effect(effect)
         self._route_cosecant_result(self.services.cosecant.cancel_for_session_end())
         self.services.mirl.emergency_stop()
         self._persist_mirl_events(self.services.mirl.drain_events())
@@ -4645,6 +5873,14 @@ class WindowsMonitorCoordinator:
                 self._cleanup_errors.append("COSINE: durable shutdown was rejected")
         except Exception as error:
             self._cleanup_errors.append(f"COSINE: {error}")
+        try:
+            if self._mine_authority is not None and not self._mine_authority.shutdown():
+                self._cleanup_errors.append("MINE: durable shutdown was rejected")
+            if self._mine_authority is not None:
+                for effect in self._mine_authority.drain_effects():
+                    self._route_mine_effect(effect)
+        except Exception as error:
+            self._cleanup_errors.append(f"MINE: {error}")
 
         if self.session_id is not None:
             try:

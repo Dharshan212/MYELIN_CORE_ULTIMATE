@@ -23,6 +23,7 @@ second engine.
 from __future__ import annotations
 
 import ctypes
+import json
 import math
 import random
 import sys
@@ -55,6 +56,7 @@ if __package__ in (None, ""):
 from datetime import datetime, timezone
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Final
 
 from PyQt6.QtCore import (
@@ -93,6 +95,9 @@ from PyQt6.QtWidgets import (
     QButtonGroup,
     QComboBox,
     QFrame,
+    QGraphicsBlurEffect,
+    QGraphicsPixmapItem,
+    QGraphicsScene,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
@@ -124,6 +129,7 @@ from COSECANT_STUDY_MODE.view import StudyView
 from PERSISTENCE.storage import EngineStorage, bootstrap_production_schema
 from PROFILES.profiles import ProfileController
 from time_projection import (
+    parse_utc_timestamp,
     TimezoneProjectionError,
     project_utc_datetime,
     timezone_tag,
@@ -144,6 +150,8 @@ from UI_THEMES.theme import (
     AMBER_ALERT_THEME,
     Atmosphere,
     DEFAULT_THEME,
+    FEED_BADGE_COSINE,
+    FEED_BADGE_OTT,
     RED_ALERT_THEME,
     qalpha,
     RADIUS_LG,
@@ -980,13 +988,24 @@ def bar_row(caption: str, colour: str = "cyan", label_w: int = 108):
 
 
 class FeedTag(QLabel):
-    """Rounded telemetry tag; tone is a property so QSS colours it."""
+    """Rounded telemetry tag; tone is a property so QSS colours it.
+
+    The badge string Monitor already supplies as ``text`` is republished
+    verbatim as a second, presentation-only ``badge`` property.  It invents
+    no meaning, reaches no engine and changes no row: it exists only so the
+    stylesheet can separate two badges that legitimately share one tone --
+    OTT and COSINE are both ``cyan`` -- without touching the shared accent
+    token that SINE and the rest of the body read from the same theme.
+    """
 
     def __init__(self, text: str, tone: str = "", parent: QWidget | None = None) -> None:
         super().__init__(text.upper(), parent)
         self.setObjectName("feedTag")
         if tone:
             self.setProperty("tone", tone)
+        badge = text.strip().upper()
+        if badge:
+            self.setProperty("badge", badge)
         self.setFont(make_font(9, 600, spacing=0.4))
 
 
@@ -4146,9 +4165,11 @@ class LiveMirlDashboardDialog(QWidget):
     inside the SAME page, not a second browser window -- so this is a plain
     ``QWidget`` raised above the rest of the Control Station window, never a
     top-level ``QDialog``.  It has no OS titlebar and no taskbar/alt-tab
-    entry, matching that.  The panel itself paints the mockup's own
-    ``backdrop-filter``-unsupported fallback (see ``_GlassPanel``) rather
-    than attempting to fake a live blur, which Qt has no reliable way to do.
+    entry, matching that.  Qt has no live ``backdrop-filter``, so the frost
+    behind the panel is a one-time blurred grab of the host taken on
+    ``open_over`` while this overlay is still hidden (see
+    ``_grab_blurred``/``_backdrop``), the same honest stand-in
+    ``CosineDeepAnalysisDialog`` already uses -- not a continuous/live blur.
     """
 
     TAB_TITLES: Final = (
@@ -4182,6 +4203,10 @@ class LiveMirlDashboardDialog(QWidget):
         self.setObjectName("liveMirlDashboardOverlay")
         self.hide()
         self._host: QWidget | None = None
+        #: One-time blurred grab of the host taken just before each open --
+        #: a screenshot only, never persisted, never part of the MIRL
+        #: projection. See ``_grab_blurred``.
+        self._backdrop: QPixmap | None = None
         self._projection: object | None = None
         # Tabs render on first view, not all five up front: the history strip
         # alone is ~550 journey nodes on real evidence, and paying for four
@@ -4275,6 +4300,9 @@ class LiveMirlDashboardDialog(QWidget):
             self._host = host
         self.setGeometry(host.rect())
         self._layout_panel()
+        # Captured while still hidden, so the grab is only ever the host
+        # underneath -- never this overlay photographing itself.
+        self._backdrop = self._grab_blurred(host)
         self.show()
         self.raise_()
 
@@ -4305,9 +4333,38 @@ class LiveMirlDashboardDialog(QWidget):
             self.setGeometry(self._host.rect())
         return super().eventFilter(watched, event)
 
+    def _grab_blurred(self, host: QWidget) -> QPixmap | None:
+        """Blur a grab of ``host`` -- Qt's honest stand-in for the CSS
+        ``backdrop-filter`` COSINE's own overlay already uses (see
+        ``CosineDeepAnalysisDialog._grab_blurred``, read-only reference for
+        this same pattern). A screenshot only; failure falls back to no
+        backdrop rather than blocking the overlay."""
+
+        try:
+            source = host.grab()
+            if source.isNull():
+                return None
+            scene = QGraphicsScene()
+            item = QGraphicsPixmapItem(source)
+            effect = QGraphicsBlurEffect()
+            effect.setBlurRadius(14)
+            item.setGraphicsEffect(effect)
+            scene.addItem(item)
+            output = QPixmap(source.size())
+            output.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(output)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            scene.render(painter)
+            painter.end()
+            return output
+        except Exception:
+            return None
+
     def paintEvent(self, event) -> None:  # noqa: N802
         del event
         painter = QPainter(self)
+        if self._backdrop is not None:
+            painter.drawPixmap(self.rect(), self._backdrop)
         painter.fillRect(self.rect(), QColor(4, 8, 16, round(0.55 * 255)))
         painter.end()
 
@@ -5245,7 +5302,14 @@ class LiveMirlDashboardDialog(QWidget):
 
 
 class CosineShowcasePage(QWidget):
-    """The COSINE launcher page, reproduced from the approved mockup.
+    """Reference-only donor fixture; NOT a reachable page since Phase 1I.
+
+    Every number and event phrase below is hard-coded mockup content from the
+    OLD COSINE showcase.  Phase 1I replaced the navigable ``PAGE_COSINE``
+    destination with :class:`CosineLivePage`, so this class is no longer
+    instantiated anywhere and none of its fixture metrics can be presented as
+    live evidence.  It is kept only as visual donor reference for the Phase-2
+    read-model dashboard.
 
     Showcase surface: no COSINE runtime, no session logic, no Deep Analysis.
     """
@@ -5430,6 +5494,3226 @@ def _showcase_icon_node() -> QWidget:
     lay.setContentsMargins(0, 0, 0, 0)
     lay.addWidget(Dot(14, "green"), alignment=Qt.AlignmentFlag.AlignCenter)
     return host
+
+
+# ------------------------------------------------------------------ COSINE live
+# Phase 1I.  The Control Station displays NEW COSINE truth; it never owns it.
+# Every value below arrives inside one immutable ``CosineSnapshot`` delivered by
+# ``ControlStationController.cosine_live_status_changed``.  Nothing here starts a
+# timer, reads the database, imports ``COSINE/report.py`` or reconstructs a
+# deadline: the only reason a COSINE reading changes is that a newer snapshot
+# arrived.
+
+#: Backend phase -> readable text.  A phase is never re-interpreted as another
+#: physiological state; this table only spells the same truth in English.
+_COSINE_STATE_LABELS: Final = {
+    "IDLE": "Inactive",
+    "OBSERVING_OTT": "Observing OTT",
+    "INTENT_GATE_PENDING": "Intention Gate Pending",
+    "INTENT_GATE_ACTIVE": "Intention Gate",
+    "RETURN_INTENT_OBSERVING": "Return Intent",
+    "DURATION_ENTRY": "Set Break",
+    "BREAK_COMMIT_PENDING": "Starting Break",
+    "BREAK_ACTIVE": "Break Active",
+    "RETURN_VERIFYING": "Verifying Return",
+    "CLOSURE_CONFIRMING": "Confirming Return",
+    "FINAL_CALLBACK_PENDING": "Callback Pending",
+    "FINAL_CALLBACK_ACTIVE": "Focus Callback",
+    "FINAL_CALLBACK_HIDDEN_VERIFYING": "Verifying Return",
+    "CLOSED": "Closed",
+    "SHUTDOWN": "Inactive",
+}
+
+#: Backend phase -> (caption, snapshot field carrying the remaining seconds).
+#: A phase absent from this table deliberately has no scientific countdown; the
+#: card shows an em dash rather than inventing one.
+_COSINE_TIMER_SOURCES: Final = {
+    "OBSERVING_OTT": ("Intention gate", "initial_gate_remaining_seconds"),
+    "RETURN_INTENT_OBSERVING": ("Return window", "return_intent_remaining_seconds"),
+    "BREAK_ACTIVE": ("Break remaining", "break_remaining_seconds"),
+    "RETURN_VERIFYING": ("Return verify", "return_verification_remaining_seconds"),
+    "FINAL_CALLBACK_HIDDEN_VERIFYING": (
+        "Return verify",
+        "return_verification_remaining_seconds",
+    ),
+    "CLOSURE_CONFIRMING": ("Closure confirm", "closure_confirmation_remaining_seconds"),
+}
+
+
+def _cosine_field(snapshot: object, name: str, default=None):
+    """Read one snapshot field without caring whether it is a dataclass."""
+
+    if isinstance(snapshot, dict):
+        return snapshot.get(name, default)
+    return getattr(snapshot, name, default)
+
+
+def _cosine_number(value: object) -> float:
+    """Read one numeric snapshot field defensively, without interpreting it."""
+
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
+def _cosine_phase_key(snapshot: object) -> str:
+    """Return the canonical backend phase name, e.g. ``BREAK_ACTIVE``.
+
+    ``CosinePhase`` is a ``str`` Enum whose Phase-1H import aliases resolve to
+    the canonical member, so ``.name`` is already the one true phase.  The
+    launcher does not import COSINE: the phase is read structurally so that no
+    presentation surface depends on engine internals.
+    """
+
+    phase = _cosine_field(snapshot, "phase")
+    if phase is None:
+        return ""
+    name = getattr(phase, "name", None)
+    if name is not None:
+        return str(name).strip().upper()
+    value = getattr(phase, "value", None)
+    if value is not None:
+        return str(value).strip().upper()
+    return str(phase).strip().upper()
+
+
+def _cosine_clock(value: object) -> str:
+    """Format a backend remaining-seconds value; never a locally kept clock."""
+
+    if value is None:
+        return "—"
+    try:
+        seconds = max(0, int(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        return "—"
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def _cosine_break_minutes(snapshot: object) -> int | None:
+    """Return the committed break length, or None while none is factual.
+
+    A duration is shown only when the backend actually holds one.  It is never
+    inferred from a remaining value, a deadline, a title, a state or a platform,
+    and no default recommendation is ever displayed.
+    """
+
+    minutes = _cosine_field(snapshot, "chosen_break_minutes")
+    if minutes is None or isinstance(minutes, bool):
+        return None
+    try:
+        exact = int(minutes)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if exact != minutes or exact <= 0:
+        return None
+    return exact
+
+
+def _cosine_words(value: object) -> str:
+    """Turn one backend token (``EVIDENCE_GAP``) into readable text."""
+
+    text = str(value or "").strip()
+    if not text:
+        return "—"
+    return text.replace("_", " ").title()
+
+
+class CosineLiveCard(QWidget):
+    """One dashboard card presenting the newest ``CosineSnapshot``.
+
+    Presentation only.  It holds no ``QTimer``/``QElapsedTimer``, calls no
+    ``time.monotonic``, performs no deadline arithmetic and reaches no runtime:
+    ``render`` writes exactly the fields the backend already decided.  The same
+    class serves the Control page and the COSINE page, so two subscribers of the
+    one live signal never imply two authorities.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("plainBox")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        card, body = make_card()
+        head, self._hint = card_head("COSINE Live", "Inactive", dot=True)
+        body.addWidget(head)
+        body.addSpacing(16)
+
+        top = QHBoxLayout()
+        top.setSpacing(14)
+        platform, self._platform = stat_box("Platform", "—", "text", 16.0)
+        state, self._state = stat_box("State", "Inactive", "text", 16.0)
+        chosen, self._break = stat_box("Break", "—", "text", 16.0)
+        for widget in (platform, state, chosen):
+            top.addWidget(widget, 1)
+        body.addLayout(top)
+        body.addSpacing(14)
+
+        timer_host = QWidget()
+        timer_host.setObjectName("plainBox")
+        timer_lay = QVBoxLayout(timer_host)
+        timer_lay.setContentsMargins(0, 0, 0, 0)
+        timer_lay.setSpacing(4)
+        self._timer_caption = label(
+            "Timer source", 11, 400, "muted", spacing=1.0, upper=True
+        )
+        self._timer_value = label("—", 30, 600, "cyan", mono=True)
+        timer_lay.addWidget(self._timer_caption)
+        timer_lay.addWidget(self._timer_value)
+        body.addWidget(timer_host)
+        body.addSpacing(12)
+
+        progress_row, self._track, self._progress = bar_row("Progress", "cyan", 118)
+        body.addWidget(progress_row)
+        body.addSpacing(12)
+
+        footer = QHBoxLayout()
+        footer.setSpacing(18)
+        self._hopper = label("Hopper: —", 12, 400, "muted", mono=True)
+        self._outcome = label("Outcome: —", 12, 400, "muted", mono=True)
+        self._quality = label("Data: —", 12, 400, "muted", mono=True)
+        for widget in (self._hopper, self._outcome, self._quality):
+            footer.addWidget(widget)
+        footer.addStretch(1)
+        body.addLayout(footer)
+
+        root.addWidget(card)
+        self.setAccessibleName("COSINE live state")
+        self.render(None)
+
+    # -------------------------------------------------------------- render
+    def render(self, snapshot: object) -> None:
+        """Show exactly one backend snapshot, or the factual inactive state."""
+
+        if snapshot is None:
+            self._render_inactive()
+            return
+
+        phase = _cosine_phase_key(snapshot)
+        state_text = _COSINE_STATE_LABELS.get(phase, _cosine_words(phase))
+        paused = bool(_cosine_field(snapshot, "global_paused", False))
+
+        platform = str(
+            _cosine_field(snapshot, "current_platform_label", "") or ""
+        ).strip()
+        self._platform.setText(platform or "—")
+        self._platform.setToolTip(platform)
+
+        self._state.setText(state_text)
+        self._hint.setText(f"{state_text} · PAUSED" if paused else state_text)
+
+        minutes = _cosine_break_minutes(snapshot)
+        self._break.setText("—" if minutes is None else f"{minutes} min")
+
+        caption, field = _COSINE_TIMER_SOURCES.get(phase, ("", ""))
+        if field:
+            # The frozen value is displayed exactly as published.  Under Global
+            # Pause the backend simply stops advancing it; nothing decrements
+            # it here.
+            self._timer_caption.setText(
+                f"{caption} · paused".upper() if paused else caption.upper()
+            )
+            self._timer_value.setText(_cosine_clock(_cosine_field(snapshot, field)))
+        else:
+            self._timer_caption.setText("NO SCIENTIFIC COUNTDOWN")
+            self._timer_value.setText("—")
+
+        ratio, ratio_text = self._progress_reading(snapshot, phase, minutes)
+        self._track.set_progress(ratio)
+        self._progress.setText(ratio_text)
+
+        hopper = _cosine_field(snapshot, "hopper_count")
+        self._hopper.setText(
+            "Hopper: —" if hopper is None else f"Hopper: {int(hopper)}"
+        )
+        self._outcome.setText(
+            "Outcome: " + _cosine_words(_cosine_field(snapshot, "closure_outcome"))
+        )
+        self._quality.setText(
+            "Data: " + _cosine_words(_cosine_field(snapshot, "data_quality"))
+        )
+
+    def _render_inactive(self) -> None:
+        """No live COSINE: say so, rather than leaving a stale reading up."""
+
+        self._hint.setText("Inactive")
+        self._platform.setText("—")
+        self._platform.setToolTip("")
+        self._state.setText("Inactive")
+        self._break.setText("—")
+        self._timer_caption.setText("TIMER SOURCE")
+        self._timer_value.setText("—")
+        self._track.set_progress(0.0)
+        self._progress.setText("—")
+        self._hopper.setText("Hopper: —")
+        self._outcome.setText("Outcome: —")
+        self._quality.setText("Data: —")
+
+    @staticmethod
+    def _progress_reading(
+        snapshot: object,
+        phase: str,
+        minutes: int | None,
+    ) -> tuple[float, str]:
+        """Derive the bar from the SAME snapshot, or stay neutral.
+
+        No physiology constant is hard-coded here: the intention-gate total is
+        the snapshot's own elapsed + remaining, and the break total exists only
+        once the user's committed duration is factual.  A phase with no safe
+        denominator gets a neutral bar and an em dash -- never an invented one.
+        """
+
+        total = 0.0
+        elapsed = 0.0
+        if phase == "OBSERVING_OTT":
+            elapsed = _cosine_number(_cosine_field(snapshot, "qualification_seconds"))
+            total = elapsed + _cosine_number(
+                _cosine_field(snapshot, "initial_gate_remaining_seconds")
+            )
+        elif phase == "BREAK_ACTIVE" and minutes is not None:
+            total = float(minutes) * 60.0
+            elapsed = total - _cosine_number(
+                _cosine_field(snapshot, "break_remaining_seconds")
+            )
+        if total <= 0.0:
+            return 0.0, "—"
+        # Clamping is visual only; it never edits the displayed factual timer.
+        ratio = max(0.0, min(1.0, elapsed / total))
+        return ratio, f"{int(round(ratio * 100))}%"
+
+
+#: Backend MINE phase -> readable state text.  No state reinterpretation: a
+#: phase absent from this table (should not occur) reads "Unknown" rather
+#: than guessing.
+_MINE_STATE_LABELS: Final = {
+    "IDLE": "Inactive",
+    "OBSERVING_MESSAGING": "Observing Messaging",
+    "MINE1_PENDING": "MINE-1 Pending",
+    "MINE1_ACTIVE": "MINE-1 Active",
+    "RETURN_INTENT_ACTIVE": "Return Intent",
+    "IMPORTANT_DURATION_ENTRY": "Set Important Time",
+    "IMPORTANT_COMMIT_PENDING": "Starting Important Allowance",
+    "IMPORTANT_ALLOWANCE_ACTIVE": "Important Allowance",
+    "MINE2A_PENDING": "MINE-2A Pending",
+    "MINE2A_ACTIVE": "MINE-2A Active",
+    "MINE2B_PENDING": "MINE-2B Pending",
+    "MINE2B_ACTIVE": "MINE-2B Active",
+    "RETURN_VISUAL_CONFIRMING": "Return Confirming",
+    "RETURN_VERIFYING": "Return Verifying",
+    "CLOSURE_CONFIRMING": "Closure Confirming",
+    "CLOSED": "Closed",
+    "SHUTDOWN": "Shutdown",
+}
+
+#: Backend phase -> (caption, snapshot field carrying the remaining seconds).
+#: A field of ``None`` means the phase has a caption but deliberately no
+#: scientific countdown yet (e.g. awaiting a MINE-1 response) -- the card
+#: shows an em dash rather than inventing a timeout.  A phase absent from
+#: this table entirely gets "No Scientific Countdown".
+_MINE_TIMER_SOURCES: Final = {
+    "OBSERVING_MESSAGING": ("Initial MINE Gate Remaining", "initial_gate_remaining_seconds"),
+    "MINE1_PENDING": ("Awaiting MINE-1 Response", None),
+    "MINE1_ACTIVE": ("Awaiting MINE-1 Response", None),
+    "RETURN_INTENT_ACTIVE": ("Return Intent Remaining", "return_intent_remaining_seconds"),
+    "IMPORTANT_DURATION_ENTRY": ("Awaiting Important Duration", None),
+    "IMPORTANT_COMMIT_PENDING": ("Starting Important Allowance", None),
+    "IMPORTANT_ALLOWANCE_ACTIVE": ("Important Allowance Remaining", "important_remaining_seconds"),
+    "MINE2A_PENDING": ("Awaiting Return From Messaging", None),
+    "MINE2A_ACTIVE": ("Awaiting Return From Messaging", None),
+    "MINE2B_PENDING": ("Awaiting Return From Messaging", None),
+    "MINE2B_ACTIVE": ("Awaiting Return From Messaging", None),
+    "RETURN_VISUAL_CONFIRMING": ("Return Confirmation", "return_visual_remaining_seconds"),
+    "RETURN_VERIFYING": ("Return Verification", "return_verification_remaining_seconds"),
+    "CLOSURE_CONFIRMING": ("Closure Confirmation", "closure_confirmation_remaining_seconds"),
+}
+
+def _mine_outcome_words(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "—"
+    return text.replace("_", " ").title()
+
+
+def _mine_branch_words(value: object) -> str:
+    """Render the frozen branch token; the Important branch keeps its apostrophe."""
+
+    text = str(value or "").strip()
+    if not text:
+        return "—"
+    if text == "ITS_IMPORTANT":
+        return "IT'S IMPORTANT"
+    return text.replace("_", " ")
+
+
+class MineLiveCard(QWidget):
+    """One dashboard card presenting the newest ``MineSnapshot``.
+
+    Presentation only, structurally mirroring ``CosineLiveCard`` (Phase 4
+    Case B): it holds no ``QTimer``/``QElapsedTimer``, calls no
+    ``time.monotonic``, performs no deadline arithmetic and reaches no
+    runtime -- ``render`` writes exactly the fields the backend already
+    decided.  MESSAGING (foreground identity) and MINE (organ state) remain
+    two separate presentations; this card never substitutes for the
+    Live Telemetry MESSAGING row.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("plainBox")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        card, body = make_card()
+        head, self._hint = card_head("MINE Live", "Inactive", dot=True)
+        body.addWidget(head)
+        body.addSpacing(16)
+
+        top = QHBoxLayout()
+        top.setSpacing(14)
+        source, self._source = stat_box("Source", "—", "text", 16.0)
+        state, self._state = stat_box("State", "Inactive", "text", 16.0)
+        branch, self._branch = stat_box("Branch", "—", "text", 16.0)
+        for widget in (source, state, branch):
+            top.addWidget(widget, 1)
+        body.addLayout(top)
+        body.addSpacing(14)
+
+        timer_host = QWidget()
+        timer_host.setObjectName("plainBox")
+        timer_lay = QVBoxLayout(timer_host)
+        timer_lay.setContentsMargins(0, 0, 0, 0)
+        timer_lay.setSpacing(4)
+        self._timer_caption = label(
+            "No Scientific Countdown".upper(), 11, 400, "muted", spacing=1.0, upper=True
+        )
+        self._timer_value = label("—", 30, 600, "red", mono=True)
+        timer_lay.addWidget(self._timer_caption)
+        timer_lay.addWidget(self._timer_value)
+        body.addWidget(timer_host)
+        body.addSpacing(12)
+
+        progress_row, self._track, self._progress = bar_row("Progress", "red", 118)
+        body.addWidget(progress_row)
+        body.addSpacing(12)
+
+        footer = QHBoxLayout()
+        footer.setSpacing(18)
+        self._transitions = label("Transitions: —", 12, 400, "muted", mono=True)
+        self._outcome = label("Outcome: —", 12, 400, "muted", mono=True)
+        self._quality = label("Data: —", 12, 400, "muted", mono=True)
+        for widget in (self._transitions, self._outcome, self._quality):
+            footer.addWidget(widget)
+        footer.addStretch(1)
+        body.addLayout(footer)
+
+        root.addWidget(card)
+        self.setAccessibleName("MINE live state")
+        self.render(None)
+
+    # -------------------------------------------------------------- render
+    def render(self, snapshot: object) -> None:
+        """Show exactly one backend ``MineSnapshot``, or the inactive state."""
+
+        if snapshot is None:
+            self._render_inactive()
+            return
+
+        phase = _cosine_phase_key(snapshot)
+        state_text = _MINE_STATE_LABELS.get(phase, "Unknown")
+        paused = bool(_cosine_field(snapshot, "global_paused", False))
+
+        platform_label = str(
+            _cosine_field(snapshot, "current_platform_label", "") or ""
+        ).strip()
+        platform_key = str(_cosine_field(snapshot, "current_platform_key", "") or "").strip()
+        self._source.setText(platform_label or platform_key or "—")
+        self._source.setToolTip(platform_label or platform_key)
+
+        self._state.setText(state_text)
+        self._hint.setText(f"{state_text} · PAUSED" if paused else state_text)
+
+        self._branch.setText(_mine_branch_words(_cosine_field(snapshot, "selected_branch")))
+
+        caption, field = _MINE_TIMER_SOURCES.get(phase, ("No Scientific Countdown", None))
+        if field:
+            self._timer_caption.setText(
+                f"{caption} · paused".upper() if paused else caption.upper()
+            )
+            self._timer_value.setText(_cosine_clock(_cosine_field(snapshot, field)))
+        else:
+            self._timer_caption.setText(caption.upper())
+            self._timer_value.setText("—")
+
+        ratio, ratio_text = self._progress_reading(snapshot, phase)
+        self._track.set_progress(ratio)
+        self._progress.setText(ratio_text)
+
+        transitions = _cosine_field(snapshot, "messaging_transition_count")
+        self._transitions.setText(
+            "Transitions: —" if transitions is None else f"Transitions: {int(transitions)}"
+        )
+        self._outcome.setText(
+            "Outcome: " + _mine_outcome_words(_cosine_field(snapshot, "closure_outcome"))
+        )
+        self._quality.setText(
+            "Data: " + _cosine_words(_cosine_field(snapshot, "data_quality"))
+        )
+
+    def _render_inactive(self) -> None:
+        """No live MINE: say so, rather than leaving a stale reading up."""
+
+        self._hint.setText("Inactive")
+        self._source.setText("—")
+        self._source.setToolTip("")
+        self._state.setText("Inactive")
+        self._branch.setText("—")
+        self._timer_caption.setText("No Scientific Countdown".upper())
+        self._timer_value.setText("—")
+        self._track.set_progress(0.0)
+        self._progress.setText("—")
+        self._transitions.setText("Transitions: —")
+        self._outcome.setText("Outcome: —")
+        self._quality.setText("Data: —")
+
+    @staticmethod
+    def _progress_reading(snapshot: object, phase: str) -> tuple[float, str]:
+        """Derive the bar from the SAME snapshot and frozen MINE totals only.
+
+        Every total is either an imported frozen MINE constant or the user's
+        own factual chosen Important minutes -- never a typed timing literal
+        and never a phase with no safe denominator inventing one.
+        """
+
+        from MINE.mine import (
+            CLOSURE_CONFIRMATION_SECONDS,
+            FINAL_CALLBACK_HIDE_SECONDS,
+            INITIAL_GATE_SECONDS,
+            RETURN_INTENT_SECONDS,
+            RETURN_VERIFICATION_SECONDS,
+        )
+
+        totals_by_phase = {
+            "OBSERVING_MESSAGING": (INITIAL_GATE_SECONDS, "initial_gate_remaining_seconds"),
+            "RETURN_INTENT_ACTIVE": (RETURN_INTENT_SECONDS, "return_intent_remaining_seconds"),
+            "RETURN_VISUAL_CONFIRMING": (FINAL_CALLBACK_HIDE_SECONDS, "return_visual_remaining_seconds"),
+            "RETURN_VERIFYING": (RETURN_VERIFICATION_SECONDS, "return_verification_remaining_seconds"),
+            "CLOSURE_CONFIRMING": (CLOSURE_CONFIRMATION_SECONDS, "closure_confirmation_remaining_seconds"),
+        }
+        if phase == "IMPORTANT_ALLOWANCE_ACTIVE":
+            minutes = _cosine_field(snapshot, "important_chosen_minutes")
+            if not (isinstance(minutes, int) and not isinstance(minutes, bool) and minutes > 0):
+                return 0.0, "—"
+            total = float(minutes) * 60.0
+            remaining = _cosine_number(_cosine_field(snapshot, "important_remaining_seconds"))
+        else:
+            entry = totals_by_phase.get(phase)
+            if entry is None:
+                return 0.0, "—"
+            total, field = entry
+            remaining = _cosine_number(_cosine_field(snapshot, field))
+        if total <= 0.0:
+            return 0.0, "—"
+        elapsed = max(0.0, total - remaining)
+        ratio = max(0.0, min(1.0, elapsed / total))
+        return ratio, f"{int(round(ratio * 100))}%"
+
+
+
+
+# ==========================================================================
+# COSINE dashboard — production presentation of durable COSINE evidence
+# ==========================================================================
+# Runtime evidence comes exclusively from the shared durable projection and
+# the existing live signal. No fixture loader, local payload filter, database
+# reader or timer. Journey connectors show neutral event chronology, never
+# credited time; Hopper nodes take projected identities/transitions without
+# duration inference.
+# --------------------------------------------------------------------------
+
+def _cosine_live_episode_present(snapshot: object | None) -> bool:
+    """Gate CURRENT by factual phase, never by a timestamp or platform title."""
+    return snapshot is not None and _cosine_phase_key(snapshot) not in {
+        "", "IDLE", "CLOSED", "SHUTDOWN",
+    }
+
+
+def _cosine_label(text: str = "") -> QLabel:
+    """Treat projected evidence as plain text; retain the target's label geometry."""
+    made = QLabel(str(text))
+    made.setTextFormat(Qt.TextFormat.PlainText)
+    return made
+
+
+def cosine_identity(spec) -> str:
+    return f"{spec.cosine_session_id} · gen {spec.generation} · parent {spec.parent_session_id}"
+
+
+def _cosine_payload_text(value) -> str:
+    """Serialize an already-sanitized immutable payload, without interpreting keys."""
+    def plain(item):
+        if isinstance(item, Mapping):
+            return {key: plain(child) for key, child in item.items()}
+        if isinstance(item, tuple):
+            return [plain(child) for child in item]
+        return item
+    return json.dumps(plain(value), ensure_ascii=False, sort_keys=True)
+
+
+
+COSINE_TEAL: Final = FEED_BADGE_COSINE          # #14B8A6
+COSINE_TEAL_DIM: Final = "#0F766E"
+COSINE_INDIGO: Final = FEED_BADGE_OTT           # #3949AB
+COSINE_INDIGO_LIT: Final = "#A5B4FC"
+COSINE_VIOLET: Final = "#8B5CF6"
+
+
+#: Clock-ownership HOLD.  Never read for display, never rendered.
+
+#: Transcribed by value from the approved COSINE/cosine.py so this surface
+#: never imports the COSINE backend.
+
+COSINE_EVENT_LABELS: Final = {
+    "COSINE_SESSION_STARTED": "Episode started",
+    "OTT_PLATFORM_ENTERED": "Streaming platform entered",
+    "CONTENT_OBSERVED": "Window title observed",
+    "HOPPER_TRANSITION": "Platform switch",
+    "INTENT_GATE_ELIGIBLE": "Intent gate became eligible",
+    "INTENT_GATE_REQUESTED": "Intent gate requested",
+    "INTENT_GATE_DISPLAYED": "Intent gate shown",
+    "RETURN_INTENT_RECORDED": "You chose to return",
+    "BREAK_INTENT_RECORDED": "You chose an intentional break",
+    "RETURN_INTENT_WINDOW_STARTED": "Return window started",
+    "RETURN_INTENT_CONVERTED_TO_BREAK": "Return intention converted to a break",
+    "DURATION_REQUESTED": "Break duration requested",
+    "BREAK_DURATION_COMMITTED": "Break duration committed",
+    "BREAK_STARTED": "Break started",
+    "BREAK_ACK_REQUESTED": "Break acknowledgement requested",
+    "BREAK_ACK_DISPLAYED": "Break acknowledgement shown",
+    "BREAK_ACKNOWLEDGED": "Break acknowledged",
+    "BREAK_DEADLINE_REACHED": "Break deadline reached",
+    "RETURN_CANDIDATE_STARTED": "Return candidate started",
+    "RETURN_VERIFICATION_INTERRUPTED": "Return verification interrupted",
+    "RETURN_VERIFICATION_COMPLETED": "Return verification completed",
+    "FINAL_CALLBACK_REQUESTED": "Final callback requested",
+    "FINAL_CALLBACK_DISPLAYED": "Final callback shown",
+    "FINAL_CALLBACK_HIDDEN_FOR_FOCUS": "Final callback hidden for focus",
+    "FINAL_CALLBACK_RESTORED_AFTER_RELAPSE": "Final callback restored",
+    "CLOSURE_CONFIRMATION_STARTED": "Closure confirmation started",
+    "CLOSURE_CONFIRMATION_INTERRUPTED": "Closure confirmation interrupted",
+    "RETURN_CONFIRMED": "Return confirmed",
+    "COSINE_SESSION_CLOSED": "Episode closed",
+}
+
+COSINE_OUTCOME_LABELS: Final = {
+    "RETURNED_AFTER_INTENT": "Returned after intent",
+    "RETURNED_AFTER_CALLBACK": "Returned after callback",
+    "EARLY_RETURN": "Early return",
+    "STUDY_PREEMPTION": "Study pre-emption",
+    "HANDOVER": "Handover",
+    "EMERGENCY": "Emergency",
+    "INCOMPLETE": "Incomplete",
+}
+
+
+
+
+
+
+def cosine_event_label(name: str) -> str:
+    return COSINE_EVENT_LABELS.get(name, _cosine_humanize_token(name))
+
+
+
+
+
+
+def _cosine_epoch(iso: str) -> float:
+    """Shared UTC parser; connector chronology only, never credited time."""
+    return parse_utc_timestamp(iso).timestamp()
+
+
+def cosine_fmt_delta(seconds: float) -> str:
+    """Neutral elapsed wall-clock between two recorded timestamps.
+
+    Display-only chronology.  NOT COSINE credited time; never summed anywhere.
+    """
+
+    if seconds < 1:
+        return ""
+    total = int(round(seconds))
+    if total < 60:
+        return f"{total}s"
+    minutes, rest = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m {rest}s" if rest else f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+
+
+def cosine_find(spec, name: str):
+    """Locate a recorded milestone for presentation, without deriving facts."""
+    return next((event for event in spec.events if event.event_name == name), None)
+
+
+def cosine_all(spec, name: str) -> list:
+    return [event for event in spec.events if event.event_name == name]
+
+
+def cosine_chosen_minutes(spec):
+    return spec.chosen_break_minutes
+
+
+def cosine_closure(spec, key: str):
+    return getattr(spec, key)
+
+
+def cosine_user_choice(spec):
+    return spec.user_choice
+
+
+
+
+def cosine_start_platform(spec) -> str:
+    return spec.starting_platform_key
+
+
+def cosine_hops(spec):
+    return spec.hopper_transitions
+
+
+def cosine_platform_path(spec) -> list:
+    """Copy projected identities and transitions, in their supplied order."""
+    return [(spec.starting_platform_key, spec.starting_platform_label,
+             spec.started_at_display)] + [
+        (hop.to_platform, hop.to_platform_label, hop.occurred_at_display)
+        for hop in spec.hopper_transitions
+    ]
+
+
+def cosine_choice_text(spec):
+    """The recorded choice, plus -- only where the engine recorded a conversion
+    -- that the intention lapsed.  Never implies the user chose the converted
+    minutes."""
+
+    choice = cosine_user_choice(spec)
+    minutes = cosine_chosen_minutes(spec)
+    converted = cosine_find(spec, "RETURN_INTENT_CONVERTED_TO_BREAK") is not None
+    if choice == "INTENTIONAL_BREAK":
+        return f"Intentional break · {minutes} min" if minutes is not None else "Intentional break"
+    if choice == "RETURN_INTENTION":
+        if converted:
+            return (
+                f"Return intention → converted · {minutes} min break"
+                if minutes is not None
+                else "Return intention → converted"
+            )
+        return "Return intention"
+    return None
+
+
+# --------------------------------------------------------------------------
+# UAT Correction 1 -- presentation-only helpers.
+#
+# None of these touch spec.cosine_session_id, event.event_name,
+# event.event_class, spec.closure_reason, spec.closure_outcome or
+# payload_display. They only decide how already-factual values are shown.
+# --------------------------------------------------------------------------
+
+def cosine_episode_display_ids(episodes) -> dict[tuple, str]:
+    """Stable ``COS-DDMMYYYY-NN`` presentation mask, keyed by (session, gen).
+
+    Derived from each episode's immutable ``started_at_utc`` -- never from a
+    presentation-timezone-dependent display string -- so switching the
+    display timezone never changes an episode's visible identity. This is a
+    display alias only: it is never persisted, never used for selection or
+    database lookup, and the factual identity remains
+    ``(spec.cosine_session_id, spec.generation)``.
+    """
+    by_date: dict[str, list] = {}
+    for spec in episodes:
+        try:
+            moment = parse_utc_timestamp(spec.started_at_utc)
+        except Exception:
+            continue
+        by_date.setdefault(moment.strftime("%d%m%Y"), []).append((moment, spec))
+    aliases: dict[tuple, str] = {}
+    for date_key, entries in by_date.items():
+        entries.sort(key=lambda item: (item[0], item[1].cosine_session_id, item[1].generation))
+        for index, (_, spec) in enumerate(entries, start=1):
+            aliases[(spec.cosine_session_id, spec.generation)] = f"COS-{date_key}-{index:02d}"
+    return aliases
+
+
+def cosine_display_episode_id(spec, episodes) -> str:
+    return cosine_episode_display_ids(episodes).get(
+        (spec.cosine_session_id, spec.generation), "COS-UNKNOWN"
+    )
+
+
+COSINE_CLOSURE_REASON_LABELS: Final = {
+    "RETURN_CONFIRMED": "Return confirmed",
+    "SINE_HANDOFF": "SINE handoff",
+    "STUDY_HANDOFF": "Study handoff",
+    "STOPPED": "Session stopped",
+    "EMERGENCY": "Emergency",
+    "SYSTEM_LOCK": "System lock",
+    "SYSTEM_SLEEP": "System sleep",
+    "NOT_ENOUGH_INFORMATION": "Not enough information",
+}
+
+#: Acronyms/proper nouns to preserve verbatim when a token has no explicit
+#: mapping and falls back to title-cased words.
+_COSINE_LABEL_KEEP_WORDS: Final = {"COSINE", "SINE", "OTT", "UTC", "MYELIN"}
+
+
+def _cosine_humanize_token(token: str) -> str:
+    words = token.replace("_", " ").split()
+    return " ".join(
+        word if word.upper() in _COSINE_LABEL_KEEP_WORDS else word.title()
+        for word in words
+    )
+
+
+def cosine_closure_reason_label(reason: str | None) -> str:
+    if not reason:
+        return "—"
+    return COSINE_CLOSURE_REASON_LABELS.get(reason, _cosine_humanize_token(reason))
+
+
+def cosine_outcome_label(outcome: str | None) -> str:
+    if not outcome:
+        return "—"
+    return COSINE_OUTCOME_LABELS.get(outcome, _cosine_humanize_token(outcome))
+
+
+COSINE_EVENT_CLASS_LABELS: Final = {
+    "OBSERVED": "Observed",
+    "DERIVED": "Derived",
+    "USER_ACTION": "User action",
+    "PRESENTATION": "Presentation",
+}
+
+
+def cosine_event_class_label(event_class: str) -> str:
+    return COSINE_EVENT_CLASS_LABELS.get(event_class, _cosine_humanize_token(event_class))
+
+
+COSINE_CHOICE_LABELS: Final = {
+    "INTENTIONAL_BREAK": "Intentional break",
+    "RETURN_INTENTION": "Return intention",
+}
+
+
+def cosine_choice_label(choice: str | None) -> str:
+    if not choice:
+        return "—"
+    return COSINE_CHOICE_LABELS.get(choice, _cosine_humanize_token(choice))
+
+
+def _cosine_split_display_timestamp(display: str):
+    """Split read_model.py's ``'<isoformat+offset> <zone label>'`` string.
+
+    Presentation-only reformatting of an already-projected instant; never
+    reinterprets the underlying timestamp, only how it is displayed.
+    """
+    parts = str(display or "").split(" ", 2)
+    if len(parts) < 2:
+        return None
+    try:
+        return datetime.fromisoformat(f"{parts[0]} {parts[1]}")
+    except ValueError:
+        return None
+
+
+def cosine_date_only(display: str) -> str:
+    moment = _cosine_split_display_timestamp(display)
+    return moment.strftime("%d %b %Y") if moment else "—"
+
+
+def cosine_time_only(display: str) -> str:
+    moment = _cosine_split_display_timestamp(display)
+    return moment.strftime("%H:%M:%S") if moment else "—"
+
+
+def cosine_utc_time_only(occurred_at_utc: str) -> str:
+    try:
+        moment = parse_utc_timestamp(occurred_at_utc)
+    except Exception:
+        return "—"
+    return moment.strftime("%H:%M:%S")
+
+
+def cosine_closure_presentation(spec) -> str:
+    """'Session stopped · Incomplete' style, neutral -- never a failure grade."""
+    reason = cosine_closure_reason_label(cosine_closure(spec, "closure_reason"))
+    outcome = cosine_closure(spec, "closure_outcome")
+    if outcome:
+        return f"{reason} · {cosine_outcome_label(outcome)}"
+    return reason
+
+
+def _cosine_stage_key(event: dict) -> str:
+    name = event.event_name
+    if name in (
+        "COSINE_SESSION_STARTED",
+        "OTT_PLATFORM_ENTERED",
+        "CONTENT_OBSERVED",
+        "HOPPER_TRANSITION",
+    ):
+        return f"platform:{event.platform_key}"
+    if name.startswith("INTENT_GATE_"):
+        return "gate"
+    if name in (
+        "RETURN_INTENT_RECORDED",
+        "BREAK_INTENT_RECORDED",
+        "RETURN_INTENT_WINDOW_STARTED",
+    ):
+        return "choice"
+    if name == "RETURN_INTENT_CONVERTED_TO_BREAK":
+        return "converted"
+    if name in ("DURATION_REQUESTED", "BREAK_DURATION_COMMITTED"):
+        return "duration"
+    if name == "BREAK_STARTED" or name.startswith("BREAK_ACK") or name == "BREAK_ACKNOWLEDGED":
+        return "break"
+    if name == "BREAK_DEADLINE_REACHED":
+        return "deadline"
+    if name in ("FINAL_CALLBACK_REQUESTED", "FINAL_CALLBACK_DISPLAYED"):
+        return "callback"
+    if (
+        name
+        in (
+            "RETURN_CANDIDATE_STARTED",
+            "FINAL_CALLBACK_HIDDEN_FOR_FOCUS",
+            "FINAL_CALLBACK_RESTORED_AFTER_RELAPSE",
+        )
+        or name.startswith("RETURN_VERIFICATION_")
+        or name.startswith("CLOSURE_CONFIRMATION_")
+    ):
+        return "verify"
+    if name == "RETURN_CONFIRMED":
+        return "confirmed"
+    if name == "COSINE_SESSION_CLOSED":
+        return "closed"
+    return "other"
+
+
+def cosine_build_groups(spec: dict) -> list:
+    """Walk events in real sequence order; a milestone begins only when the
+    stage changes.  Every event lands in exactly one group, so group sizes
+    always sum to the episode's true event count -- the condensation cannot
+    silently drop a recorded event."""
+
+    groups = []
+    current = None
+    for event in spec.events:
+        key = _cosine_stage_key(event)
+        if current is None or current["key"] != key:
+            current = {"key": key, "events": []}
+            groups.append(current)
+        current["events"].append(event)
+    return groups
+
+
+def cosine_describe_group(group: dict, spec: dict):
+    """(family, title, subtitle) for one milestone node."""
+
+    key, events = group["key"], group["events"]
+
+    def has(name: str) -> bool:
+        return any(e.event_name == name for e in events)
+
+    def count(name: str) -> int:
+        return sum(1 for e in events if e.event_name == name)
+
+    if key.startswith("platform:"):
+        platform = key[9:]
+        if has("COSINE_SESSION_STARTED"):
+            sub = "Episode started"
+        elif has("HOPPER_TRANSITION"):
+            sub = "Hopper switch"
+        else:
+            sub = "Platform recorded"
+        return "platform", events[0].platform_label, sub
+    if key == "gate":
+        return "intent", "Intent Gate", "COSINE asked what you wanted next"
+    if key == "choice":
+        chosen = cosine_user_choice(spec)
+        title = "Intentional Break" if chosen == "INTENTIONAL_BREAK" else "Return Intention"
+        return "intent", title, "Recorded user choice"
+    if key == "converted":
+        return "intent", "Intention Converted", "Return window elapsed"
+    if key == "duration":
+        minutes = cosine_chosen_minutes(spec)
+        title = f"{minutes} min Break" if minutes is not None else "Break Committed"
+        return "intent", title, "Duration you entered"
+    if key == "break":
+        return "intent", "Break Started", "Started and acknowledged"
+    if key == "deadline":
+        return "intent", "Break Deadline", "Callback prepared"
+    if key == "callback":
+        return "intent", "Final Callback", "One logical callback"
+    if key == "verify":
+        interrupted = count("RETURN_VERIFICATION_INTERRUPTED") + count(
+            "CLOSURE_CONFIRMATION_INTERRUPTED"
+        )
+        restored = count("FINAL_CALLBACK_RESTORED_AFTER_RELAPSE")
+        completed = count("RETURN_VERIFICATION_COMPLETED")
+        candidates = [e for e in events if e.event_name == "RETURN_CANDIDATE_STARTED"]
+        branch = candidates[0].payload_display.get("branch", "") if candidates else ""
+        if branch == "EARLY_BREAK" and not restored:
+            sub = (
+                "Interrupted before deadline" if interrupted
+                else f"Branch {_cosine_humanize_token(branch)}"
+            )
+            return "verify", "Early Return Attempt", sub
+        if interrupted or restored:
+            bits = []
+            if interrupted:
+                bits.append(f"{interrupted} interruption" + ("s" if interrupted > 1 else ""))
+            if restored:
+                bits.append(f"{restored} restore" + ("s" if restored > 1 else ""))
+            if completed:
+                bits.append(f"{completed} verified")
+            return "verify", "Return / Relapse Loop", " · ".join(bits)
+        sub = "Verification completed" if completed else "Return candidate observed"
+        return "verify", "Return Verified", sub
+    if key == "confirmed":
+        outcome = cosine_closure(spec, "closure_outcome")
+        title = cosine_outcome_label(outcome) if outcome else "Return Confirmed"
+        return "outcome", title, "Recorded closure outcome"
+    if key == "closed":
+        reason = cosine_closure(spec, "closure_reason")
+        return (
+            "outcome", "Closed",
+            f"Reason {cosine_closure_reason_label(reason)}" if reason else "Episode closed",
+        )
+    return "verify", cosine_event_label(events[0].event_name), f"{len(events)} events"
+
+
+def cosine_build_journey_strip(spec: dict, height: int = 172) -> QScrollArea:
+    """The horizontal episode journey map for one specimen.
+
+    One builder serves both the overview's Recent Episode Flow and the Deep
+    Analysis Episodes tab, so the two maps can never drift apart.  The
+    condensation is lossless: node sizes always sum to the episode's true
+    event count, and every node prints its own real sequence range.
+    """
+
+    groups = cosine_build_groups(spec)
+    strip = QWidget()
+    strip.setStyleSheet("QWidget{background:transparent;}")
+    lay = QHBoxLayout(strip)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(0)
+    for index, group in enumerate(groups):
+        family, title, sub = cosine_describe_group(group, spec)
+        first, last = group["events"][0], group["events"][-1]
+        cover = (
+            f"#{first.sequence} · {len(group['events'])} ev"
+            if len(group["events"]) == 1
+            else f"#{first.sequence}–{last.sequence} · {len(group['events'])} ev"
+        )
+        if index:
+            previous = groups[index - 1]["events"][-1]
+            gap = _cosine_epoch(first.occurred_at_utc) - _cosine_epoch(
+                previous.occurred_at_utc
+            )
+            lay.addWidget(CosineFlowArrow(cosine_fmt_delta(gap)))
+            icon = None
+            if family == "platform" and any(
+                e.event_name == "HOPPER_TRANSITION" for e in group["events"]
+            ):
+                icon = "switch"
+            elif title == "Return / Relapse Loop":
+                icon = "loop"
+            elif family == "outcome" and group["key"] == "confirmed":
+                icon = "ret"
+            if icon:
+                lay.addWidget(CosineFlowIcon(icon))
+                lay.addWidget(CosineFlowArrow())
+        lay.addWidget(
+            CosineJourneyNode(
+                family, title, sub, cosine_time_only(first.occurred_at_display), cover
+            )
+        )
+    lay.addStretch(1)
+    return _cosine_hscroll(strip, height)
+
+
+
+def _cosine_chip(text: str, fg: str, edge: str) -> QLabel:
+    made = _cosine_label(text)
+    made.setFont(make_font(9.5, 700, mono=True, spacing=0.5))
+    made.setStyleSheet(
+        f"QLabel{{color:{fg};border:1px solid {edge};background:transparent;"
+        "border-radius:11px;padding:4px 9px;}"
+    )
+    return made
+
+
+def _cosine_class_tag(event_class: str) -> QLabel:
+    tokens = live_tokens()
+    made = _cosine_label(event_class)
+    made.setFont(make_font(8.5, 700, mono=True, spacing=0.7))
+    made.setStyleSheet(
+        f"QLabel{{color:{tokens.muted};border:1px solid {tokens.border};"
+        "border-radius:4px;padding:2px 6px;}"
+    )
+    return made
+
+
+def _cosine_button(text: str, *, tone: str = "teal", small: bool = False) -> QPushButton:
+    tokens = live_tokens()
+    colour = {"teal": COSINE_TEAL, "amber": tokens.amber, "muted": tokens.muted}.get(
+        tone, COSINE_TEAL
+    )
+    edge = {
+        "teal": COSINE_TEAL_DIM,
+        "amber": mix(tokens.amber, 45, tokens.border),
+        "muted": tokens.border,
+    }.get(tone, COSINE_TEAL_DIM)
+    made = QPushButton(text.upper())
+    made.setCursor(Qt.CursorShape.PointingHandCursor)
+    made.setFont(make_font(10.5 if small else 12, 700, spacing=0.8))
+    padding = "7px 14px" if small else "11px 20px"
+    made.setStyleSheet(
+        f"QPushButton{{color:{colour};background:transparent;border:1px solid {edge};"
+        f"border-radius:{RADIUS_SM}px;padding:{padding};}}"
+        f"QPushButton:hover{{background:{mix(colour, 12, tokens.surface)};"
+        f"border-color:{colour};}}"
+    )
+    return made
+
+
+def _cosine_hscroll(inner: QWidget, height: int) -> QScrollArea:
+    """A horizontally scrolling strip that never widens the page body."""
+
+    tokens = live_tokens()
+    area = QScrollArea()
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    area.setWidget(inner)
+    area.setFixedHeight(height)
+    area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    area.setStyleSheet(
+        "QScrollArea{background:transparent;border:none;}"
+        "QScrollArea > QWidget > QWidget{background:transparent;}"
+        f"QScrollBar:horizontal{{background:{tokens.surface_2};height:9px;"
+        "border-radius:5px;margin:0;}"
+        f"QScrollBar::handle:horizontal{{background:{tokens.border};border-radius:5px;"
+        "min-width:40px;}"
+        f"QScrollBar::handle:horizontal:hover{{background:{COSINE_TEAL_DIM};}}"
+        "QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal{width:0;}"
+        "QScrollBar::add-page:horizontal,QScrollBar::sub-page:horizontal"
+        "{background:transparent;}"
+    )
+    return area
+
+
+class CosineGlyph(QWidget):
+    """The COSINE waveform mark: one teal-to-indigo stroke."""
+
+    def __init__(self, size: int = 22) -> None:
+        super().__init__()
+        self.setFixedSize(size, size)
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        width, height = self.width(), self.height()
+        path = QPainterPath()
+        path.moveTo(width * 0.10, height * 0.70)
+        path.quadTo(width * 0.30, height * 0.24, width * 0.50, height * 0.52)
+        path.quadTo(width * 0.70, height * 0.82, width * 0.90, height * 0.28)
+        gradient = QLinearGradient(0, 0, width, height)
+        gradient.setColorAt(0.0, QColor("#5EEAD4"))
+        gradient.setColorAt(1.0, QColor(COSINE_INDIGO))
+        pen = QPen(QBrush(gradient), 2.4)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawPath(path)
+        painter.end()
+
+
+class CosineFlowArrow(QWidget):
+    """``.jconn``: a thin arrow with an optional elapsed-chronology caption."""
+
+    def __init__(self, caption: str = "") -> None:
+        super().__init__()
+        self._caption = caption
+        self.setFixedSize(64 if caption else 42, 58)
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        tokens = live_tokens()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        mid = self.height() / 2.0
+        painter.setPen(QPen(qalpha(QColor(tokens.muted), 0.65), 1.2))
+        left, right = 7.0, float(self.width() - 9)
+        painter.drawLine(QPointF(left, mid), QPointF(right, mid))
+        painter.drawLine(QPointF(right - 5, mid - 3.5), QPointF(right, mid))
+        painter.drawLine(QPointF(right - 5, mid + 3.5), QPointF(right, mid))
+        if self._caption:
+            painter.setFont(make_font(9, 400, mono=True))
+            painter.setPen(QColor(tokens.muted))
+            painter.drawText(
+                QRectF(0, mid - 20, self.width(), 15),
+                int(Qt.AlignmentFlag.AlignCenter),
+                self._caption,
+            )
+        painter.end()
+
+
+class CosineFlowIcon(QWidget):
+    """``.jicon``: a 34px circle marking one real switch, relapse or return."""
+
+    def __init__(self, kind: str) -> None:
+        super().__init__()
+        self._kind = kind
+        self._colour = {
+            "switch": COSINE_INDIGO_LIT,
+            "loop": COSINE_VIOLET,
+            "ret": COSINE_TEAL,
+        }.get(kind, DEFAULT_THEME.muted)
+        self.setFixedSize(34, 58)
+        self.setToolTip(
+            {
+                "switch": "Recorded Hopper transition",
+                "loop": "Recorded relapse and callback restore",
+                "ret": "Recorded return confirmation",
+            }.get(kind, "")
+        )
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        top = (self.height() - 34) / 2.0
+        painter.setPen(QPen(QColor(self._colour), 2.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(QRectF(1.5, top + 1.5, 31, 31))
+        pen = QPen(QColor(self._colour), 2.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        if self._kind == "switch":
+            painter.drawLine(QPointF(10, top + 13), QPointF(23, top + 13))
+            painter.drawLine(QPointF(20, top + 10), QPointF(23, top + 13))
+            painter.drawLine(QPointF(24, top + 21), QPointF(11, top + 21))
+            painter.drawLine(QPointF(14, top + 24), QPointF(11, top + 21))
+        elif self._kind == "loop":
+            painter.drawArc(QRectF(9, top + 9, 16, 16), 40 * 16, 280 * 16)
+            painter.drawLine(QPointF(25, top + 7), QPointF(25, top + 14))
+            painter.drawLine(QPointF(25, top + 14), QPointF(18, top + 14))
+        else:
+            painter.drawLine(QPointF(10, top + 18), QPointF(15, top + 23))
+            painter.drawLine(QPointF(15, top + 23), QPointF(24, top + 11))
+        painter.end()
+
+
+class CosineJourneyNode(QFrame):
+    """``.jnode``: a centered rounded milestone box in one of four families."""
+
+    FAMILY: Final = {
+        "platform": COSINE_INDIGO_LIT,
+        "intent": DEFAULT_THEME.amber,
+        "verify": COSINE_VIOLET,
+        "outcome": COSINE_TEAL,
+    }
+    FILL: Final = {
+        "platform": (COSINE_INDIGO, 0.18),
+        "intent": (DEFAULT_THEME.amber, 0.10),
+        "verify": (COSINE_VIOLET, 0.14),
+        "outcome": (COSINE_TEAL, 0.14),
+    }
+
+    def __init__(self, family: str, title: str, sub: str, stamp: str, cover: str = "") -> None:
+        super().__init__()
+        tokens = live_tokens()
+        accent = self.FAMILY.get(family, tokens.muted)
+        fill_colour, fill_alpha = self.FILL.get(family, (tokens.surface_2, 1.0))
+        fill = QColor(fill_colour)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setFixedWidth(160 if family == "outcome" else 142)
+        self.setStyleSheet(
+            f"QFrame{{background:rgba({fill.red()},{fill.green()},{fill.blue()},"
+            f"{fill_alpha});border:1px solid {accent};border-radius:12px;}}"
+        )
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(13, 11, 13, 11)
+        lay.setSpacing(3)
+
+        for text, font, colour in (
+            (cover, make_font(8, 400, mono=True), tokens.muted),
+            (family.upper(), make_font(8, 700, mono=True, spacing=1.1), accent),
+            (title, make_font(12, 700), accent),
+            (sub, make_font(10, 400), tokens.muted),
+            (stamp, make_font(9, 400, mono=True), tokens.muted),
+        ):
+            if not text:
+                continue
+            item = _cosine_label(text)
+            item.setFont(font)
+            item.setStyleSheet(f"QLabel{{color:{colour};background:transparent;border:none;}}")
+            item.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            item.setWordWrap(True)
+            lay.addWidget(item)
+
+
+def _cosine_dot(colour: str, size: int = 8) -> QFrame:
+    """One small filled class dot; colour carries no evidence-quality meaning."""
+
+    dot = QFrame()
+    dot.setFrameShape(QFrame.Shape.NoFrame)
+    dot.setFixedSize(size, size)
+    dot.setStyleSheet(
+        f"QFrame{{background:{colour};border:none;border-radius:{size // 2}px;}}"
+    )
+    return dot
+
+
+COSINE_CLASS_TONE: Final = {
+    "OBSERVED": COSINE_INDIGO_LIT,
+    "DERIVED": COSINE_TEAL,
+    "USER_ACTION": DEFAULT_THEME.amber,
+    "PRESENTATION": DEFAULT_THEME.muted,
+}
+
+
+class CosineDeepAnalysisDialog(QWidget):
+    """COSINE Deep Analysis, in the MIRL glass language.
+
+    Qt has no CSS ``backdrop-filter``.  The frosted effect is produced honestly
+    by blurring a grab of the page underneath and painting it behind a
+    translucent panel, so the overview really does remain dimly visible.
+
+    All seven tabs consume the shared durable projection; none reads a fixture.
+    """
+
+    TABS: Final = (
+        ("overview", "Overview"),
+        ("episodes", "Episodes"),
+        ("intent", "Intent"),
+        ("ret", "Return"),
+        ("hopper", "Hopper"),
+        ("evidence", "Evidence"),
+        ("about", "About"),
+    )
+
+    #: How long the export button reports its outcome before returning to its
+    #: normal label -- matches LiveMirlDashboardDialog's own export feedback.
+    _EXPORT_FEEDBACK_MS: Final = 4000
+
+    def __init__(self, page: "CosineLivePage") -> None:
+        super().__init__(page)
+        tokens = live_tokens()
+        self._page = page
+        self._backdrop: QPixmap | None = None
+        self._active = "overview"
+        self._tabs: dict[str, QPushButton] = {}
+        #: Durable logical identity, never a fixture specimen identifier.
+        self._episodes_flow_for: tuple | None = None
+        #: The map widget to scroll to after the Episodes tab rebuilds.
+        self._episode_flow_anchor: QWidget | None = None
+        self.hide()
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(26, 26, 26, 26)
+
+        panel = QFrame(self)
+        panel.setObjectName("cosineGlassPanel")
+        panel.setFrameShape(QFrame.Shape.NoFrame)
+        # Height stays capped so the glass sheet keeps floating; the width
+        # follows the window, matching the overview page beneath it.
+        panel.setMaximumHeight(900)
+        surface = QColor(tokens.surface)
+        panel.setStyleSheet(
+            f"QFrame#cosineGlassPanel{{background:rgba({surface.red()},{surface.green()},"
+            f"{surface.blue()},0.55);border:1px solid rgba(255,255,255,0.14);"
+            f"border-radius:{RADIUS_LG}px;}}"
+        )
+        card_shadow(panel, blur=80, dy=30, strength=0.7)
+        self._panel = panel
+        root.addWidget(panel)
+
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(self._build_header())
+        lay.addWidget(self._build_tabbar())
+
+        self._body = QScrollArea(panel)
+        self._body.setWidgetResizable(True)
+        self._body.setFrameShape(QFrame.Shape.NoFrame)
+        self._body.setStyleSheet(
+            "QScrollArea{background:transparent;border:none;}"
+            "QScrollArea > QWidget > QWidget{background:transparent;}"
+            "QScrollBar:vertical{background:rgba(255,255,255,0.03);width:10px;margin:0;}"
+            "QScrollBar::handle:vertical{background:rgba(255,255,255,0.16);"
+            "border-radius:5px;min-height:40px;}"
+            f"QScrollBar::handle:vertical:hover{{background:{COSINE_TEAL_DIM};}}"
+            "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
+            "QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical"
+            "{background:transparent;}"
+        )
+        lay.addWidget(self._body, 1)
+        lay.addWidget(self._build_footer())
+
+    # ---------------------------------------------------------------- chrome
+    def _build_header(self) -> QWidget:
+        tokens = live_tokens()
+        host = QWidget()
+        host.setFixedHeight(74)
+        host.setStyleSheet(
+            "QWidget{background:rgba(255,255,255,0.02);"
+            "border-bottom:1px solid rgba(255,255,255,0.10);}"
+        )
+        lay = QHBoxLayout(host)
+        lay.setContentsMargins(26, 14, 26, 14)
+        lay.setSpacing(14)
+
+        lay.addWidget(CosineGlyph(22))
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        title = _cosine_label("COSINE — DEEP ANALYSIS")
+        title.setFont(make_font(13, 700, mono=True, spacing=2.0))
+        title.setStyleSheet(
+            f"QLabel{{color:{tokens.text_primary};background:transparent;border:none;}}"
+        )
+        titles.addWidget(title)
+        self._subtitle = _cosine_label("")
+        self._subtitle.setFont(make_font(11, 400))
+        self._subtitle.setStyleSheet(
+            f"QLabel{{color:{tokens.muted};background:transparent;border:none;}}"
+        )
+        titles.addWidget(self._subtitle)
+        lay.addLayout(titles)
+
+        centre = _cosine_label("Choice-Oriented Streaming Insight and Navigation Engine")
+        centre.setFont(make_font(12, 400))
+        centre.setStyleSheet(
+            f"QLabel{{color:{tokens.muted};background:transparent;border:none;}}"
+        )
+        centre.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(centre, 1)
+
+        refresh = _cosine_button("Refresh", tone="muted", small=True)
+        self._refresh_button = refresh
+        refresh.setToolTip("Request the shared durable analytics read")
+        refresh.clicked.connect(self._on_refresh)
+        lay.addWidget(refresh)
+
+        export = _cosine_button("Export PDF", tone="amber", small=True)
+        self._export_button = export
+        export.setEnabled(False)
+        export.setToolTip("Durable COSINE evidence is unavailable.")
+        export.clicked.connect(self._export_pdf)
+        lay.addWidget(export)
+
+        close = QPushButton("✕")
+        close.setCursor(Qt.CursorShape.PointingHandCursor)
+        close.setFixedSize(32, 32)
+        close.setFont(make_font(13, 400))
+        close.setStyleSheet(
+            f"QPushButton{{color:{tokens.muted};background:rgba(255,255,255,0.03);"
+            "border:1px solid rgba(255,255,255,0.18);border-radius:16px;}"
+            f"QPushButton:hover{{color:{tokens.text_primary};"
+            f"border-color:{COSINE_TEAL_DIM};}}"
+        )
+        close.clicked.connect(self.close_overlay)
+        lay.addWidget(close)
+        return host
+
+    def _build_tabbar(self) -> QWidget:
+        host = QWidget()
+        host.setStyleSheet(
+            "QWidget{background:rgba(255,255,255,0.015);"
+            "border-bottom:1px solid rgba(255,255,255,0.08);}"
+        )
+        lay = QHBoxLayout(host)
+        lay.setContentsMargins(20, 10, 20, 10)
+        lay.setSpacing(6)
+        for key, text in self.TABS:
+            button = QPushButton(text.upper())
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setFont(make_font(11, 700, spacing=0.9))
+            button.clicked.connect(lambda _checked=False, k=key: self.select_tab(k))
+            self._tabs[key] = button
+            lay.addWidget(button)
+        lay.addStretch(1)
+        return host
+
+    def _build_footer(self) -> QWidget:
+        tokens = live_tokens()
+        host = QWidget()
+        host.setFixedHeight(44)
+        host.setStyleSheet(
+            "QWidget{background:rgba(255,255,255,0.015);"
+            "border-top:1px solid rgba(255,255,255,0.08);}"
+        )
+        lay = QHBoxLayout(host)
+        lay.setContentsMargins(26, 10, 26, 10)
+        left = _cosine_label("COSINE · Durable evidence")
+        left.setFont(make_font(11, 400))
+        left.setStyleSheet(
+            f"QLabel{{color:{tokens.muted};background:transparent;border:none;}}"
+        )
+        lay.addWidget(left)
+        lay.addStretch(1)
+        right = _cosine_label("")
+        self._evidence_footer = right
+        right.setFont(make_font(10, 400, mono=True, spacing=0.6))
+        right.setStyleSheet(
+            f"QLabel{{color:{tokens.muted};background:transparent;border:none;}}"
+        )
+        lay.addWidget(right)
+        return host
+
+    # -------------------------------------------------------------- controls
+    def _on_refresh(self) -> None:
+        self._page.refresh_requested.emit()
+
+    def _export_pdf(self) -> None:
+        """Write the two-page COSINE PDF report and report the outcome on the
+        button itself, matching LiveMirlDashboardDialog's own export pattern.
+
+        Run on the GUI thread deliberately: measured generation time on
+        certified real evidence is well under a second, so a worker thread
+        would add failure modes to hide a delay nobody can perceive. This is
+        a read/presentation operation only -- it never advances COSINE
+        runtime state, never touches the database, and uses the exact same
+        durable projection already visible in this dialog.
+        """
+
+        from PERSISTENCE.storage import export_cosine_report
+
+        self._exporting = True
+        button = self._export_button
+        button.setEnabled(False)
+        button.setText("EXPORTING…")
+        projection = self._page._projection
+        zone = projection.presentation_timezone if projection is not None else "local"
+        try:
+            written = export_cosine_report(presentation_timezone=zone)
+        except Exception as error:  # export must never take the dashboard down
+            print(f"[MYELIN][EXPORT] COSINE pdf failed: {error!r}", flush=True)
+            button.setText("EXPORT FAILED")
+        else:
+            print(f"[MYELIN][EXPORT] COSINE pdf written: {written}", flush=True)
+            button.setText("PDF SAVED TO DOWNLOADS")
+        QTimer.singleShot(self._EXPORT_FEEDBACK_MS, self._restore_export_pdf_button)
+
+    def _restore_export_pdf_button(self) -> None:
+        self._exporting = False
+        try:
+            self._export_button.setText("Export PDF")
+            self._export_button.setEnabled(
+                self._page.evidence_available and bool(self._page.episodes)
+            )
+        except RuntimeError:
+            # The dialog was torn down while the label was still reverting.
+            return
+
+    def select_tab(self, key: str) -> None:
+        self._active = key
+        self.refresh_body()
+
+    def _style_tabs(self) -> None:
+        tokens = live_tokens()
+        for key, button in self._tabs.items():
+            if key == self._active:
+                button.setStyleSheet(
+                    f"QPushButton{{color:{COSINE_TEAL};"
+                    f"background:{mix(COSINE_TEAL, 13, tokens.surface)};"
+                    f"border:1px solid {mix(COSINE_TEAL, 40, tokens.surface)};"
+                    f"border-radius:{RADIUS_SM}px;padding:9px 15px;}}"
+                )
+            else:
+                button.setStyleSheet(
+                    f"QPushButton{{color:{tokens.muted};background:transparent;"
+                    f"border:1px solid transparent;border-radius:{RADIUS_SM}px;"
+                    "padding:9px 15px;}"
+                    f"QPushButton:hover{{color:{tokens.text_primary};"
+                    "background:rgba(255,255,255,0.05);}"
+                )
+
+    # ------------------------------------------------------------- body core
+    def _display_id(self, spec) -> str:
+        """The masked COS-DDMMYYYY-NN presentation alias for one episode.
+
+        Built once per refresh from every durable episode (see
+        cosine_episode_display_ids) so the same UTC-derived, chronologically
+        stable id is used everywhere it appears in this dialog.
+        """
+        return self._episode_alias.get(
+            (spec.cosine_session_id, spec.generation), "COS-UNKNOWN"
+        )
+
+    def refresh_body(self) -> None:
+        self._style_tabs()
+        spec = self._page.selected_episode
+        self._episode_alias = cosine_episode_display_ids(self._page.episodes)
+        self._subtitle.setText(
+            f"{self._display_id(spec)} · {spec.event_count} "
+            "recorded events · durable projection"
+            if spec is not None
+            else self._page.evidence_message
+        )
+        self._evidence_footer.setText(
+            f"Durable projection · {sum(s.event_count for s in self._page.episodes)} events"
+            if self._page.evidence_available else self._page.evidence_message
+        )
+        # PDF-phase addition: keep Export PDF's enabled state in step with
+        # durable evidence on every refresh/tab-switch, except mid-feedback
+        # (see _export_pdf / _restore_export_pdf_button, which own that
+        # window and restore this same rule when it ends).
+        if not getattr(self, "_exporting", False):
+            can_export = self._page.evidence_available and bool(self._page.episodes)
+            self._export_button.setEnabled(can_export)
+            self._export_button.setToolTip(
+                "Export current COSINE durable evidence as a two-page PDF report"
+                if can_export else "Durable COSINE evidence is unavailable."
+            )
+        host = QWidget()
+        host.setStyleSheet("QWidget{background:transparent;}")
+        lay = QVBoxLayout(host)
+        lay.setContentsMargins(26, 22, 26, 22)
+        lay.setSpacing(0)
+        # Cleared before the tab builds, so an Episodes map registers itself.
+        self._episode_flow_anchor = None
+        if spec is not None and spec.hold_context:
+            self._note(lay, "HOLD CONTEXT · " + spec.hold_context_reason, amberish=True)
+        {
+            "overview": self._tab_overview,
+            "episodes": self._tab_episodes,
+            "intent": self._tab_intent,
+            "ret": self._tab_return,
+            "hopper": self._tab_hopper,
+            "evidence": self._tab_evidence,
+            "about": self._tab_about,
+        }[self._active](lay)
+        lay.addStretch(1)
+        self._body.setWidget(host)
+        if self._episode_flow_anchor is not None:
+            self._body.ensureWidgetVisible(self._episode_flow_anchor, 0, 60)
+
+    def _section(self, lay: QVBoxLayout, title: str, hint: str = "") -> None:
+        tokens = live_tokens()
+        head = _cosine_label(title.upper())
+        head.setFont(make_font(11, 700, spacing=1.3))
+        head.setStyleSheet(f"QLabel{{color:{COSINE_TEAL};background:transparent;}}")
+        lay.addWidget(head)
+        if hint:
+            lay.addSpacing(4)
+            sub = _cosine_label(hint)
+            sub.setFont(make_font(11, 400))
+            sub.setStyleSheet(f"QLabel{{color:{tokens.muted};background:transparent;}}")
+            sub.setWordWrap(True)
+            lay.addWidget(sub)
+        lay.addSpacing(14)
+
+    def _kv_grid(self, lay: QVBoxLayout, items: list, columns: int = 4) -> None:
+        tokens = live_tokens()
+        row = None
+        for index, (key, value, tone) in enumerate(items):
+            if index % columns == 0:
+                row = QHBoxLayout()
+                row.setSpacing(14)
+                lay.addLayout(row)
+                lay.addSpacing(14)
+            tile = QFrame()
+            tile.setFrameShape(QFrame.Shape.NoFrame)
+            tile.setStyleSheet(
+                "QFrame{background:rgba(255,255,255,0.025);"
+                f"border:1px solid rgba(255,255,255,0.10);border-radius:{RADIUS_MD}px;}}"
+            )
+            inner = QVBoxLayout(tile)
+            inner.setContentsMargins(15, 13, 15, 13)
+            inner.setSpacing(5)
+            caption = _cosine_label(str(key).upper())
+            caption.setFont(make_font(9.5, 400, spacing=1.0))
+            caption.setStyleSheet(
+                f"QLabel{{color:{tokens.muted};background:transparent;border:none;}}"
+            )
+            inner.addWidget(caption)
+            colour = tokens.muted if tone in ("unavail", "none") else tokens.text_primary
+            if tone == "unavail":
+                font = make_font(12, 700, mono=True, spacing=1.0)
+            elif tone == "mono":
+                font = make_font(11.5, 400, mono=True)
+            else:
+                font = make_font(14, 600)
+            body = _cosine_label(str(value))
+            body.setFont(font)
+            body.setStyleSheet(f"QLabel{{color:{colour};background:transparent;border:none;}}")
+            body.setWordWrap(True)
+            inner.addWidget(body)
+            row.addWidget(tile)
+        if row is not None:
+            for _ in range((columns - (len(items) % columns)) % columns):
+                row.addStretch(1)
+
+    def _note(self, lay: QVBoxLayout, text: str, amberish: bool = False) -> None:
+        tokens = live_tokens()
+        host = QFrame()
+        host.setFrameShape(QFrame.Shape.NoFrame)
+        if amberish:
+            host.setStyleSheet(
+                f"QFrame{{background:{mix(tokens.amber, 7, tokens.surface)};"
+                f"border:1px dashed {mix(tokens.amber, 40, tokens.surface)};"
+                f"border-radius:{RADIUS_SM}px;}}"
+            )
+            colour = tokens.amber
+        else:
+            host.setStyleSheet(
+                "QFrame{background:rgba(255,255,255,0.025);"
+                f"border:1px dashed rgba(255,255,255,0.13);border-radius:{RADIUS_SM}px;}}"
+            )
+            colour = tokens.muted
+        inner = QVBoxLayout(host)
+        inner.setContentsMargins(14, 12, 14, 12)
+        body = _cosine_label(text)
+        body.setFont(make_font(11, 400))
+        body.setStyleSheet(f"QLabel{{color:{colour};background:transparent;border:none;}}")
+        body.setWordWrap(True)
+        inner.addWidget(body)
+        lay.addWidget(host)
+        lay.addSpacing(16)
+
+    def _table(self, lay: QVBoxLayout, headers: list, rows: list,
+               weights: list | None = None, tints: list | None = None) -> None:
+        """One shared QGridLayout for header + every body row.
+
+        Two independent QHBoxLayouts (one per row) never guarantee the same
+        physical column boundaries, because each computes its own widths from
+        its own cells' size hints -- that was the Correction-1 UAT alignment
+        bug. A single grid, sized once from every cell in each column, is the
+        fix; row tinting/dividers move onto each cell's own stylesheet since
+        a grid has no per-row container to paint a background on.
+        """
+        tokens = live_tokens()
+        host = QFrame()
+        host.setFrameShape(QFrame.Shape.NoFrame)
+        host.setStyleSheet(
+            "QFrame{background:rgba(255,255,255,0.015);"
+            f"border:1px solid rgba(255,255,255,0.12);border-radius:{RADIUS_MD}px;}}"
+        )
+        grid = QGridLayout(host)
+        grid.setContentsMargins(12, 0, 12, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(0)
+        span = weights or [1] * len(headers)
+        for column, weight in enumerate(span):
+            grid.setColumnStretch(column, weight)
+
+        header_bg = mix(tokens.surface, 82, tokens.window_background)
+        for column, text in enumerate(headers):
+            cell = _cosine_label(str(text).upper())
+            cell.setFont(make_font(9.5, 700, spacing=1.0))
+            cell.setStyleSheet(
+                f"QLabel{{color:{tokens.muted};background:{header_bg};border:none;"
+                "border-bottom:1px solid rgba(255,255,255,0.12);padding:10px 0;}"
+            )
+            grid.addWidget(cell, 0, column)
+
+        for row_index, row in enumerate(rows, start=1):
+            tint = tints[row_index - 1] if tints and row_index - 1 < len(tints) else ""
+            background = {
+                "sel": mix(COSINE_TEAL, 12, tokens.surface),
+                "hold": mix(tokens.amber, 9, tokens.surface),
+            }.get(tint, "transparent")
+            border = "border-bottom:1px solid rgba(255,255,255,0.07);"
+            for column, value in enumerate(row):
+                if isinstance(value, QWidget):
+                    holder = QWidget()
+                    holder.setStyleSheet(
+                        f"QWidget{{background:{background};{border}}}"
+                    )
+                    holder_lay = QHBoxLayout(holder)
+                    holder_lay.setContentsMargins(0, 9, 0, 9)
+                    holder_lay.addWidget(value)
+                    holder_lay.addStretch(1)
+                    grid.addWidget(holder, row_index, column)
+                    continue
+                text = str(value)
+                mono = any(character.isdigit() for character in text) or text.isupper()
+                cell = _cosine_label(text)
+                cell.setFont(make_font(10.5 if mono else 11.5, 400, mono=mono))
+                cell.setStyleSheet(
+                    f"QLabel{{color:{tokens.text_primary};background:{background};"
+                    f"{border}padding:9px 0;}}"
+                )
+                cell.setWordWrap(True)
+                cell.setAlignment(
+                    Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+                )
+                grid.addWidget(cell, row_index, column)
+
+        lay.addWidget(host)
+        lay.addSpacing(20)
+
+    # ------------------------------------------------------------ seven tabs
+    def _tab_overview(self, lay: QVBoxLayout) -> None:
+        page = self._page
+        overview = page._projection.overview if page.evidence_available else None
+        self._section(
+            lay,
+            "COSINE snapshot",
+            "Counts supplied by the durable COSINE projection.",
+        )
+        self._kv_grid(lay, [
+            ("Captured episodes", overview.captured_episode_count if overview else "UNAVAILABLE", ""),
+            ("Confirmed returns", overview.confirmed_return_count if overview else "UNAVAILABLE", ""),
+            ("Breaks started", overview.break_started_count if overview else "UNAVAILABLE", ""),
+            ("Usual return", overview.usual_return_status if overview else "UNAVAILABLE", "unavail"),
+        ])
+        spec = page.selected_episode
+        if spec is None:
+            self._note(lay, page.evidence_message)
+            return
+        outcome = cosine_closure(spec, "closure_outcome")
+        minutes = cosine_chosen_minutes(spec)
+        chosen = cosine_choice_text(spec)
+        self._section(
+            lay, "Selected episode",
+            "Every value below is read verbatim from recorded evidence.",
+        )
+        self._kv_grid(lay, [
+            ("Episode", self._display_id(spec), ""),
+            ("Starting platform", spec.starting_platform_label, ""),
+            ("Closure reason", cosine_closure_reason_label(cosine_closure(spec, "closure_reason")), ""),
+            ("Closure outcome", cosine_outcome_label(outcome), ""),
+            ("Recorded choice", chosen or "No choice recorded", "" if chosen else "none"),
+            ("Break chosen", f"{minutes} min" if minutes is not None else "No break",
+             "" if minutes is not None else "none"),
+            ("Hopper transitions", spec.hopper_count, ""),
+            ("Event count", spec.event_count, ""),
+        ])
+
+    def _tab_episodes(self, lay: QVBoxLayout) -> None:
+        page = self._page
+        tokens = live_tokens()
+        head_row = QHBoxLayout()
+        head_row.setContentsMargins(0, 0, 0, 0)
+        head_row.setSpacing(12)
+        head_text = QVBoxLayout()
+        head_text.setContentsMargins(0, 0, 0, 0)
+        head_text.setSpacing(0)
+        self._section(
+            head_text,
+            "All captured episodes",
+            f"{len(page.episodes)} durable episodes in projected order. "
+            "Incomplete means the episode ended without a recorded completion "
+            "outcome; it is not a failure grade.",
+        )
+        head_row.addLayout(head_text, 1)
+        lay.addLayout(head_row)
+        zone_label = next(
+            (e.timezone_label for s in page.episodes for e in s.events if e.timezone_label),
+            "",
+        )
+        if zone_label:
+            zone_note = _cosine_label(f"Display timezone: {zone_label}")
+            zone_note.setFont(make_font(10, 400))
+            zone_note.setStyleSheet(
+                f"QLabel{{color:{live_tokens().muted};background:transparent;}}"
+            )
+            lay.addWidget(zone_note)
+        lay.addSpacing(10)
+        rows, tints = [], []
+        for spec in page.episodes:
+            is_hold = spec.hold_context
+            is_selected = (
+                page.selected_episode is not None
+                and (spec.cosine_session_id, spec.generation) == page._selected_episode_key
+            )
+            outcome = cosine_closure(spec, "closure_outcome")
+            minutes = cosine_chosen_minutes(spec)
+            chosen = cosine_choice_text(spec)
+            tone = (
+                COSINE_TEAL
+                if outcome in ("RETURNED_AFTER_INTENT", "RETURNED_AFTER_CALLBACK")
+                else tokens.amber
+                if outcome == "HANDOVER"
+                else COSINE_INDIGO_LIT
+            )
+            flow_button = _cosine_button(
+                "Hide Map" if self._episodes_flow_for == (spec.cosine_session_id, spec.generation) else "View Map",
+                tone="teal",
+                small=True,
+            )
+            flow_button.setToolTip("Show this episode's journey map")
+            flow_button.clicked.connect(
+                lambda _checked=False, sid=(spec.cosine_session_id, spec.generation): self._toggle_episode_flow(sid)
+            )
+            recorded = spec.ended_at_display or spec.started_at_display
+            rows.append([
+                self._display_id(spec) + ("  · HOLD" if is_hold else ""),
+                spec.parent_session_id,
+                spec.generation,
+                spec.starting_platform_label,
+                chosen or "None recorded",
+                f"{minutes} min" if minutes is not None else "—",
+                spec.hopper_count,
+                cosine_closure_reason_label(cosine_closure(spec, "closure_reason")),
+                _cosine_chip(cosine_outcome_label(outcome), tone, mix(tone, 55, tokens.border)),
+                spec.event_count,
+                cosine_date_only(recorded),
+                cosine_time_only(recorded),
+                flow_button,
+            ])
+            tints.append("hold" if is_hold else ("sel" if is_selected else ""))
+        self._table(
+            lay,
+            ["Episode", "Session", "Gen", "Start platform", "Recorded choice", "Break",
+             "Hops", "Closure reason", "Outcome", "Events", "Date", "Time", "Map"],
+            rows,
+            weights=[2, 1, 1, 2, 3, 1, 1, 3, 3, 1, 2, 2, 2],
+            tints=tints,
+        )
+        self._render_episode_flow(lay)
+        self._note(
+            lay,
+            "Only the starting platform is shown. Choosing a single representative platform "
+            "for a multi-platform episode needs a rule that does not exist yet, so none is "
+            "invented here. The SINE handoff episode is shown verbatim and marked HOLD; its "
+            "seam is not interpreted.",
+        )
+
+    def _toggle_episode_flow(self, episode_key: tuple) -> None:
+        """Open or close one episode's journey map inside the Episodes tab."""
+
+        self._episodes_flow_for = (
+            None if self._episodes_flow_for == episode_key else episode_key
+        )
+        self._page.select_episode(episode_key)
+        self.refresh_body()
+
+    def _render_episode_flow(self, lay: QVBoxLayout) -> None:
+        """The same journey map the overview draws, for the chosen row."""
+
+        if self._episodes_flow_for is None:
+            return
+        spec = next(
+            (s for s in self._page.episodes
+             if (s.cosine_session_id, s.generation) == self._episodes_flow_for),
+            None,
+        )
+        if spec is None:
+            return
+        tokens = live_tokens()
+        groups = cosine_build_groups(spec)
+        total = spec.event_count
+        covered = sum(len(g["events"]) for g in groups)
+        outcome = cosine_closure(spec, "closure_outcome")
+        self._section(
+            lay,
+            f"Episode flow — {self._display_id(spec)}",
+            f"{total} recorded events · condensed into {len(groups)} milestones · "
+            f"nothing dropped ({covered}/{total} covered) · "
+            f"{cosine_outcome_label(outcome)}",
+        )
+        strip = cosine_build_journey_strip(spec)
+        self._episode_flow_anchor = strip
+        lay.addWidget(strip)
+        legend = QHBoxLayout()
+        legend.setSpacing(16)
+        for text, tone in (
+            ("Platform", COSINE_INDIGO_LIT),
+            ("Intent / intervention", tokens.amber),
+            ("Return verification", COSINE_VIOLET),
+            ("Outcome", COSINE_TEAL),
+        ):
+            entry = QHBoxLayout()
+            entry.setSpacing(7)
+            swatch = QFrame()
+            swatch.setFixedSize(9, 9)
+            swatch.setStyleSheet(
+                f"QFrame{{background:{mix(tone, 18, tokens.surface)};"
+                f"border:1px solid {tone};border-radius:3px;}}"
+            )
+            entry.addWidget(swatch)
+            item = _cosine_label(text)
+            item.setFont(make_font(10.5, 400))
+            item.setStyleSheet(
+                f"QLabel{{color:{tokens.muted};background:transparent;}}"
+            )
+            entry.addWidget(item)
+            legend.addLayout(entry)
+        legend.addStretch(1)
+        lay.addSpacing(12)
+        lay.addLayout(legend)
+        lay.addSpacing(10)
+        chrono = _cosine_label(
+            "Connector values are plain elapsed wall-clock between two recorded UTC "
+            "event timestamps, shown as neutral chronology only. They are not COSINE "
+            "credited time and are never summed or aggregated."
+        )
+        chrono.setFont(make_font(10.5, 400))
+        chrono.setStyleSheet(f"QLabel{{color:{tokens.muted};background:transparent;}}")
+        chrono.setWordWrap(True)
+        lay.addWidget(chrono)
+        lay.addSpacing(20)
+
+    def _tab_intent(self, lay: QVBoxLayout) -> None:
+        page = self._page
+        self._section(
+            lay,
+            "Recorded intent",
+            "Durable user-action evidence only. A recorded choice is what the person chose "
+            "— it is not proof of what followed.",
+        )
+        with_intent = [s for s in page.episodes if cosine_user_choice(s)]
+        rows = []
+        for spec in with_intent:
+            event = cosine_find(spec, "BREAK_INTENT_RECORDED") or cosine_find(
+                spec, "RETURN_INTENT_RECORDED"
+            )
+            converted = cosine_find(spec, "RETURN_INTENT_CONVERTED_TO_BREAK")
+            minutes = cosine_chosen_minutes(spec)
+            rows.append([
+                self._display_id(spec),
+                cosine_event_label(event.event_name),
+                cosine_choice_label(spec.user_choice),
+                "Converted" if converted else "—",
+                f"{minutes} min" if minutes is not None else "—",
+                cosine_outcome_label(cosine_closure(spec, "closure_outcome")),
+                cosine_utc_time_only(event.occurred_at_utc),
+            ])
+        self._table(
+            lay,
+            ["Episode", "Choice event", "Recorded choice", "Converted", "Break committed",
+             "Later outcome", "Time (UTC)"],
+            rows,
+            weights=[1, 3, 2, 3, 2, 3, 2],
+        )
+        without = [s for s in page.episodes if not cosine_user_choice(s)]
+        self._section(
+            lay,
+            "Episodes with no recorded choice",
+            f"{len(without)} of {len(page.episodes)} episodes never reached a recorded "
+            "choice. They are not failures and must never be counted as refusals.",
+        )
+        self._kv_grid(lay, [
+            (self._display_id(s), cosine_closure_presentation(s), "")
+            for s in without
+        ])
+        self._note(
+            lay,
+            "A failed-return-intention rate is not shown. No approved definition is supplied.",
+            amberish=True,
+        )
+
+    def _tab_return(self, lay: QVBoxLayout) -> None:
+        tokens = live_tokens()
+        spec = self._page.selected_episode
+        if spec is None:
+            self._note(lay, "No episode selected.")
+            return
+        chain_names = (
+            "RETURN_CANDIDATE_STARTED", "RETURN_VERIFICATION_COMPLETED",
+            "RETURN_VERIFICATION_INTERRUPTED", "CLOSURE_CONFIRMATION_STARTED",
+            "CLOSURE_CONFIRMATION_INTERRUPTED", "FINAL_CALLBACK_HIDDEN_FOR_FOCUS",
+            "FINAL_CALLBACK_RESTORED_AFTER_RELAPSE", "RETURN_CONFIRMED",
+        )
+        chain = [e for e in spec.events if e.event_name in chain_names]
+        self._section(
+            lay,
+            f"Return pathway — {self._display_id(spec)}",
+            "The exact recorded return-event chain, in real sequence. "
+            "Nothing is summarised away.",
+        )
+        if not chain:
+            self._note(
+                lay,
+                "This episode has no return-pathway events. It closed with reason "
+                f"{cosine_closure_reason_label(cosine_closure(spec, 'closure_reason'))} "
+                "before any return verification began.",
+            )
+        else:
+            for index, event in enumerate(chain):
+                if index:
+                    arrow = _cosine_label("↓")
+                    arrow.setFont(make_font(13, 400))
+                    arrow.setStyleSheet(
+                        f"QLabel{{color:{tokens.muted};background:transparent;"
+                        "padding-left:26px;}"
+                    )
+                    lay.addWidget(arrow)
+                item = QFrame()
+                item.setFrameShape(QFrame.Shape.NoFrame)
+                item.setStyleSheet(
+                    "QFrame{background:rgba(255,255,255,0.025);"
+                    f"border:1px solid rgba(255,255,255,0.10);border-radius:{RADIUS_SM}px;}}"
+                )
+                row = QHBoxLayout(item)
+                row.setContentsMargins(12, 9, 12, 9)
+                row.setSpacing(12)
+                row.addWidget(
+                    _cosine_dot(COSINE_CLASS_TONE.get(event.event_class, tokens.muted), 7),
+                    0, Qt.AlignmentFlag.AlignTop,
+                )
+                text = QVBoxLayout()
+                text.setSpacing(2)
+                title = _cosine_label(cosine_event_label(event.event_name))
+                title.setFont(make_font(12.5, 600))
+                title.setStyleSheet(
+                    f"QLabel{{color:{tokens.text_primary};background:transparent;border:none;}}"
+                )
+                text.addWidget(title)
+                extra = ""
+                branch = event.payload_display.get("branch")
+                reason = event.payload_display.get("reason")
+                if branch:
+                    extra += f" · branch {_cosine_humanize_token(str(branch))}"
+                if reason:
+                    extra += f" · reason {_cosine_humanize_token(str(reason))}"
+                meta = _cosine_label(
+                    f"#{event.sequence} · {cosine_event_class_label(event.event_class)} · "
+                    f"{cosine_time_only(event.occurred_at_display)}"
+                    f"{extra}"
+                )
+                meta.setToolTip(
+                    f"{cosine_event_label(event.event_name)} · "
+                    f"{cosine_event_class_label(event.event_class)} · "
+                    f"{event.occurred_at_display}"
+                )
+                meta.setFont(make_font(10, 400, mono=True))
+                meta.setStyleSheet(
+                    f"QLabel{{color:{tokens.muted};background:transparent;border:none;}}"
+                )
+                meta.setWordWrap(True)
+                text.addWidget(meta)
+                row.addLayout(text, 1)
+                lay.addWidget(item)
+            lay.addSpacing(20)
+
+    def _tab_hopper(self, lay: QVBoxLayout) -> None:
+        page = self._page
+        tokens = live_tokens()
+        self._section(
+            lay,
+            "Same-episode platform transitions",
+            "Every transition below belongs to ONE logical COSINE episode. No Hopper story "
+            "is assembled across separate episodes.",
+        )
+        with_hops = [s for s in page.episodes if cosine_hops(s)]
+        if not with_hops:
+            self._note(lay, "No Hopper transitions recorded.")
+        for spec in with_hops:
+            is_selected = (
+                page.selected_episode is not None
+                and (spec.cosine_session_id, spec.generation) == page._selected_episode_key
+            )
+            block = QFrame()
+            block.setFrameShape(QFrame.Shape.NoFrame)
+            edge = COSINE_TEAL if is_selected else "rgba(255,255,255,0.10)"
+            block.setStyleSheet(
+                "QFrame{background:rgba(255,255,255,0.025);"
+                f"border:1px solid {edge};border-radius:{RADIUS_MD}px;}}"
+            )
+            inner = QVBoxLayout(block)
+            inner.setContentsMargins(16, 16, 16, 16)
+            inner.setSpacing(12)
+            head = QHBoxLayout()
+            name = _cosine_label(self._display_id(spec))
+            name.setFont(make_font(12, 700, mono=True))
+            name.setStyleSheet(
+                f"QLabel{{color:{tokens.text_primary};background:transparent;border:none;}}"
+            )
+            head.addWidget(name)
+            head.addStretch(1)
+            hint = _cosine_label(
+                f"{spec.hopper_count} recorded Hopper transitions · closure reason "
+                f"{cosine_closure_reason_label(cosine_closure(spec, 'closure_reason'))}"
+            )
+            hint.setFont(make_font(11.5, 400))
+            hint.setStyleSheet(
+                f"QLabel{{color:{tokens.muted};background:transparent;border:none;}}"
+            )
+            head.addWidget(hint)
+            inner.addLayout(head)
+
+            strip = QWidget()
+            strip.setStyleSheet("QWidget{background:transparent;}")
+            strip_lay = QHBoxLayout(strip)
+            strip_lay.setContentsMargins(0, 0, 0, 0)
+            strip_lay.setSpacing(0)
+            path = cosine_platform_path(spec)
+            for index, (key, platform_label, stamp) in enumerate(path):
+                if index:
+                    strip_lay.addWidget(CosineFlowArrow())
+                    strip_lay.addWidget(CosineFlowIcon("switch"))
+                    strip_lay.addWidget(CosineFlowArrow())
+                strip_lay.addWidget(
+                    CosineJourneyNode(
+                        "platform",
+                        platform_label,
+                        "Hopper switch" if index else "Episode started",
+                        cosine_time_only(stamp),
+                    )
+                )
+            strip_lay.addStretch(1)
+            inner.addWidget(_cosine_hscroll(strip, 150))
+            lay.addWidget(block)
+            lay.addSpacing(18)
+        self._note(
+            lay,
+            "TIME METRICS HELD · chronology + switch counts only",
+            amberish=True,
+        )
+
+    def _tab_evidence(self, lay: QVBoxLayout) -> None:
+        spec = self._page.selected_episode
+        if spec is None:
+            self._note(lay, "No episode selected.")
+            return
+        self._section(
+            lay,
+            f"Raw evidence — {self._display_id(spec)}",
+            "Every recorded row for this episode, verbatim and in real sequence. "
+            "Sanitized payloads and withheld counts are supplied by the read model.",
+        )
+        rows, withheld_total = [], 0
+        for event in spec.events:
+            withheld = event.withheld_payload_field_count
+            withheld_total += withheld
+            parts = [_cosine_payload_text(event.payload_display)]
+            if withheld:
+                parts.append(f"{withheld} field(s) withheld · clock HOLD")
+            rows.append([
+                event.sequence,
+                cosine_event_label(event.event_name),
+                _cosine_class_tag(
+                    f"{cosine_event_class_label(event.event_class)}\n"
+                    f"Schema {event.schema_version}"
+                ),
+                f"{cosine_date_only(event.occurred_at_display)}\n"
+                f"{cosine_time_only(event.occurred_at_display)}\n"
+                f"UTC {cosine_utc_time_only(event.occurred_at_utc)}",
+                f"{event.platform_label}\n{event.platform_key}",
+                event.content_title or "—",
+                event.request_id or "—",
+                "\n".join(parts) if parts else "—",
+            ])
+        self._table(
+            lay,
+            ["#", "Event", "Class", "Time", "Platform", "Title", "Request id", "Payload"],
+            rows,
+            weights=[1, 5, 2, 3, 2, 5, 4, 5],
+        )
+        self._section(
+            lay, "Event classes are not grades",
+            "These describe where a row came from, not how good the evidence is.",
+        )
+        self._kv_grid(lay, [
+            (cosine_event_class_label("OBSERVED"), "Seen directly by the foreground observer", ""),
+            (cosine_event_class_label("USER_ACTION"), "A choice the person actually made", ""),
+            (cosine_event_class_label("PRESENTATION"), "Something COSINE displayed", ""),
+            (cosine_event_class_label("DERIVED"), "Concluded by the engine from its own state", ""),
+        ])
+        extra = (
+            f" Additionally, {withheld_total} payload field(s) across this episode are "
+            "withheld under the clock-ownership HOLD; they remain in the raw evidence but "
+            "are never displayed."
+            if withheld_total
+            else ""
+        )
+        self._note(
+            lay,
+            "No CLEAN, DEGRADED, GOOD or BAD evidence-quality grade exists in COSINE "
+            "evidence, and none is invented here." + extra,
+            amberish=True,
+        )
+        self._note(
+            lay,
+            "Window titles are shown verbatim but are not an identity authority. Recorded "
+            "evidence has shown titles naming other services while the recorded platform "
+            "key says otherwise — never derive platform or content identity from a title "
+            "string.",
+        )
+
+    def _tab_about(self, lay: QVBoxLayout) -> None:
+        tokens = live_tokens()
+
+        def prose(text: str) -> None:
+            body = _cosine_label(text)
+            body.setFont(make_font(12.5, 400))
+            body.setStyleSheet(
+                f"QLabel{{color:{tokens.text_primary};background:transparent;}}"
+            )
+            body.setWordWrap(True)
+            lay.addWidget(body)
+            lay.addSpacing(11)
+
+        self._section(lay, "What COSINE is")
+        prose(
+            "COSINE — Choice-Oriented Streaming Insight and Navigation Engine — observes "
+            "supported OTT activity through certified software evidence, and offers a "
+            "choice at the moment it matters."
+        )
+        prose("It records what actually happened, as discrete durable events:")
+        for line in (
+            "Intention — the choice you made at the intent gate, recorded as your own action.",
+            "Negotiated breaks — the duration you entered, and whether you acknowledged it.",
+            "Return behaviour — return candidates, verification, and interruptions.",
+            "Callback events — including a callback hidden for focus and restored after a "
+            "relapse.",
+            "Platform transitions — movement between supported services inside one episode.",
+            "Closure evidence — the recorded reason and outcome that ended the episode.",
+        ):
+            prose("      •   " + line)
+        lay.addSpacing(10)
+        self._section(lay, "Scientific boundary")
+        prose(
+            "COSINE observes computer behaviour. That is the whole of its evidence, and "
+            "the limit of what it may claim."
+        )
+        for line in (
+            "It does not read thoughts.",
+            "It does not measure the brain.",
+            "It does not score focus, motivation, self-control or attention.",
+            "A recognised OTT window being in the foreground does not prove a video was "
+            "playing. COSINE observes the window, never the player.",
+            "A recorded choice is a choice, not an outcome. Intent is never counted as a "
+            "completed return.",
+        ):
+            prose("      •   " + line)
+        lay.addSpacing(10)
+        self._section(lay, "What this page is")
+        prose(
+            "This page presents durable COSINE evidence through MYELIN's certified "
+            "COSINE read model and shared analytics read lane. Current episode facts "
+            "arrive independently through the existing live COSINE signal."
+        )
+        prose(
+            "Two areas are deliberately held. Platform time totals are not shown while the "
+            "COSINE clock-ownership question is open, and the SINE handoff episode is "
+            "carried as context only, never interpreted. Uncertified metrics read "
+            "UNAVAILABLE rather than showing a plausible number."
+        )
+
+    # ------------------------------------------------------------- lifecycle
+    def open_overlay(self) -> None:
+        self.setGeometry(self._page.rect())
+        self._backdrop = self._grab_blurred()
+        self.refresh_body()
+        self.show()
+        self.raise_()
+        self.setFocus()
+
+    def close_overlay(self) -> None:
+        self.hide()
+        self._backdrop = None
+
+    def _grab_blurred(self):
+        """Blur a grab of the page underneath -- Qt's honest stand-in for the
+        CSS ``backdrop-filter`` the HTML original used."""
+
+        try:
+            source = self._page.grab()
+            if source.isNull():
+                return None
+            scene = QGraphicsScene()
+            item = QGraphicsPixmapItem(source)
+            effect = QGraphicsBlurEffect()
+            effect.setBlurRadius(14)
+            item.setGraphicsEffect(effect)
+            scene.addItem(item)
+            output = QPixmap(source.size())
+            output.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(output)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            scene.render(painter)
+            painter.end()
+            return output
+        except Exception:
+            return None
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        if self._backdrop is not None:
+            painter.drawPixmap(self.rect(), self._backdrop)
+        painter.fillRect(self.rect(), QColor(4, 8, 16, 140))
+        painter.end()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Escape:
+            self.close_overlay()
+            return
+        super().keyPressEvent(event)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if not self._panel.geometry().contains(event.pos()):
+            self.close_overlay()
+            return
+        super().mousePressEvent(event)
+
+
+class CosineLivePage(QWidget):
+    """The navigable COSINE destination: durable evidence, presented cleanly."""
+
+    refresh_requested = pyqtSignal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("pageBody")
+        self.setAccessibleName("COSINE streaming regulation")
+
+        self._projection = None
+        self._live_snapshot = None
+        self._selected_episode_key = None
+        self._refreshing = False
+        self._refresh_failed = False
+        self._full_flow_open = False
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        scroll = QScrollArea(self)
+        scroll.setObjectName("showcaseScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        root.addWidget(scroll, 1)
+        self._scroll = scroll
+
+        body = QWidget(scroll)
+        body.setObjectName("plainBox")
+        scroll.setWidget(body)
+        outer = QHBoxLayout(body)
+        outer.setContentsMargins(34, 22, 34, 44)
+
+        # The HTML original capped its content column at 1320px because a
+        # browser page can be arbitrarily wide.  The Control Station window
+        # is already a fixed research surface, so the column fills the page
+        # and keeps only the shell's 34px gutters.
+        column = QWidget()
+        column.setObjectName("plainBox")
+        outer.addWidget(column, 1)
+
+        self._wrap = QVBoxLayout(column)
+        self._wrap.setContentsMargins(0, 0, 0, 0)
+        self._wrap.setSpacing(20)
+        self._topline = self._build_topline()
+        self._wrap.addWidget(self._topline)
+
+        self._hold_slot = QVBoxLayout()
+        self._hold_slot.setContentsMargins(0, 0, 0, 0)
+        self._wrap.addLayout(self._hold_slot)
+
+        self._banner_slot = QVBoxLayout()
+        self._banner_slot.setContentsMargins(0, 0, 0, 0)
+        self._wrap.addLayout(self._banner_slot)
+
+        self._metric_slot = QVBoxLayout()
+        self._metric_slot.setContentsMargins(0, 0, 0, 0)
+        self._metric_slot.setSpacing(9)
+        self._wrap.addLayout(self._metric_slot)
+
+        self._two_col_slot = QVBoxLayout()
+        self._two_col_slot.setContentsMargins(0, 0, 0, 0)
+        self._wrap.addLayout(self._two_col_slot)
+
+        self._flow_slot = QVBoxLayout()
+        self._flow_slot.setContentsMargins(0, 0, 0, 0)
+        self._wrap.addLayout(self._flow_slot)
+        self._wrap.addStretch(1)
+
+        self._overlay = CosineDeepAnalysisDialog(self)
+
+        self._render_durable()
+
+    # ------------------------------------------------------------- projection
+
+
+    # ---------------------------------------------------------------- chrome
+    def _build_topline(self) -> QWidget:
+        tokens = live_tokens()
+        host = QWidget()
+        host.setObjectName("plainBox")
+        lay = QHBoxLayout(host)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(12)
+
+        text = QVBoxLayout()
+        text.setSpacing(5)
+        head = QHBoxLayout()
+        head.setSpacing(9)
+        head.addWidget(_cosine_dot(COSINE_TEAL, 9), 0, Qt.AlignmentFlag.AlignVCenter)
+        title = _cosine_label("COSINE — STREAMING REGULATION")
+        title.setFont(make_font(19, 700, spacing=0.4))
+        title.setStyleSheet(f"QLabel{{color:{tokens.text_primary};background:transparent;}}")
+        head.addWidget(title)
+        head.addStretch(1)
+        text.addLayout(head)
+        hint = _cosine_label("Choice-Oriented Streaming Insight and Navigation Engine")
+        hint.setFont(make_font(11.5, 400))
+        hint.setStyleSheet(f"QLabel{{color:{tokens.muted};background:transparent;}}")
+        text.addWidget(hint)
+        lay.addLayout(text)
+        lay.addStretch(1)
+
+        open_analysis = _cosine_button("Open Analysis")
+        open_analysis.clicked.connect(self._open_analysis)
+        lay.addWidget(open_analysis, 0, Qt.AlignmentFlag.AlignVCenter)
+        return host
+
+    def _open_analysis(self) -> None:
+        self._overlay.open_overlay()
+
+    # ------------------------------------------------------------- rendering
+    @staticmethod
+    def _clear(layout: QVBoxLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+            else:
+                child = item.layout()
+                if child is not None:
+                    CosineLivePage._clear(child)
+
+
+
+    def _render_empty_state(self) -> None:
+        tokens = live_tokens()
+        host = QFrame()
+        host.setFrameShape(QFrame.Shape.NoFrame)
+        host.setStyleSheet(
+            f"QFrame{{background:{mix(tokens.amber, 5, tokens.window_background)};"
+            f"border:1px dashed {mix(tokens.amber, 45, tokens.border)};"
+            f"border-radius:{RADIUS_LG}px;}}"
+        )
+        lay = QVBoxLayout(host)
+        lay.setContentsMargins(24, 44, 24, 44)
+        lay.setSpacing(0)
+        tag = _cosine_label("EMPTY" if self.evidence_available else "UNAVAILABLE")
+        tag.setFont(make_font(9.5, 700, mono=True, spacing=1.4))
+        tag.setStyleSheet(
+            f"QLabel{{color:{tokens.amber};border:1px solid "
+            f"{mix(tokens.amber, 55, tokens.border)};background:transparent;"
+            "border-radius:11px;padding:4px 12px;}"
+        )
+        tag.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        holder = QHBoxLayout()
+        holder.addStretch(1)
+        holder.addWidget(tag)
+        holder.addStretch(1)
+        lay.addLayout(holder)
+        lay.addSpacing(16)
+        for text, size, weight, colour in (
+            (self.evidence_message, 15, 600, tokens.text_primary),
+            ("COSINE evidence will appear here when available.", 12, 400, tokens.muted),
+        ):
+            item = _cosine_label(text)
+            item.setFont(make_font(size, weight))
+            item.setStyleSheet(f"QLabel{{color:{colour};background:transparent;border:none;}}")
+            item.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lay.addWidget(item)
+            lay.addSpacing(7)
+        self._banner_slot.addWidget(host)
+
+    def _build_hold_banner(self) -> QWidget:
+        tokens = live_tokens()
+        host = QFrame()
+        host.setFrameShape(QFrame.Shape.NoFrame)
+        host.setStyleSheet(
+            f"QFrame{{background:{mix(tokens.amber, 7, tokens.window_background)};"
+            f"border:1px dashed {mix(tokens.amber, 50, tokens.border)};"
+            f"border-radius:{RADIUS_SM}px;}}"
+        )
+        host.setToolTip(
+            "Recorded SINE handoff / handover evidence is preserved without "
+            "mechanism interpretation."
+        )
+        lay = QHBoxLayout(host)
+        lay.setContentsMargins(16, 10, 16, 10)
+        body = _cosine_label("HOLD CONTEXT · SINE handoff recorded · interpretation deferred")
+        body.setFont(make_font(11, 600, spacing=0.3))
+        body.setStyleSheet(f"QLabel{{color:{tokens.amber};background:transparent;border:none;}}")
+        lay.addWidget(body)
+        lay.addStretch(1)
+        return host
+
+    def _build_banner(self, spec=None, *, live=None) -> QWidget:
+        tokens = live_tokens()
+        if live is not None:
+            outcome = None
+            platform = str(_cosine_field(live, "current_platform_label", "") or "—")
+            phase = _cosine_phase_key(live)
+            state_text = _COSINE_STATE_LABELS.get(phase, _cosine_words(phase))
+            hops = _cosine_field(live, "hopper_count", 0)
+            minutes = _cosine_field(live, "chosen_break_minutes", None)
+            identity_text = "Factual live snapshot · durable history remains separate"
+            facts_data = (
+                ("State", state_text, False),
+                ("Break chosen", f"{minutes} min" if minutes is not None else "—", minutes is None),
+                ("Platform switches", str(hops), False),
+                ("Global pause", "Paused" if _cosine_field(live, "global_paused", False) else "Not paused", False),
+            )
+        else:
+            outcome = spec.closure_outcome
+            platform = spec.starting_platform_label
+            state_text = "CLOSED" if spec.is_closed else "OPEN EVIDENCE"
+            hops = spec.hopper_count
+            chosen = cosine_choice_text(spec)
+            identity_text = cosine_display_episode_id(spec, self.episodes)
+            recorded = spec.ended_at_display or spec.started_at_display
+            facts_data = (
+                ("Your choice", chosen or "No choice recorded", chosen is None),
+                ("Platform switches", f"{hops} recorded" if hops else "None recorded", not hops),
+                ("Closure reason", cosine_closure_reason_label(spec.closure_reason), False),
+                ("Recorded", f"{cosine_date_only(recorded)} · {cosine_time_only(recorded)}", False),
+            )
+
+        host = QFrame()
+        host.setFrameShape(QFrame.Shape.NoFrame)
+        host.setStyleSheet(
+            f"QFrame{{background:{mix(COSINE_INDIGO, 10, tokens.surface)};"
+            f"border:1px solid {mix(COSINE_INDIGO, 42, tokens.border)};"
+            f"border-radius:{RADIUS_LG}px;}}"
+        )
+        card_shadow(host)
+        lay = QHBoxLayout(host)
+        lay.setContentsMargins(24, 20, 24, 20)
+        lay.setSpacing(18)
+
+        left = QVBoxLayout()
+        left.setSpacing(9)
+        kicker = _cosine_label("CURRENT EPISODE" if live is not None else "RECENT EPISODE")
+        kicker.setFont(make_font(9.5, 700, mono=True, spacing=1.4))
+        kicker.setStyleSheet(f"QLabel{{color:{tokens.muted};background:transparent;border:none;}}")
+        left.addWidget(kicker)
+
+        row = QHBoxLayout()
+        row.setSpacing(11)
+        name = _cosine_label(platform)
+        name.setFont(make_font(22, 700, spacing=0.2))
+        name.setStyleSheet(
+            f"QLabel{{color:{tokens.text_primary};background:transparent;border:none;}}"
+        )
+        row.addWidget(name)
+        row.addWidget(
+            _cosine_chip(
+                state_text,
+                tokens.muted, tokens.border,
+            )
+        )
+        if outcome:
+            good = outcome in ("RETURNED_AFTER_INTENT", "RETURNED_AFTER_CALLBACK")
+            tone = COSINE_TEAL if good else COSINE_INDIGO_LIT
+            edge = COSINE_TEAL_DIM if good else mix(COSINE_INDIGO, 60, tokens.border)
+            row.addWidget(
+                _cosine_chip(cosine_outcome_label(outcome).upper(), tone, edge)
+            )
+        row.addStretch(1)
+        left.addLayout(row)
+
+        identity = _cosine_label(identity_text)
+        identity.setFont(make_font(10.5, 400, mono=True))
+        identity.setStyleSheet(
+            f"QLabel{{color:{tokens.muted};background:transparent;border:none;}}"
+        )
+        identity.setWordWrap(True)
+        left.addWidget(identity)
+        lay.addLayout(left, 1)
+
+        facts = QHBoxLayout()
+        facts.setSpacing(26)
+        for caption, value, muted_value in facts_data:
+            column = QVBoxLayout()
+            column.setSpacing(3)
+            key = _cosine_label(caption.upper())
+            key.setFont(make_font(10, 400, spacing=0.9))
+            key.setStyleSheet(
+                f"QLabel{{color:{tokens.muted};background:transparent;border:none;}}"
+            )
+            column.addWidget(key)
+            body = _cosine_label(value)
+            body.setFont(
+                make_font(13.5, 400, italic=True) if muted_value else make_font(13.5, 600)
+            )
+            body.setStyleSheet(
+                f"QLabel{{color:{tokens.muted if muted_value else tokens.text_primary};"
+                "background:transparent;border:none;}"
+            )
+            # One line: these facts are short and wrapping them mid-phrase
+            # ("Intentional break · 15" / "min") reads as two values.
+            body.setWordWrap(False)
+            column.addWidget(body)
+            column.addStretch(1)
+            facts.addLayout(column)
+        lay.addLayout(facts)
+        return host
+
+    def _render_metrics(self) -> None:
+        tokens = live_tokens()
+        row = QWidget()
+        row.setObjectName("plainBox")
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(16)
+        overview = self._projection.overview if self.evidence_available else None
+        cards = (
+            ("Captured Episodes", str(overview.captured_episode_count) if overview else "UNAVAILABLE",
+             "Distinct episodes in the database snapshot", COSINE_TEAL, False),
+            ("Confirmed Returns", str(overview.confirmed_return_count) if overview else "UNAVAILABLE",
+             "Return confirmed events recorded", tokens.green, False),
+            ("Breaks Started", str(overview.break_started_count) if overview else "UNAVAILABLE",
+             "Break started events recorded", COSINE_INDIGO_LIT, False),
+            ("Usual Return", overview.usual_return_status if overview else "UNAVAILABLE",
+             overview.usual_return_reason if overview else self.evidence_message, tokens.border, True),
+        )
+        for caption, value, sub, accent, unavailable in cards:
+            card = QFrame()
+            card.setFrameShape(QFrame.Shape.NoFrame)
+            card.setStyleSheet(
+                f"QFrame{{background:{tokens.surface};border:1px solid {accent};"
+                f"border-radius:{RADIUS_LG}px;}}"
+            )
+            card_shadow(card)
+            inner = QVBoxLayout(card)
+            inner.setContentsMargins(16, 20, 16, 20)
+            inner.setSpacing(6)
+            number = _cosine_label(value)
+            if unavailable:
+                number.setFont(make_font(14, 700, mono=True, spacing=1.2))
+                number.setStyleSheet(
+                    f"QLabel{{color:{tokens.muted};background:transparent;border:none;}}"
+                )
+            else:
+                number.setFont(make_font(30, 700))
+                number.setStyleSheet(
+                    f"QLabel{{color:{accent};background:transparent;border:none;}}"
+                )
+            inner.addWidget(number)
+            key = _cosine_label(caption.upper())
+            key.setFont(make_font(10.5, 700, spacing=1.1))
+            key.setStyleSheet(
+                f"QLabel{{color:{tokens.muted};background:transparent;border:none;}}"
+            )
+            inner.addWidget(key)
+            note = _cosine_label(sub)
+            note.setFont(make_font(10.5, 400))
+            note.setStyleSheet(
+                f"QLabel{{color:{tokens.muted};background:transparent;border:none;}}"
+            )
+            note.setWordWrap(True)
+            inner.addWidget(note)
+            lay.addWidget(card, 1)
+        self._metric_slot.addWidget(row)
+
+        caption = _cosine_label(
+            "DATABASE SNAPSHOT COUNTS · NOT A DATED WINDOW"
+        )
+        caption.setFont(make_font(10, 400, mono=True, spacing=0.6))
+        caption.setStyleSheet(f"QLabel{{color:{tokens.muted};background:transparent;}}")
+        caption.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._metric_slot.addWidget(caption)
+
+    def _build_two_column(self, spec: dict) -> QWidget:
+        host = QWidget()
+        host.setObjectName("plainBox")
+        lay = QHBoxLayout(host)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(20)
+        lay.addWidget(self._build_platform_card(spec), 1)
+        lay.addWidget(self._build_events_card(spec), 1)
+        return host
+
+    def _build_platform_card(self, spec: dict) -> QWidget:
+        tokens = live_tokens()
+        card, body = make_card()
+        head, _ = card_head("Platform Behaviour")
+        body.addWidget(head)
+        body.addSpacing(16)
+
+        caption = _cosine_label("PLATFORM PATH")
+        caption.setFont(make_font(10, 400, spacing=1.1))
+        caption.setStyleSheet(f"QLabel{{color:{tokens.muted};background:transparent;}}")
+        body.addWidget(caption)
+        body.addSpacing(12)
+
+        path = cosine_platform_path(spec)
+        for index, (key, platform_label, _stamp) in enumerate(path):
+            if index:
+                arrow = _cosine_label("↓")
+                arrow.setFont(make_font(15, 400))
+                arrow.setStyleSheet(
+                    f"QLabel{{color:{tokens.muted};background:transparent;padding-left:22px;}}"
+                )
+                body.addWidget(arrow)
+            node = QFrame()
+            node.setFrameShape(QFrame.Shape.NoFrame)
+            node.setStyleSheet(
+                f"QFrame{{background:{mix(COSINE_INDIGO, 18, tokens.surface)};"
+                f"border:1px solid {mix(COSINE_INDIGO, 45, tokens.border)};"
+                f"border-radius:{RADIUS_MD}px;}}"
+            )
+            node_lay = QHBoxLayout(node)
+            node_lay.setContentsMargins(14, 11, 14, 11)
+            name = _cosine_label(platform_label)
+            name.setFont(make_font(14, 600))
+            name.setStyleSheet(
+                f"QLabel{{color:{tokens.text_primary};background:transparent;border:none;}}"
+            )
+            node_lay.addWidget(name)
+            node_lay.addStretch(1)
+            raw = _cosine_label(key)
+            raw.setFont(make_font(10, 400, mono=True))
+            raw.setStyleSheet(
+                f"QLabel{{color:{tokens.muted};background:transparent;border:none;}}"
+            )
+            node_lay.addWidget(raw)
+            body.addWidget(node)
+
+        body.addSpacing(16)
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet(f"QFrame{{background:{tokens.border};border:none;}}")
+        body.addWidget(divider)
+        body.addSpacing(16)
+
+        count_row = QHBoxLayout()
+        count_row.setSpacing(10)
+        number = _cosine_label(str(spec.hopper_count))
+        number.setFont(make_font(26, 700))
+        number.setStyleSheet(
+            f"QLabel{{color:{COSINE_INDIGO_LIT};background:transparent;border:none;}}"
+        )
+        count_row.addWidget(number)
+        text = _cosine_label("RECORDED HOPPER TRANSITIONS")
+        text.setFont(make_font(10.5, 700, spacing=1.1))
+        text.setStyleSheet(f"QLabel{{color:{tokens.muted};background:transparent;border:none;}}")
+        count_row.addWidget(text)
+        count_row.addStretch(1)
+        body.addLayout(count_row)
+
+        body.addSpacing(14)
+        note = _cosine_chip("TIME METRICS HELD · chronology + switch counts only", tokens.amber, mix(tokens.amber, 45, tokens.border))
+        note.setToolTip(
+            "Platform time totals are HELD. The COSINE clock-ownership question is "
+            "unresolved, so no duration figure, bar, ranking or aggregate is shown. "
+            "Chronology and switch counts are recorded facts and are safe to display."
+        )
+        note_row = QHBoxLayout()
+        note_row.addWidget(note)
+        note_row.addStretch(1)
+        body.addLayout(note_row)
+        body.addStretch(1)
+        return card
+
+    def _build_events_card(self, spec: dict) -> QWidget:
+        tokens = live_tokens()
+        card, body = make_card()
+        events = list(reversed(spec.events))[:7]
+        head, _ = card_head(
+            "Latest Events", f"Last {len(events)} of {spec.event_count} recorded"
+        )
+        body.addWidget(head)
+        body.addSpacing(16)
+
+        for index, event in enumerate(events):
+            if index:
+                divider = QFrame()
+                divider.setFixedHeight(1)
+                divider.setStyleSheet(
+                    f"QFrame{{background:{mix(tokens.border, 55, tokens.surface)};"
+                    "border:none;}"
+                )
+                body.addWidget(divider)
+            row = QWidget()
+            row.setObjectName("plainBox")
+            row_lay = QHBoxLayout(row)
+            row_lay.setContentsMargins(0, 9, 0, 9)
+            row_lay.setSpacing(11)
+            row_lay.addWidget(
+                _cosine_dot(COSINE_CLASS_TONE.get(event.event_class, tokens.muted), 7),
+                0, Qt.AlignmentFlag.AlignTop,
+            )
+            text = QVBoxLayout()
+            text.setSpacing(3)
+            title = _cosine_label(cosine_event_label(event.event_name))
+            title.setFont(make_font(13, 600))
+            title.setStyleSheet(
+                f"QLabel{{color:{tokens.text_primary};background:transparent;}}"
+            )
+            title.setToolTip(
+                f"{cosine_event_label(event.event_name)} · {event.occurred_at_display}"
+            )
+            text.addWidget(title)
+            meta = QHBoxLayout()
+            meta.setSpacing(9)
+            meta.addWidget(_cosine_class_tag(cosine_event_class_label(event.event_class)))
+            stamp = _cosine_label(cosine_time_only(event.occurred_at_display))
+            stamp.setFont(make_font(10, 400, mono=True))
+            stamp.setStyleSheet(f"QLabel{{color:{tokens.muted};background:transparent;}}")
+            stamp.setToolTip(event.occurred_at_display)
+            meta.addWidget(stamp)
+            meta.addStretch(1)
+            text.addLayout(meta)
+            row_lay.addLayout(text, 1)
+            sequence = _cosine_label(f"#{event.sequence}")
+            sequence.setFont(make_font(10, 400, mono=True))
+            sequence.setStyleSheet(f"QLabel{{color:{tokens.muted};background:transparent;}}")
+            row_lay.addWidget(sequence, 0, Qt.AlignmentFlag.AlignTop)
+            body.addWidget(row)
+        body.addStretch(1)
+        return card
+
+    # ------------------------------------------------- horizontal journey map
+    def _build_flow_card(self, spec: dict) -> QWidget:
+        tokens = live_tokens()
+        card, body = make_card()
+        head, _ = card_head(
+            "Recent Episode Flow", "Real recorded order · never re-sequenced"
+        )
+        body.addWidget(head)
+        body.addSpacing(16)
+
+        total = spec.event_count
+        groups = cosine_build_groups(spec)
+        covered = sum(len(g["events"]) for g in groups)
+
+        bar = QFrame()
+        bar.setFrameShape(QFrame.Shape.NoFrame)
+        bar.setStyleSheet(
+            f"QFrame{{background:{tokens.surface_2};border:1px solid {tokens.border};"
+            f"border-radius:{RADIUS_SM}px;}}"
+        )
+        bar_lay = QHBoxLayout(bar)
+        bar_lay.setContentsMargins(14, 11, 14, 11)
+        bar_lay.setSpacing(14)
+        disclosure = _cosine_label(
+            f"{total} recorded events · condensed into {len(groups)} milestones · "
+            f"nothing dropped ({covered}/{total} covered)"
+        )
+        disclosure.setFont(make_font(12, 600))
+        disclosure.setStyleSheet(
+            f"QLabel{{color:{tokens.text_primary};background:transparent;border:none;}}"
+        )
+        disclosure.setWordWrap(True)
+        bar_lay.addWidget(disclosure, 1)
+        toggle = _cosine_button(
+            f"Hide all {total} events" if self._full_flow_open else f"Show all {total} events",
+            small=True,
+        )
+        toggle.clicked.connect(self._toggle_full_flow)
+        bar_lay.addWidget(toggle)
+        body.addWidget(bar)
+        body.addSpacing(16)
+
+        outcome = cosine_closure(spec, "closure_outcome")
+        good = outcome in ("RETURNED_AFTER_INTENT", "RETURNED_AFTER_CALLBACK")
+        session_head = _cosine_label(
+            f"{cosine_display_episode_id(spec, self.episodes)}  ·  {total} recorded events  ·  "
+            f"{len(groups)} milestones  ·  "
+            f"{cosine_outcome_label(outcome)}"
+        )
+        session_head.setFont(make_font(11.5, 400, mono=True))
+        session_head.setStyleSheet(
+            f"QLabel{{color:{COSINE_TEAL if good else tokens.muted};"
+            "background:transparent;}"
+        )
+        body.addWidget(session_head)
+        body.addSpacing(14)
+
+        body.addWidget(cosine_build_journey_strip(spec))
+
+        chips = QHBoxLayout()
+        chips.setSpacing(8)
+        hops = spec.hopper_count
+        restores = len(cosine_all(spec, "FINAL_CALLBACK_RESTORED_AFTER_RELAPSE"))
+        interrupts = len(cosine_all(spec, "RETURN_VERIFICATION_INTERRUPTED")) + len(
+            cosine_all(spec, "CLOSURE_CONFIRMATION_INTERRUPTED")
+        )
+        chosen = cosine_choice_text(spec)
+        reason = cosine_closure(spec, "closure_reason")
+        entries = []
+        if hops:
+            entries.append((f"{hops} Hopper transition" + ("s" if hops > 1 else ""),
+                            COSINE_INDIGO_LIT))
+        if chosen:
+            entries.append((chosen, tokens.amber))
+        if restores:
+            entries.append((f"{restores} callback restore" + ("s" if restores > 1 else ""),
+                            COSINE_VIOLET))
+        if interrupts:
+            entries.append((f"{interrupts} interruption"
+                            + ("s" if interrupts > 1 else "") + " in episode", COSINE_VIOLET))
+        if outcome:
+            entries.append((cosine_outcome_label(outcome), COSINE_TEAL))
+        if reason:
+            entries.append((cosine_closure_reason_label(reason), tokens.muted))
+        for text, tone in entries:
+            chips.addWidget(_cosine_chip(text, tone, mix(tone, 50, tokens.border)))
+        chips.addStretch(1)
+        body.addSpacing(14)
+        body.addLayout(chips)
+
+        body.addSpacing(14)
+        legend = QHBoxLayout()
+        legend.setSpacing(16)
+        for text, tone in (
+            ("Platform", COSINE_INDIGO_LIT),
+            ("Intent / intervention", tokens.amber),
+            ("Return verification", COSINE_VIOLET),
+            ("Outcome", COSINE_TEAL),
+        ):
+            entry = QHBoxLayout()
+            entry.setSpacing(7)
+            swatch = QFrame()
+            swatch.setFixedSize(9, 9)
+            swatch.setStyleSheet(
+                f"QFrame{{background:{mix(tone, 18, tokens.surface)};"
+                f"border:1px solid {tone};border-radius:3px;}}"
+            )
+            entry.addWidget(swatch)
+            item = _cosine_label(text)
+            item.setFont(make_font(10.5, 400))
+            item.setStyleSheet(f"QLabel{{color:{tokens.muted};background:transparent;}}")
+            entry.addWidget(item)
+            legend.addLayout(entry)
+        legend.addStretch(1)
+        body.addLayout(legend)
+
+        chrono = _cosine_label(
+            "Connector values are plain elapsed wall-clock between two recorded UTC event "
+            "timestamps, shown as neutral chronology only. They are not COSINE credited "
+            "time and are never summed or aggregated."
+        )
+        chrono.setFont(make_font(10.5, 400))
+        chrono.setStyleSheet(f"QLabel{{color:{tokens.muted};background:transparent;}}")
+        chrono.setWordWrap(True)
+        body.addSpacing(10)
+        body.addWidget(chrono)
+
+        if self._full_flow_open:
+            body.addSpacing(18)
+            divider = QFrame()
+            divider.setFixedHeight(1)
+            divider.setStyleSheet(f"QFrame{{background:{tokens.border};border:none;}}")
+            body.addWidget(divider)
+            body.addSpacing(16)
+            title = _cosine_label(f"ALL {total} RECORDED EVENTS")
+            title.setFont(make_font(11, 700, spacing=1.2))
+            title.setStyleSheet(f"QLabel{{color:{tokens.muted};background:transparent;}}")
+            body.addWidget(title)
+            note = _cosine_label(
+                "Real sequence, real event name, real class, real UTC timestamp. "
+                "Nothing re-ordered. Full recorded event sequence."
+            )
+            note.setFont(make_font(11, 400))
+            note.setStyleSheet(f"QLabel{{color:{tokens.muted};background:transparent;}}")
+            note.setWordWrap(True)
+            body.addSpacing(4)
+            body.addWidget(note)
+            body.addSpacing(12)
+
+            inner = QWidget()
+            inner.setObjectName("plainBox")
+            inner_lay = QVBoxLayout(inner)
+            inner_lay.setContentsMargins(0, 0, 8, 0)
+            inner_lay.setSpacing(0)
+            for event in spec.events:
+                row = QWidget()
+                row.setObjectName("plainBox")
+                row_lay = QHBoxLayout(row)
+                row_lay.setContentsMargins(4, 8, 4, 8)
+                row_lay.setSpacing(12)
+                sequence = _cosine_label(f"#{event.sequence}")
+                sequence.setFont(make_font(10, 400, mono=True))
+                sequence.setStyleSheet(
+                    f"QLabel{{color:{tokens.muted};background:transparent;}}"
+                )
+                sequence.setFixedWidth(38)
+                row_lay.addWidget(sequence, 0, Qt.AlignmentFlag.AlignTop)
+                text = QVBoxLayout()
+                text.setSpacing(2)
+                title_label = _cosine_label(cosine_event_label(event.event_name))
+                title_label.setFont(make_font(12.5, 600))
+                title_label.setStyleSheet(
+                    f"QLabel{{color:{tokens.text_primary};background:transparent;}}"
+                )
+                title_label.setToolTip(
+                    f"{cosine_event_label(event.event_name)} · {event.occurred_at_display}"
+                )
+                text.addWidget(title_label)
+                row_lay.addLayout(text, 1)
+                right = QVBoxLayout()
+                right.setSpacing(3)
+                stamp = _cosine_label(cosine_time_only(event.occurred_at_display))
+                stamp.setFont(make_font(10, 400, mono=True))
+                stamp.setStyleSheet(f"QLabel{{color:{tokens.muted};background:transparent;}}")
+                stamp.setAlignment(Qt.AlignmentFlag.AlignRight)
+                stamp.setToolTip(event.occurred_at_display)
+                right.addWidget(stamp)
+                tag_row = QHBoxLayout()
+                tag_row.addStretch(1)
+                tag_row.addWidget(_cosine_class_tag(cosine_event_class_label(event.event_class)))
+                right.addLayout(tag_row)
+                row_lay.addLayout(right)
+                inner_lay.addWidget(row)
+                line = QFrame()
+                line.setFixedHeight(1)
+                line.setStyleSheet(
+                    f"QFrame{{background:{mix(tokens.border, 45, tokens.surface)};"
+                    "border:none;}"
+                )
+                inner_lay.addWidget(line)
+
+            area = QScrollArea()
+            area.setWidgetResizable(True)
+            area.setFrameShape(QFrame.Shape.NoFrame)
+            area.setWidget(inner)
+            area.setFixedHeight(420)
+            area.setStyleSheet(
+                "QScrollArea{background:transparent;border:none;}"
+                "QScrollArea > QWidget > QWidget{background:transparent;}"
+                f"QScrollBar:vertical{{background:{tokens.surface_2};width:9px;margin:0;"
+                "border-radius:5px;}"
+                f"QScrollBar::handle:vertical{{background:{tokens.border};"
+                "border-radius:5px;min-height:40px;}"
+                f"QScrollBar::handle:vertical:hover{{background:{COSINE_TEAL_DIM};}}"
+                "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
+                "QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical"
+                "{background:transparent;}"
+            )
+            body.addWidget(area)
+        return card
+
+    def _toggle_full_flow(self) -> None:
+        self._full_flow_open = not self._full_flow_open
+        if self.current is not None:
+            self._clear(self._flow_slot)
+            self._flow_slot.addWidget(self._build_flow_card(self.current))
+
+    # ------------------------------------------------------------- behaviour
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if hasattr(self, "_overlay") and self._overlay.isVisible():
+            self._overlay.setGeometry(self.rect())
+
+    def render_live_view(self, snapshot: object) -> None:
+        """Live facts affect only the banner, never durable history or selection."""
+        self._live_snapshot = snapshot if _cosine_live_episode_present(snapshot) else None
+        self._render_banner()
+
+    def set_refreshing(self, refreshing: bool) -> None:
+        self._refreshing = refreshing
+        self._overlay._refresh_button.setEnabled(not refreshing)
+
+    def _render_banner(self) -> None:
+        self._clear(self._banner_slot)
+        self._clear(self._hold_slot)
+        if self._live_snapshot is not None:
+            self._banner_slot.addWidget(self._build_banner(live=self._live_snapshot))
+        elif self.current is not None:
+            if self.current.hold_context:
+                self._hold_slot.addWidget(self._build_hold_banner())
+            self._banner_slot.addWidget(self._build_banner(self.current))
+        else:
+            self._render_empty_state()
+
+
+    @property
+    def evidence_available(self) -> bool:
+        return self._projection is not None and self._projection.available and not self._refresh_failed
+
+
+    @property
+    def evidence_message(self) -> str:
+        if self._refresh_failed:
+            return "COSINE EVIDENCE UNAVAILABLE · Durable evidence refresh failed. Refresh to retry."
+        if self._projection is None:
+            return "COSINE EVIDENCE UNAVAILABLE · Durable evidence has not been loaded."
+        if not self._projection.available:
+            return "COSINE EVIDENCE UNAVAILABLE · " + self._projection.status_message
+        return "No captured COSINE episodes." if not self._projection.episodes else "Recorded evidence available."
+
+
+    @property
+    def episodes(self):
+        return self._projection.episodes if self.evidence_available else ()
+
+
+    @property
+    def current(self):
+        """Recent DURABLE episode, independently of live facts and Deep selection."""
+        return self._projection.latest_or_selected_recent_episode if self.evidence_available else None
+
+
+    @property
+    def selected_episode(self):
+        return next((episode for episode in self.episodes
+                     if (episode.cosine_session_id, episode.generation) == self._selected_episode_key), None)
+
+
+    def select_episode(self, key: tuple) -> None:
+        if any((episode.cosine_session_id, episode.generation) == key for episode in self.episodes):
+            self._selected_episode_key = key
+
+
+    def render_projection(self, projection: object) -> None:
+        self._projection = projection
+        self._refresh_failed = False
+        if self.selected_episode is None:
+            recent = self.current
+            self._selected_episode_key = (recent.cosine_session_id, recent.generation) if recent else None
+        self._render_durable()
+
+
+    def show_refresh_failure(self) -> None:
+        # Withhold stale history and counts; the live banner remains independent.
+        self._refresh_failed = True
+        self._render_durable()
+
+
+    def _render_durable(self) -> None:
+        for slot in (self._hold_slot, self._metric_slot, self._two_col_slot, self._flow_slot):
+            self._clear(slot)
+        self._render_banner()
+        self._render_metrics()
+        recent = self.current
+        if recent is not None:
+            self._two_col_slot.addWidget(self._build_two_column(recent))
+            self._flow_slot.addWidget(self._build_flow_card(recent))
+        if self._overlay.isVisible():
+            self._overlay.refresh_body()
+            self._overlay._backdrop = self._overlay._grab_blurred()
+            self._overlay.update()
+
+    def apply_theme(self, _tokens) -> None:
+        """Rebuild presentation from held facts only; never trigger a read."""
+        scroll = self._scroll.verticalScrollBar().value()
+        old = self._overlay
+        opened, active = old.isVisible(), old._active
+        deep_scroll = old._body.verticalScrollBar().value()
+        old.close_overlay()
+        old.setParent(None)
+        old.deleteLater()
+        self._wrap.removeWidget(self._topline)
+        self._topline.setParent(None)
+        self._topline.deleteLater()
+        self._topline = self._build_topline()
+        self._wrap.insertWidget(0, self._topline)
+        self._overlay = CosineDeepAnalysisDialog(self)
+        self._overlay._active = active
+        self._render_durable()
+        self.set_refreshing(self._refreshing)
+        self._scroll.verticalScrollBar().setValue(scroll)
+        if opened:
+            self._overlay.open_overlay()
+            self._overlay._body.verticalScrollBar().setValue(deep_scroll)
 
 
 class ControlPage(QWidget):
@@ -5631,25 +8915,22 @@ class ControlPage(QWidget):
         sine_body.addLayout(sine_grid)
         left.addWidget(sine)
 
-        # -------------------------------------------------- MINE Continuity
-        mine, mine_body = make_card()
-        head, self._mine_hint = card_head("MINE Continuity", "Inactive")
-        mine_body.addWidget(head)
-        mine_body.addSpacing(16)
-        mine_row = QHBoxLayout()
-        mine_row.setSpacing(14)
-        source, self._mine_source = stat_box("Source", "\u2014", "text", 16.0)
-        elapsed, self._mine_elapsed = stat_box(
-            "Elapsed / Threshold", "\u2014 / 15:00", "text", 16.0
-        )
-        state, self._mine_state = stat_box("State", "Inactive", "text", 16.0)
-        for widget in (source, elapsed, state):
-            mine_row.addWidget(widget, 1)
-        mine_body.addLayout(mine_row)
-        mine_body.addSpacing(12)
-        lock_row, self._mine_track, self._mine_value = bar_row("Lock progress")
-        mine_body.addWidget(lock_row)
-        left.addWidget(mine)
+        # -------------------------------------------------------- COSINE Live
+        # Phase 1I: COSINE gets its own organ on the Control page, between the
+        # SINE stage above it and the (unbuilt) MINE card below, so the visible
+        # order matches the real organ order.  It is fed by the existing
+        # ``cosine_live_status_changed`` signal via ``render_cosine`` -- this
+        # page neither polls COSINE nor holds a COSINE clock.
+        self._cosine_live_card = CosineLiveCard()
+        left.addWidget(self._cosine_live_card)
+
+        # ------------------------------------------------------- MINE Live
+        # Phase 4 Case B: MINE gets the same card language as COSINE Live so
+        # the visible organ order/structure matches. It is fed by the
+        # existing ``mine_watch_status_changed`` signal via ``render_mine`` --
+        # this page neither polls MINE nor holds a MINE clock.
+        self._mine_live_card = MineLiveCard()
+        left.addWidget(self._mine_live_card)
 
         # ---------------------------------------------------------- Research
         research, research_body = make_card()
@@ -5668,7 +8949,15 @@ class ControlPage(QWidget):
         left.addWidget(research)
         left.addStretch(1)
 
-        for card in (health, current, normal_break, sine, mine, research):
+        for card in (
+            health,
+            current,
+            normal_break,
+            sine,
+            self._cosine_live_card,
+            self._mine_live_card,
+            research,
+        ):
             card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         # --------------------------------------------------- Live Telemetry
@@ -5679,7 +8968,65 @@ class ControlPage(QWidget):
         feed_body.addSpacing(16)
         self._feed = FeedList(feed_card)
         feed_body.addWidget(self._feed, 1)
-        right.addWidget(feed_card, 1)
+        right.addWidget(feed_card, 3)
+
+        # ----------------------------------------------- Handover Telemetry
+        # Phase V: visual shell only.  Every handle below is a presentation
+        # widget -- no signal connection, no timer, no organ import.  Values
+        # stay at their neutral placeholders until an approved Phase W wires
+        # factual Monitor telemetry into these same handles.
+        handover_card, handover_body = make_card()
+        self._handover_card = handover_card
+        head, self._handover_hint = card_head(
+            "Handover Telemetry", "Awaiting telemetry"
+        )
+        handover_body.addWidget(head)
+        handover_body.addSpacing(16)
+
+        truth_grid = QGridLayout()
+        truth_grid.setHorizontalSpacing(24)
+        truth_grid.setVerticalSpacing(6)
+        self._handover_territory = self._metric_value(
+            truth_grid, 0, "Monitor territory"
+        )
+        self._handover_relationship = self._metric_value(
+            truth_grid, 1, "Relationship"
+        )
+        self._handover_relationship.setFont(make_font(12.5, 400, mono=True))
+        self._handover_relationship.setText("— → —")
+        self._handover_state = self._metric_value(truth_grid, 2, "State")
+        handover_body.addLayout(truth_grid)
+        handover_body.addSpacing(12)
+
+        continuity_row, self._handover_track, self._handover_time_value = bar_row(
+            "Continuity", "cyan"
+        )
+        self._handover_time_value.setFixedWidth(96)
+        self._handover_time_value.setText("--:-- / --:--")
+        handover_body.addWidget(continuity_row)
+        handover_body.addSpacing(12)
+
+        authority_grid = QGridLayout()
+        authority_grid.setHorizontalSpacing(24)
+        authority_grid.setVerticalSpacing(6)
+        authority_grid.addWidget(label("Study authority", 11.5, 400, "muted"), 0, 0)
+        self._handover_study_authority = label("—", 12.5, 400, "text", mono=True)
+        authority_grid.addWidget(self._handover_study_authority, 0, 1)
+        authority_grid.addWidget(label("Global pause", 11.5, 400, "muted"), 0, 2)
+        self._handover_global_pause = label("—", 12.5, 400, "text", mono=True)
+        authority_grid.addWidget(self._handover_global_pause, 0, 3)
+        handover_body.addLayout(authority_grid)
+        handover_body.addSpacing(14)
+
+        self._handover_feed_hint = label(
+            "Recent family signals", 11, 400, "muted", spacing=1.0, upper=True
+        )
+        handover_body.addWidget(self._handover_feed_hint)
+        handover_body.addSpacing(8)
+        self._handover_feed = FeedList(handover_card)
+        handover_body.addWidget(self._handover_feed, 1)
+
+        right.addWidget(handover_card, 2)
 
         root.addLayout(left, 100)
         root.addLayout(right, 105)
@@ -5789,6 +9136,15 @@ class ControlPage(QWidget):
 
         self._feed.append(time_text=time_text, text=text, tag=tag, tone=tone)
         self._feed_count.setText(f"{self._feed.count} events")
+
+    def append_handover_signal(
+        self, *, time_text: str, text: str, tag: str, tone: str = ""
+    ) -> None:
+        """Append one Monitor-prepared family row to the existing W1 feed."""
+
+        self._handover_feed.append(
+            time_text=time_text, text=text, tag=tag, tone=tone
+        )
 
     def render_normal_break_fact(self, fact: object) -> None:
         """Project immutable Normal Break facts without owning their lifecycle."""
@@ -5938,28 +9294,75 @@ class ControlPage(QWidget):
             if episodes is not None:
                 self._stat_episodes.setText(str(episodes))
 
-        cosine = self._value(payload, "cosine")
-        if cosine is not None:
-            platform = str(self._value(cosine, "current_platform_label", "") or "").strip()
-            seconds = self._value(cosine, "current_platform_seconds", 0.0)
-            if platform:
-                self._mine_source.setText(platform)
-                self._mine_state.setText("Active")
-                self._mine_hint.setText("Active")
-                self._mine_elapsed.setText(f"{self._format_seconds(seconds)} / 15:00")
-                try:
-                    lock = min(1.0, max(0.0, float(seconds or 0.0) / 900.0))
-                except (TypeError, ValueError):
-                    lock = 0.0
-                self._mine_track.set_progress(lock)
-                self._mine_value.setText(f"{int(round(lock * 100))}%")
-            else:
-                self._mine_source.setText("\u2014")
-                self._mine_state.setText("Inactive")
-                self._mine_hint.setText("Inactive")
-                self._mine_elapsed.setText("\u2014 / 15:00")
-                self._mine_track.set_progress(0.0)
-                self._mine_value.setText("0%")
+        # Dedicated specialist signals feed COSINE and MINE below.  This
+        # composite view never becomes a second timing authority.
+
+    def render_cosine(self, snapshot: object) -> None:
+        """Render the newest ``CosineSnapshot`` into the COSINE LIVE card.
+
+        Transport only: the card formats backend truth and owns no clock.  A
+        ``None`` snapshot (session stop/reset) returns it to inactive so no
+        stale COSINE reading can outlive the episode that produced it.
+        """
+
+        self._cosine_live_card.render(snapshot)
+
+    def render_handover(self, payload: object) -> None:
+        """Render the prepared Mr Hand view without owning a clock or decision."""
+
+        if payload is None:
+            self._handover_territory.setText("—")
+            self._handover_relationship.setText("— → —")
+            self._handover_state.setText("—")
+            self._handover_time_value.setText("--:-- / --:--")
+            self._handover_track.set_progress(0.0)
+            self._handover_study_authority.setText("—")
+            self._handover_global_pause.setText("—")
+            self._handover_hint.setText("Awaiting telemetry")
+            return
+
+        handover = self._value(payload, "handover")
+        territory = str(self._value(payload, "territory", "") or "—")
+        active = bool(self._value(handover, "active", False))
+        paused = bool(self._value(handover, "paused", False))
+        source = str(self._value(handover, "source", "") or "—")
+        target = str(self._value(handover, "target", "") or "—")
+        elapsed = self._value(handover, "elapsed_seconds")
+        total = self._value(handover, "total_seconds")
+        progress = self._value(handover, "progress_fraction", 0.0)
+        study_authority = bool(self._value(payload, "study_authority", False))
+        global_pause = bool(self._value(payload, "global_pause", False))
+
+        if not active:
+            relationship = "— → —"
+            state = "IDLE"
+        else:
+            relationship = f"{source} → {target}"
+            state = "FROZEN" if paused else f"HANDING OVER TO {target}"
+
+        self._handover_territory.setText(territory)
+        self._handover_relationship.setText(relationship)
+        self._handover_state.setText(state)
+        self._handover_time_value.setText(
+            f"{self._format_seconds(elapsed)} / {self._format_seconds(total)}"
+        )
+        self._handover_track.set_progress(progress)
+        self._handover_study_authority.setText("ON" if study_authority else "OFF")
+        self._handover_global_pause.setText("ON" if global_pause else "OFF")
+        self._handover_hint.setText(
+            "Frozen" if active and paused else "Active" if active else "Idle"
+        )
+
+    def render_mine(self, snapshot: object) -> None:
+        """Project one immutable MineSnapshot; never advance a local clock.
+
+        Phase 4 Case B: the presentation itself moved into ``MineLiveCard``
+        (the COSINE-Live-shaped card), which is the same read-only, timer-
+        free projection this method always was. This stays the one public
+        entry point the ``mine_watch_status_changed`` signal calls.
+        """
+
+        self._mine_live_card.render(snapshot)
 
     def render_today_session_health(self, snapshot: object) -> None:
         """Place three already-calculated Today Health integers into labels.
@@ -6728,8 +10131,11 @@ class ControlStationWindow(QMainWindow):
                 notes_workspace=self.notes_workspace,
                 note_store=self.storage,
             ),
-            # Showcase visual body; Metric Hub and COSINE are still fixture
-            # surfaces, reconnected in a later approved phase.  Live MIRL is
+            # Showcase visual body; Metric Hub is still a fixture surface,
+            # reconnected in a later approved phase.  COSINE is no longer one:
+            # Phase 1I makes its destination a live current-episode surface fed
+            # by the engine's own snapshot, and ``CosineShowcasePage`` below is
+            # now unreachable reference-only donor code.  Live MIRL is
             # now wired to the real read model: it is registered on the SAME
             # shared refresh lane the analytics pages use, so navigating to
             # it triggers exactly one coalesced projection read and no second
@@ -6743,7 +10149,9 @@ class ControlStationWindow(QMainWindow):
                 "MINE",
                 "Messaging Intervention Nudge Escalation",
             ),
-            cosine=CosineShowcasePage(),
+            # CosineLivePage is wired to the shared durable COSINE read model;
+            # CURRENT arrives independently through the live COSINE signal.
+            cosine=self.analytics._create_page(PAGE_COSINE, CosineLivePage),
         )
 
         self.page_stack = QStackedWidget(self)
@@ -6788,7 +10196,13 @@ class ControlStationWindow(QMainWindow):
         self.sidebar.settings_requested.connect(self._open_settings)
         self.settings.changed.connect(self._settings_changed)
 
-        self.navigation.page_opened.connect(self.analytics.page_opened)
+        # I-061.  Navigation reaches analytics through a filter, not directly.
+        # PAGE_COSINE is a Phase-1I live-snapshot surface now, and the analytics
+        # bundle it used to request still projects the OLD COSINE read model
+        # (PERSISTENCE.storage.read_control_station_analytics imports
+        # COSINE.report.CosineReadAuthority).  Opening the NEW live page must
+        # not silently execute that old route.
+        self.navigation.page_opened.connect(self._analytics_page_opened)
         self.navigation.page_opened.connect(self.settings.set_last_page)
         self.lifecycle.navigation_enabled.connect(self.navigation.set_enabled)
         self.lifecycle.exit_authorized.connect(self._finish_shutdown)
@@ -6804,6 +10218,27 @@ class ControlStationWindow(QMainWindow):
         # interpret or recalculate any telemetry value.
         self.engine.control_view_changed.connect(self.pages.control.render)
         self.engine.sine_watch_status_changed.connect(self.pages.control.render_sine)
+        # Phase 1I: COSINE's two presentation surfaces subscribe to the ONE
+        # existing live signal the controller already coalesces in place.  No
+        # new poller, worker, timer or database read is created, and neither
+        # subscriber is an authority -- both simply format the same snapshot.
+        # ``EngineController`` emits None on stop/reset, which returns both
+        # views to their factual inactive state.
+        self.engine.cosine_live_status_changed.connect(
+            self.pages.control.render_cosine
+        )
+        self.engine.cosine_live_status_changed.connect(
+            self.pages.cosine.render_live_view
+        )
+        self.engine.handover_live_status_changed.connect(
+            self.pages.control.render_handover
+        )
+        self.engine.handover_family_signal_received.connect(
+            self._append_handover_signal
+        )
+        self.engine.mine_watch_status_changed.connect(
+            self.pages.control.render_mine
+        )
         # Live MIRL's "Episode Active" badge must read the running engine,
         # not be inferred from the read model's history -- see ruling
         # 3.1/4.2 (myelin-mirl-live-signal-roadmap memory). The other four
@@ -6825,6 +10260,8 @@ class ControlStationWindow(QMainWindow):
         # uses (AnalyticsController._create_page wires refresh_requested to
         # the real refresh); this is not a second refresh mechanism.
         self.engine.engine_stopped.connect(self.pages.live_mirl.refresh_requested.emit)
+        self.engine.engine_stopped.connect(lambda: self.pages.cosine.render_live_view(None))
+        self.engine.engine_stopped.connect(self.pages.cosine.refresh_requested.emit)
         # Session No. (and, so the three live readouts never disagree, the
         # episode badge and SINE Stage too) must not sit on a frozen number
         # left over from before Stop was pressed. The 5s staleness timeout
@@ -6863,6 +10300,10 @@ class ControlStationWindow(QMainWindow):
         # Health read so the card cannot remain permanently at Loading when
         # Control is already the restored page.
         self.analytics.request_today_session_health_refresh()
+
+    def _analytics_page_opened(self, page_name: str) -> None:
+        """All analytics destinations use the existing coalesced reader lane."""
+        self.analytics.page_opened(page_name)
 
     def _restore_preferences(self) -> None:
         """Restore normal UI preferences without restoring a SINE stage."""
@@ -6920,6 +10361,18 @@ class ControlStationWindow(QMainWindow):
             return parsed.strftime("%H:%M:%S")
         except (TypeError, ValueError, TimezoneProjectionError):
             return "--:--:--"
+
+    def _append_handover_signal(self, raw: object) -> None:
+        """Format one prepared family signal using the existing activity clock."""
+
+        if not isinstance(raw, Mapping):
+            return
+        self.pages.control.append_handover_signal(
+            time_text=self._activity_time(str(raw.get("time", "") or "")),
+            text=str(raw.get("feed_text", raw.get("message", "")) or ""),
+            tag=str(raw.get("badge", "") or ""),
+            tone=str(raw.get("tone", "") or ""),
+        )
 
     @staticmethod
     def _activity_title(app: str, title: str) -> str:
@@ -7038,6 +10491,7 @@ class ControlStationWindow(QMainWindow):
         ShowcaseScatter,
         StudyRing,
         _ShowcaseArrow,
+        CosineLivePage,
     )
 
     def _apply_theme(self, theme) -> None:

@@ -983,11 +983,17 @@ class EngineStorage:
         batch = tuple(events)
         if not batch:
             return True
-        session_ids = {str(_field(event, "cosine_session_id", "")) for event in batch}
+        raw_parent_session_ids = [_field(event, "session_id") for event in batch]
+        if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in raw_parent_session_ids):
+            return False
+        parent_session_ids = set(raw_parent_session_ids)
+        cosine_session_ids = {str(_field(event, "cosine_session_id", "")) for event in batch}
         generations = {int(_field(event, "generation", 0) or 0) for event in batch}
         event_ids = [str(_field(event, "event_id", "")) for event in batch]
         sequences = [int(_field(event, "sequence", 0) or 0) for event in batch]
-        if len(session_ids) != 1 or "" in session_ids:
+        if len(parent_session_ids) != 1:
+            return False
+        if len(cosine_session_ids) != 1 or "" in cosine_session_ids:
             return False
         if len(generations) != 1 or 0 in generations:
             return False
@@ -995,15 +1001,23 @@ class EngineStorage:
             return False
         if sequences != list(range(sequences[0], sequences[0] + len(sequences))):
             return False
-        session_id = next(iter(session_ids))
+        parent_session_id = next(iter(parent_session_ids))
+        cosine_session_id = next(iter(cosine_session_ids))
         generation = next(iter(generations))
 
         def write(connection):
-            existing = connection.execute(
-                "SELECT generation, MAX(sequence) AS max_sequence FROM cosine_events WHERE cosine_session_id=?",
-                (session_id,),
-            ).fetchone()
+            existing_rows = connection.execute(
+                "SELECT session_id, generation, MAX(sequence) AS max_sequence "
+                "FROM cosine_events WHERE cosine_session_id=? "
+                "GROUP BY session_id, generation",
+                (cosine_session_id,),
+            ).fetchall()
+            if len(existing_rows) > 1:
+                raise RuntimeError("COSINE durable episode has conflicting identity")
+            existing = existing_rows[0] if existing_rows else None
             if existing is not None and existing["max_sequence"] is not None:
+                if existing["session_id"] is None or int(existing["session_id"]) != parent_session_id:
+                    raise RuntimeError("COSINE parent session changed inside one durable episode")
                 if int(existing["generation"]) != generation:
                     raise RuntimeError("COSINE generation changed inside one durable session")
                 expected = int(existing["max_sequence"]) + 1
@@ -1013,11 +1027,12 @@ class EngineStorage:
                 raise RuntimeError("COSINE event sequence is not contiguous")
             for event in batch:
                 connection.execute(
-                    "INSERT INTO cosine_events(event_id, cosine_session_id, generation, sequence, event_name, event_class, occurred_at_utc, monotonic_ns, platform_key, content_title, request_id, evidence_token, payload_json, schema_version) "
-                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO cosine_events(event_id, session_id, cosine_session_id, generation, sequence, event_name, event_class, occurred_at_utc, monotonic_ns, platform_key, content_title, request_id, evidence_token, payload_json, schema_version) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         str(_field(event, "event_id", "")),
-                        session_id,
+                        parent_session_id,
+                        cosine_session_id,
                         generation,
                         int(_field(event, "sequence", 0)),
                         str(_field(event, "event_name", "")),
@@ -1035,6 +1050,84 @@ class EngineStorage:
             return TransactionResult()
 
         receipt = _terminal(self._lane, self._submit("append COSINE event batch", write))
+        return receipt.state is ReceiptState.COMMITTED
+
+    def append_mine_events(self, events) -> bool:
+        """Commit one contiguous MINE generation batch on the shared lane.
+
+        Candidate facts legitimately precede a formal ``mine_episode_id``.
+        Continuity is therefore parent-session + generation + sequence; the
+        episode identity is descriptive and may change from empty to formal
+        within that one stream.
+        """
+
+        batch = tuple(events)
+        if not batch:
+            return True
+        raw_parent_ids = [_field(event, "parent_session_id") for event in batch]
+        raw_generations = [_field(event, "generation") for event in batch]
+        raw_sequences = [_field(event, "sequence") for event in batch]
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in (*raw_parent_ids, *raw_generations, *raw_sequences)
+        ):
+            return False
+        parent_ids = set(raw_parent_ids)
+        generations = set(raw_generations)
+        event_ids = [str(_field(event, "event_id", "") or "") for event in batch]
+        sequences = list(raw_sequences)
+        if len(parent_ids) != 1 or len(generations) != 1:
+            return False
+        if len(event_ids) != len(set(event_ids)) or any(not value for value in event_ids):
+            return False
+        if sequences != list(range(sequences[0], sequences[0] + len(sequences))):
+            return False
+        parent_id = next(iter(parent_ids))
+        generation = next(iter(generations))
+
+        def write(connection):
+            parent = connection.execute(
+                "SELECT id FROM sessions WHERE id=?", (parent_id,)
+            ).fetchone()
+            if parent is None:
+                raise RuntimeError("MINE parent session is not durable")
+            existing = connection.execute(
+                "SELECT MAX(sequence) AS max_sequence FROM mine_events "
+                "WHERE session_id=? AND generation=?",
+                (parent_id, generation),
+            ).fetchone()
+            expected = (
+                int(existing["max_sequence"]) + 1
+                if existing is not None and existing["max_sequence"] is not None
+                else 1
+            )
+            if sequences[0] != expected:
+                raise RuntimeError("MINE event sequence is not contiguous")
+            for event in batch:
+                connection.execute(
+                    "INSERT INTO mine_events(event_id, session_id, mine_episode_id, generation, sequence, event_name, event_class, occurred_at_utc, monotonic_ns, platform_key, platform_label, request_id, evidence_token, payload_json, schema_version) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(_field(event, "event_id", "")),
+                        parent_id,
+                        str(_field(event, "mine_episode_id", "")),
+                        generation,
+                        int(_field(event, "sequence", 0)),
+                        str(_field(event, "event_name", "")),
+                        str(_enum_value(_field(event, "event_class", ""))),
+                        str(_field(event, "occurred_at_utc", "")),
+                        int(_field(event, "monotonic_ns", 0)),
+                        str(_field(event, "platform_key", "")),
+                        str(_field(event, "platform_label", "")),
+                        str(_field(event, "request_id", "")),
+                        str(_field(event, "evidence_token", "")),
+                        str(_field(event, "payload_json", "{}")),
+                        str(_field(event, "schema_version", "")),
+                    ),
+                )
+            return TransactionResult()
+
+        receipt = _terminal(self._lane, self._submit("append MINE event batch", write))
         return receipt.state is ReceiptState.COMMITTED
 
     def append_mirl_events(self, events) -> bool:
@@ -1491,6 +1584,7 @@ def read_cosine_events():
     return tuple(
         CosineEvent(
             event_id=str(row["event_id"]),
+            session_id=(int(row["session_id"]) if row["session_id"] is not None else None),
             cosine_session_id=str(row["cosine_session_id"]),
             sequence=int(row["sequence"]),
             event_name=str(row["event_name"]),
@@ -1787,7 +1881,7 @@ def export_mirl_report(
 def read_control_station_analytics(
     presentation_timezone: str = "local",
 ) -> ControlStationAnalyticsSnapshot:
-    from COSINE.report import CosineReadAuthority
+    from COSINE.read_model import CosineReadAuthority
 
     mirl = read_mirl_snapshot(presentation_timezone)
 
@@ -1795,7 +1889,7 @@ def read_control_station_analytics(
         def read_cosine_events(self):
             return read_cosine_events()
 
-    cosine = CosineReadAuthority(event_reader=_CosineReader()).project()
+    cosine = CosineReadAuthority(event_reader=_CosineReader()).project(presentation_timezone)
     return ControlStationAnalyticsSnapshot(
         metric_hub=mirl.metric_hub,
         science_lab=mirl.science_lab,
@@ -1803,6 +1897,29 @@ def read_control_station_analytics(
         cosine=cosine,
         generated_at_utc=_utc_now(),
     )
+
+
+def export_cosine_report(presentation_timezone: str = "local") -> str:
+    """Write one NEW COSINE two-page PDF report and return its path.
+
+    Shares the same certified analytics route ``read_control_station_
+    analytics`` already uses -- the report never opens a second reader and
+    never touches the OLD COSINE.report projection. Written to a temporary
+    name and moved into place, matching ``export_mirl_report``.
+    """
+
+    from COSINE.report import CosinePdfReportRequest, build_cosine_report_pdf
+
+    snapshot = read_control_station_analytics(presentation_timezone)
+    downloads = Path.home() / "Downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    pdf_path = downloads / f"MYELIN_COSINE_Report_{stamp}.pdf"
+    build_cosine_report_pdf(
+        snapshot.cosine,
+        CosinePdfReportRequest(output_path=pdf_path, overwrite=True),
+    )
+    return str(pdf_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1907,6 +2024,7 @@ __all__ = [
     "ReportExportRefused",
     "ControlStationAnalyticsSnapshot",
     "MIRL_EXPORT_FORMATS",
+    "export_cosine_report",
     "export_mirl_report",
     "emergency_followup_required",
     "export_analytics_sheet",

@@ -806,7 +806,8 @@ class MirlAuthority:
                 pending_display=pending is not None,
                 pending_candidate_uid=pending.candidate_uid if pending else "",
                 pending_display_seconds=(
-                    max(0.0, (pending.deadline_monotonic_ns - now_ns) / NANOSECONDS_PER_SECOND)
+                    max(0.0, (self._pending_display_effective_deadline(self._pending, now_ns)
+                              - now_ns) / NANOSECONDS_PER_SECOND)
                     if pending
                     else None
                 ),
@@ -902,7 +903,8 @@ class MirlAuthority:
             and token.session_id == session_id == self._session_id
             and token.candidate_uid == candidate_uid
             and token.operational_event_id == operational_event_id
-            and token.issued_monotonic_ns <= now_ns <= token.deadline_monotonic_ns
+            and token.issued_monotonic_ns
+            <= now_ns <= self._pending_display_effective_deadline(pending, now_ns)
         )
         if not valid:
             self._emit_without_episode(
@@ -1092,9 +1094,13 @@ class MirlAuthority:
         self._pending = None
         self._phase = MirlPhase.IDLE
 
+    @staticmethod
+    def _pending_display_effective_deadline(pending: _PendingTrigger, now_ns: int) -> int:
+        return pending.token.deadline_monotonic_ns
+
     def _expire_pending_display(self, now_ns: int) -> None:
         pending = self._pending
-        if pending is None or now_ns < pending.token.deadline_monotonic_ns:
+        if pending is None or now_ns < self._pending_display_effective_deadline(pending, now_ns):
             return
         token = pending.token
         self._emit_without_episode(

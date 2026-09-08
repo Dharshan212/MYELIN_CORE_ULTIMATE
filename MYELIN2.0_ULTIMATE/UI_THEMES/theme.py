@@ -62,6 +62,20 @@ class ThemeTokens:
 NEON_THEME: Final = ThemeTokens()
 DEFAULT_THEME: Final = NEON_THEME
 
+# ---------- telemetry badge separation (presentation only) ----------
+# OTT and COSINE both reach the feed carrying Monitor's tone "cyan", and
+# "cyan" is the slot every world repaints with its own accent.  Two rows
+# that mean different things therefore read as one colour in Live Telemetry.
+# These two values are owned by the badge strings alone.  They are
+# deliberately NOT ThemeTokens fields: no world can vary them, and nothing
+# SINE, DWELL, ACTIVITY or any other organ reads can be reached by changing
+# them.  They decide appearance only -- never what generates either row.
+FEED_BADGE_OTT: Final = "#3949AB"
+FEED_BADGE_COSINE: Final = "#14B8A6"
+FEED_BADGE_HANDOVER: Final = "#64748B"
+FEED_BADGE_MONITOR: Final = "#2563EB"
+FEED_BADGE_STUDY: Final = "#16A34A"
+
 # Base themes differ only in background/surface/text/accent/border tokens.
 # The semantic fields (red/red_dim/amber/green/green_dim/violet) keep the
 # Neon defaults on every world: Start stays green, Pause stays amber, Stop
@@ -579,6 +593,24 @@ QLabel#feedTag[tone="amber"] {{ color: {amber}; background: {alpha(amber, 0.12)}
 QLabel#feedTag[tone="red"]   {{ color: {red};   background: {alpha(red, 0.12)}; }}
 QLabel#feedTag[tone="green"] {{ color: {green}; background: {alpha(green, 0.12)}; }}
 QLabel#feedTag[tone="violet"] {{ color: {violet}; background: {alpha(violet, 0.14)}; }}
+/* Badge-specific separation.  Same selector specificity as the tone rules
+   above and declared after them, so an OTT or COSINE row claims its own
+   colour while every other badge keeps exactly the tone it has always had. */
+QLabel#feedTag[badge="OTT"] {{
+    color: {FEED_BADGE_OTT}; background: {alpha(FEED_BADGE_OTT, 0.12)};
+}}
+QLabel#feedTag[badge="COSINE"] {{
+    color: {FEED_BADGE_COSINE}; background: {alpha(FEED_BADGE_COSINE, 0.12)};
+}}
+QLabel#feedTag[badge="HANDOVER"] {{
+    color: {FEED_BADGE_HANDOVER}; background: {alpha(FEED_BADGE_HANDOVER, 0.12)};
+}}
+QLabel#feedTag[badge="MONITOR"] {{
+    color: {FEED_BADGE_MONITOR}; background: {alpha(FEED_BADGE_MONITOR, 0.12)};
+}}
+QLabel#feedTag[badge="STUDY"] {{
+    color: {FEED_BADGE_STUDY}; background: {alpha(FEED_BADGE_STUDY, 0.12)};
+}}
 
 /* ---------- showcase hairlines (Metric Hub / Live MIRL / COSINE fixtures) --
    a plain border-only divider; anything with per-instance colour logic

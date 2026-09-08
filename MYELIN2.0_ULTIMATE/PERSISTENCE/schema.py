@@ -8,7 +8,7 @@ from typing import Final
 from PERSISTENCE.database import connect_database
 
 
-SCHEMA_VERSION: Final = 3
+SCHEMA_VERSION: Final = 4
 MANAGED_TABLES: Final = frozenset(
     {
         "myelin_meta",
@@ -18,6 +18,7 @@ MANAGED_TABLES: Final = frozenset(
         "normal_break_events",
         "mirl_events",
         "cosine_events",
+        "mine_events",
         "study_events",
         "cosecant_events",
         "notes",
@@ -100,6 +101,7 @@ CREATE INDEX IF NOT EXISTS ix_mirl_events_session_time
 
 CREATE TABLE IF NOT EXISTS cosine_events (
     event_id TEXT PRIMARY KEY,
+    session_id INTEGER REFERENCES sessions(id),
     cosine_session_id TEXT NOT NULL,
     generation INTEGER NOT NULL CHECK (generation > 0),
     sequence INTEGER NOT NULL CHECK (sequence > 0),
@@ -117,6 +119,27 @@ CREATE TABLE IF NOT EXISTS cosine_events (
 );
 CREATE INDEX IF NOT EXISTS ix_cosine_events_session_sequence
     ON cosine_events(cosine_session_id, generation, sequence);
+
+CREATE TABLE IF NOT EXISTS mine_events (
+    event_id TEXT PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES sessions(id),
+    mine_episode_id TEXT NOT NULL DEFAULT '',
+    generation INTEGER NOT NULL CHECK (generation > 0),
+    sequence INTEGER NOT NULL CHECK (sequence > 0),
+    event_name TEXT NOT NULL,
+    event_class TEXT NOT NULL,
+    occurred_at_utc TEXT NOT NULL,
+    monotonic_ns INTEGER NOT NULL CHECK (monotonic_ns > 0),
+    platform_key TEXT NOT NULL DEFAULT '',
+    platform_label TEXT NOT NULL DEFAULT '',
+    request_id TEXT NOT NULL DEFAULT '',
+    evidence_token TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL,
+    schema_version TEXT NOT NULL,
+    UNIQUE(session_id, generation, sequence)
+);
+CREATE INDEX IF NOT EXISTS ix_mine_events_episode_sequence
+    ON mine_events(mine_episode_id, generation, sequence);
 
 CREATE TABLE IF NOT EXISTS study_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -214,6 +237,153 @@ _PROFILE_LEARNING_COLUMNS: Final = {
     "last_updated_utc": ("TEXT", 1, 0),
     "model_version": ("TEXT", 1, 0),
 }
+
+
+_COSINE_EVENT_COLUMNS: Final = {
+    "event_id": ("TEXT", 0, 1),
+    "session_id": ("INTEGER", 0, 0),
+    "cosine_session_id": ("TEXT", 1, 0),
+    "generation": ("INTEGER", 1, 0),
+    "sequence": ("INTEGER", 1, 0),
+    "event_name": ("TEXT", 1, 0),
+    "event_class": ("TEXT", 1, 0),
+    "occurred_at_utc": ("TEXT", 1, 0),
+    "monotonic_ns": ("INTEGER", 1, 0),
+    "platform_key": ("TEXT", 1, 0),
+    "content_title": ("TEXT", 1, 0),
+    "request_id": ("TEXT", 1, 0),
+    "evidence_token": ("TEXT", 1, 0),
+    "payload_json": ("TEXT", 1, 0),
+    "schema_version": ("TEXT", 1, 0),
+}
+
+
+_MINE_EVENT_COLUMNS: Final = {
+    "event_id": ("TEXT", 0, 1),
+    "session_id": ("INTEGER", 1, 0),
+    "mine_episode_id": ("TEXT", 1, 0),
+    "generation": ("INTEGER", 1, 0),
+    "sequence": ("INTEGER", 1, 0),
+    "event_name": ("TEXT", 1, 0),
+    "event_class": ("TEXT", 1, 0),
+    "occurred_at_utc": ("TEXT", 1, 0),
+    "monotonic_ns": ("INTEGER", 1, 0),
+    "platform_key": ("TEXT", 1, 0),
+    "platform_label": ("TEXT", 1, 0),
+    "request_id": ("TEXT", 1, 0),
+    "evidence_token": ("TEXT", 1, 0),
+    "payload_json": ("TEXT", 1, 0),
+    "schema_version": ("TEXT", 1, 0),
+}
+
+
+def _migrate_cosine_parent_session(connection: sqlite3.Connection) -> None:
+    """Add the nullable parent identity before creating its dependent index."""
+
+    columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(cosine_events)").fetchall()
+    }
+    if not columns:
+        raise RuntimeError("cosine_events table is missing")
+    if "session_id" not in columns:
+        connection.execute(
+            "ALTER TABLE cosine_events "
+            "ADD COLUMN session_id INTEGER REFERENCES sessions(id)"
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS ix_cosine_events_parent_session_sequence "
+        "ON cosine_events(session_id, cosine_session_id, generation, sequence)"
+    )
+
+
+def _index_columns(connection: sqlite3.Connection, name: str) -> tuple[str, ...]:
+    escaped = str(name).replace("'", "''")
+    rows = connection.execute(f"PRAGMA index_info('{escaped}')").fetchall()
+    return tuple(str(row[2]) for row in sorted(rows, key=lambda row: int(row[0])))
+
+
+def _verify_cosine_events(connection: sqlite3.Connection) -> None:
+    rows = connection.execute("PRAGMA table_info(cosine_events)").fetchall()
+    observed = {
+        str(row[1]): (str(row[2]).upper(), int(row[3]), int(row[5]))
+        for row in rows
+    }
+    if observed != _COSINE_EVENT_COLUMNS:
+        raise RuntimeError("cosine_events schema does not match MYELIN 2.0 Phase 1G")
+
+    foreign_keys = connection.execute(
+        "PRAGMA foreign_key_list(cosine_events)"
+    ).fetchall()
+    if not any(
+        str(row[2]) == "sessions"
+        and str(row[3]) == "session_id"
+        and str(row[4]) == "id"
+        for row in foreign_keys
+    ):
+        raise RuntimeError("cosine_events is missing its parent sessions foreign key")
+
+    index_rows = connection.execute("PRAGMA index_list(cosine_events)").fetchall()
+    unique_sequence = any(
+        int(row[2]) == 1
+        and _index_columns(connection, str(row[1]))
+        == ("cosine_session_id", "generation", "sequence")
+        for row in index_rows
+    )
+    if not unique_sequence:
+        raise RuntimeError("cosine_events is missing unique episode sequence protection")
+
+    indexes = {
+        str(row[1]): _index_columns(connection, str(row[1]))
+        for row in index_rows
+    }
+    if indexes.get("ix_cosine_events_parent_session_sequence") != (
+        "session_id",
+        "cosine_session_id",
+        "generation",
+        "sequence",
+    ):
+        raise RuntimeError("cosine_events parent session index is missing or malformed")
+
+
+def _verify_mine_events(connection: sqlite3.Connection) -> None:
+    rows = connection.execute("PRAGMA table_info(mine_events)").fetchall()
+    observed = {
+        str(row[1]): (str(row[2]).upper(), int(row[3]), int(row[5]))
+        for row in rows
+    }
+    if observed != _MINE_EVENT_COLUMNS:
+        raise RuntimeError("mine_events schema does not match MYELIN 2.0 Phase 2")
+
+    foreign_keys = connection.execute(
+        "PRAGMA foreign_key_list(mine_events)"
+    ).fetchall()
+    if not any(
+        str(row[2]) == "sessions"
+        and str(row[3]) == "session_id"
+        and str(row[4]) == "id"
+        for row in foreign_keys
+    ):
+        raise RuntimeError("mine_events is missing its parent sessions foreign key")
+
+    index_rows = connection.execute("PRAGMA index_list(mine_events)").fetchall()
+    if not any(
+        int(row[2]) == 1
+        and _index_columns(connection, str(row[1]))
+        == ("session_id", "generation", "sequence")
+        for row in index_rows
+    ):
+        raise RuntimeError("mine_events is missing unique generation sequence protection")
+    indexes = {
+        str(row[1]): _index_columns(connection, str(row[1]))
+        for row in index_rows
+    }
+    if indexes.get("ix_mine_events_episode_sequence") != (
+        "mine_episode_id",
+        "generation",
+        "sequence",
+    ):
+        raise RuntimeError("mine_events episode index is missing or malformed")
 
 
 def _verify_profile_learning_state(connection: sqlite3.Connection) -> None:
@@ -317,6 +487,9 @@ def ensure_production_schema() -> None:
         # database as upgraded.
         connection.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA_SQL)
         _verify_required_tables(connection)
+        _migrate_cosine_parent_session(connection)
+        _verify_cosine_events(connection)
+        _verify_mine_events(connection)
         _migrate_profile_learning_state_return_latency(connection)
         _verify_profile_learning_state(connection)
         _verify_no_interfering_triggers(connection)
