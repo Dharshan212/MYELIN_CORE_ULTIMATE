@@ -68,7 +68,16 @@ from COSECANT_STUDY_MODE.study_alignment import study_evidence
 # ownership.  ACTIVE Study and its COSECANT break classify factual OTT and
 # Messaging collisions as DISTRACTION and share the existing off-task dwell.
 # Stored v5 verdicts cannot claim those ownership/routing semantics.
-CLASSIFIER_VERSION: Final = "myelin-resource-intent-v6"
+# v7: the Chief-approved Core Focus Catalog v1 adds exact native identities
+# and certified productive web hosts to normal-mode Focus physiology.
+# v8: Operation Resource messaging expansion covers certified Signal, Viber,
+# Weixin/WeChat native identities and the Reddit Chat browser messaging route.
+# v9: successful current weak same-platform URL evidence now replaces previous
+# strong evidence immediately; v8 rows may include that old bounded hold.
+# Unavailable/transient UIA read-failure grace remains unchanged.
+# v10: certified ordinary Reddit browser surfaces are SOCIAL, while Reddit
+# Chat remains MESSAGING.
+CLASSIFIER_VERSION: Final = "myelin-resource-intent-v10"
 OBSERVATION_FRESHNESS_NS: Final = 5_000_000_000
 STUDY_UNCERTAINTY_INTERVAL_SECONDS: Final = 300
 STUDY_UNCERTAINTY_INTERVAL_NS: Final = (
@@ -108,10 +117,22 @@ class ResourceSurface(str, Enum):
     BROWSER_INTERNAL = "browser_internal"
     DOCUMENT = "document"
     LEARNING_APP = "learning_app"
+    WORK_APP = "work_app"
+    FOCUS_WEB = "focus_web"
     MESSAGING = "messaging"
     SOCIAL = "social"
     GAMING = "gaming"
     COSINE = "cosine"
+
+
+NORMAL_FOCUS_SURFACES: Final = frozenset(
+    {
+        ResourceSurface.DOCUMENT,
+        ResourceSurface.LEARNING_APP,
+        ResourceSurface.WORK_APP,
+        ResourceSurface.FOCUS_WEB,
+    }
+)
 
 
 class IntentReason(str, Enum):
@@ -562,19 +583,43 @@ _BROWSER_PROCESSES: Final = frozenset(
     {"chrome", "msedge", "brave", "opera", "opera_gx", "vivaldi"}
 )
 _DOCUMENT_PROCESSES: Final = frozenset(
-    {"winword", "powerpnt", "acrord32", "sumatrapdf"}
+    {
+        "winword",
+        "excel",
+        "powerpnt",
+        "onenote",
+        "zotero",
+        "scrivener",
+        "obsidian",
+        "acrord32",
+        "sumatrapdf",
+    }
 )
 _LEARNING_PROCESSES: Final = frozenset(
-    {"anki", "code", "pycharm64", "jupyter", "matlab"}
+    {"anki", "code", "devenv", "pycharm64", "jupyter", "matlab", "rstudio"}
+)
+_WORK_PROCESSES: Final = frozenset(
+    {
+        "ultimaker-cura",
+        "prusa-slicer",
+        "fusion360",
+        "sldworks",
+        "runwb2",
+        "acad",
+        "pcbnew",
+        "photoshop",
+        "fl64",
+    }
 )
 _MESSAGING_PROCESSES: Final = frozenset(
-    {"whatsapp", "discord", "telegram", "slack", "teams", "ms-teams"}
+    {"whatsapp", "discord", "telegram", "slack", "teams", "ms-teams", "signal", "viber", "weixin"}
 )
 # Exact proven Windows process-name variants that are the same native app as
 # their canonical key.  Alias lookup only -- never a substring/startswith
 # match -- so a lookalike process (e.g. "whatsapp.fake") is never admitted.
 _NATIVE_PROCESS_ALIASES: Final = {
     "whatsapp.root": "whatsapp",
+    "code - insiders": "code",
 }
 _SOCIAL_PROCESSES: Final = frozenset(
     {"instagram", "facebook", "reddit", "tiktok", "twitter"}
@@ -584,6 +629,9 @@ _GAMING_PROCESSES: Final = frozenset(
 )
 _SOCIAL_BROWSER_PLATFORMS: Final = frozenset(
     {"instagram", "facebook", "snapchat", "tiktok", "twitch", "x"}
+)
+_CORE_FOCUS_WEB_PLATFORMS: Final = frozenset(
+    {"overleaf", "coursera", "edx", "brilliant"}
 )
 
 _SAFE_STUDY_PHRASES: Final = (
@@ -771,6 +819,11 @@ def _surface_from_browser(observation: ResourceObservation) -> ResourceSurface:
         return ResourceSurface.YOUTUBE_OTHER
     if kind == UrlEvidenceKind.CONFIRMED_MESSAGING_PAGE.value:
         return ResourceSurface.MESSAGING
+    if (
+        platform in _CORE_FOCUS_WEB_PLATFORMS
+        and kind == UrlEvidenceKind.CONFIRMED_PRODUCTIVE_PAGE.value
+    ):
+        return ResourceSurface.FOCUS_WEB
     if kind in {
         UrlEvidenceKind.CONFIRMED_STATIC_ENTRY.value,
         UrlEvidenceKind.CONFIRMED_PRODUCTIVE_PAGE.value,
@@ -849,6 +902,8 @@ def build_resource_identity(observation: ResourceObservation) -> ResourceIdentit
         surface = ResourceSurface.DOCUMENT
     elif process in _LEARNING_PROCESSES:
         surface = ResourceSurface.LEARNING_APP
+    elif process in _WORK_PROCESSES:
+        surface = ResourceSurface.WORK_APP
     else:
         surface = ResourceSurface.UNKNOWN
 
@@ -2448,6 +2503,7 @@ __all__ = (
     "AllowanceResult",
     "IntentReason",
     "IntentVerdict",
+    "NORMAL_FOCUS_SURFACES",
     "ResourceIntentFact",
     "ResourceIdentity",
     "ResourceIntent",

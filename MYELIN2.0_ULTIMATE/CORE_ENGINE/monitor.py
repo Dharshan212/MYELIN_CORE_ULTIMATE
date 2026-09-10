@@ -103,6 +103,14 @@ MESSAGING_PROCESS_LABELS: Final = {
     "slack": "Slack",
     "teams": "Microsoft Teams",
     "ms-teams": "Microsoft Teams",
+    "signal": "Signal",
+    "viber": "Viber",
+    "weixin": "WeChat",
+    "instagram": "Instagram",
+    "facebook": "Facebook",
+    "linkedin": "LinkedIn",
+    "x": "X",
+    "reddit": "Reddit",
 }
 
 #: Phase 4 Case B locked badge system.  MINE (red) = escalation/messaging-
@@ -1936,12 +1944,12 @@ class WindowsMonitorCoordinator:
 
     @staticmethod
     def _handover_exit_reason(context: MonitorContext) -> str:
-        from CORE_ENGINE.resource_intent import ResourceSurface
+        from CORE_ENGINE.resource_intent import NORMAL_FOCUS_SURFACES
 
         verdict = _field(context.resource_intent, "verdict")
         identity = _field(verdict, "resource_identity")
         surface = _field(identity, "surface")
-        if surface in {ResourceSurface.DOCUMENT, ResourceSurface.LEARNING_APP}:
+        if surface in NORMAL_FOCUS_SURFACES:
             return "FOCUS"
         return "NEUTRAL"
 
@@ -2267,7 +2275,7 @@ class WindowsMonitorCoordinator:
         blacklist_result: object,
     ) -> None:
         from COSINE.cosine import CosineObservation
-        from CORE_ENGINE.resource_intent import ResourceSurface
+        from CORE_ENGINE.resource_intent import NORMAL_FOCUS_SURFACES
 
         now_ns = context.foreground.observed_monotonic_ns
         self._drain_resource_intent_facts(context.foreground)
@@ -2279,7 +2287,7 @@ class WindowsMonitorCoordinator:
         focus_confirmed = bool(
             not context.study_owned
             and resource_surface
-            in {ResourceSurface.DOCUMENT, ResourceSurface.LEARNING_APP}
+            in NORMAL_FOCUS_SURFACES
         )
 
         cosine_observation = CosineObservation(
@@ -2366,7 +2374,7 @@ class WindowsMonitorCoordinator:
     ) -> None:
         """Coordinate siblings, then give MINE the one current certified fact."""
 
-        from CORE_ENGINE.resource_intent import ResourceSurface
+        from CORE_ENGINE.resource_intent import NORMAL_FOCUS_SURFACES, ResourceSurface
         from MINE.mine import MineObservation, MineObservationKind
 
         if getattr(self, "_mine_authority", None) is None:
@@ -2401,7 +2409,7 @@ class WindowsMonitorCoordinator:
             )
             kind = MineObservationKind.MESSAGING
             evidence_token = str(_field(resource_identity, "stable_key", "") or "")
-        elif resource_surface in {ResourceSurface.DOCUMENT, ResourceSurface.LEARNING_APP}:
+        elif resource_surface in NORMAL_FOCUS_SURFACES:
             kind = MineObservationKind.FOCUS
             platform_key = platform_label = evidence_token = ""
         else:
@@ -4566,7 +4574,11 @@ class WindowsMonitorCoordinator:
     ) -> tuple[str, str]:
         """Return the badge/tone from already-authoritative current facts."""
 
-        from CORE_ENGINE.resource_intent import ResourceIntent, ResourceSurface
+        from CORE_ENGINE.resource_intent import (
+            NORMAL_FOCUS_SURFACES,
+            ResourceIntent,
+            ResourceSurface,
+        )
 
         resource_view = self.services.resource_intent.live_view()
         if (
@@ -4593,6 +4605,14 @@ class WindowsMonitorCoordinator:
             in {"accused", "unknown"}
         ):
             return "SOCIAL", "amber"
+
+        if (
+            not bool(_field(context, "study_owned", False))
+            and resource_view is not None
+            and _field(resource_view, "resource_surface", None)
+            in NORMAL_FOCUS_SURFACES
+        ):
+            return "FOCUS", "cyan"
 
         return "ACTIVITY", "cyan"
 

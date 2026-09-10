@@ -1548,6 +1548,9 @@ class EngineStorage:
     def read_cosine_events(self):
         return read_cosine_events()
 
+    def read_mine_events(self):
+        return read_mine_events()
+
     def shutdown(self) -> None:
         """Release this facade's ownership of the shared lane.
 
@@ -1594,6 +1597,45 @@ def read_cosine_events():
             generation=int(row["generation"]),
             platform_key=str(row["platform_key"]),
             content_title=str(row["content_title"]),
+            request_id=str(row["request_id"]),
+            evidence_token=str(row["evidence_token"]),
+            payload_json=str(row["payload_json"]),
+            schema_version=str(row["schema_version"]),
+        )
+        for row in rows
+    )
+
+
+def read_mine_events():
+    """Read the complete durable MINE ledger through a read-only connection."""
+
+    from MINE.mine import MineEvent, MineEventClass
+
+    bootstrap_production_schema()
+    connection = connect_database(read_only=True)
+    try:
+        rows = connection.execute(
+            "SELECT event_id, session_id, mine_episode_id, generation, sequence, "
+            "event_name, event_class, occurred_at_utc, monotonic_ns, platform_key, "
+            "platform_label, request_id, evidence_token, payload_json, schema_version "
+            "FROM mine_events "
+            "ORDER BY session_id, generation, sequence, event_id"
+        ).fetchall()
+    finally:
+        connection.close()
+    return tuple(
+        MineEvent(
+            event_id=str(row["event_id"]),
+            parent_session_id=int(row["session_id"]),
+            mine_episode_id=str(row["mine_episode_id"]),
+            sequence=int(row["sequence"]),
+            event_name=str(row["event_name"]),
+            event_class=MineEventClass(str(row["event_class"])),
+            occurred_at_utc=str(row["occurred_at_utc"]),
+            monotonic_ns=int(row["monotonic_ns"]),
+            generation=int(row["generation"]),
+            platform_key=str(row["platform_key"]),
+            platform_label=str(row["platform_label"]),
             request_id=str(row["request_id"]),
             evidence_token=str(row["evidence_token"]),
             payload_json=str(row["payload_json"]),
@@ -1653,6 +1695,7 @@ class ControlStationAnalyticsSnapshot:
     live_mirl: object
     cosine: object
     generated_at_utc: str
+    mine: object | None = None
 
 
 def _counts() -> tuple[int, int]:
@@ -1821,10 +1864,9 @@ def export_mirl_report(
 ) -> str:
     """Write ONE MIRL export in the requested format and return its path.
 
-    ``pdf`` is the readable summary -- cover, Metric Hub and Science Lab -- and
-    deliberately stops there.  Adding the per-episode and integrity sections
-    runs to 55 pages on real evidence, at which point it is an archive rather
-    than a report.
+    ``pdf`` is the compact three-page recovery-history report: cover, current
+    or latest episode, episode history, event timeline, history evidence, data
+    quality and About MIRL.
 
     ``json`` is that archive: every field behind all five dashboard tabs, at
     full fidelity, with no episode cap and no timeline truncation.
@@ -1844,25 +1886,13 @@ def export_mirl_report(
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 
     if output_format == "pdf":
-        from MIRL.report import (
-            MirlReportRequest,
-            MirlReportSections,
-            build_mirl_report_pdf,
-        )
+        from MIRL.report import MirlReportRequest, build_mirl_report_pdf
 
         pdf_path = downloads / f"MYELIN_MIRL_Report_{stamp}.pdf"
         build_mirl_report_pdf(
             snapshot,
             MirlReportRequest(
                 output_path=pdf_path,
-                title="MYELIN MIRL Report",
-                subtitle="Authoritative native MIRL episode evidence",
-                sections=MirlReportSections(
-                    metric_hub=True,
-                    live_mirl=False,
-                    science_lab=True,
-                    integrity_and_provenance=False,
-                ),
                 overwrite=True,
             ),
         )
@@ -1882,6 +1912,7 @@ def read_control_station_analytics(
     presentation_timezone: str = "local",
 ) -> ControlStationAnalyticsSnapshot:
     from COSINE.read_model import CosineReadAuthority
+    from MINE.read_model import MineReadAuthority
 
     mirl = read_mirl_snapshot(presentation_timezone)
 
@@ -1889,18 +1920,24 @@ def read_control_station_analytics(
         def read_cosine_events(self):
             return read_cosine_events()
 
+    class _MineReader:
+        def read_mine_events(self):
+            return read_mine_events()
+
     cosine = CosineReadAuthority(event_reader=_CosineReader()).project(presentation_timezone)
+    mine = MineReadAuthority(event_reader=_MineReader()).project(presentation_timezone)
     return ControlStationAnalyticsSnapshot(
         metric_hub=mirl.metric_hub,
         science_lab=mirl.science_lab,
         live_mirl=mirl.live_mirl,
         cosine=cosine,
         generated_at_utc=_utc_now(),
+        mine=mine,
     )
 
 
 def export_cosine_report(presentation_timezone: str = "local") -> str:
-    """Write one NEW COSINE two-page PDF report and return its path.
+    """Write one COSINE three-page PDF report and return its path.
 
     Shares the same certified analytics route ``read_control_station_
     analytics`` already uses -- the report never opens a second reader and
@@ -2030,6 +2067,7 @@ __all__ = [
     "export_analytics_sheet",
     "read_control_station_analytics",
     "read_cosine_events",
+    "read_mine_events",
     "read_mirl_events",
     "record_emergency_followup_reason",
 ]

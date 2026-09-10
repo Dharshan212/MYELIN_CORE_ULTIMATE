@@ -257,6 +257,13 @@ BROWSER_ADAPTERS: Final = (
     BrowserAdapterSpec(BrowserKind.OPERA_GX, "Opera GX", ("opera_gx.exe",), _COMMON_AUTO_ID_HINTS, _COMMON_NAME_HINTS),
 )
 
+_CORE_FOCUS_WEB_HOSTS: Final = (
+    ("overleaf.com", "overleaf", "Overleaf"),
+    ("coursera.org", "coursera", "Coursera"),
+    ("edx.org", "edx", "edX"),
+    ("brilliant.org", "brilliant", "Brilliant"),
+)
+
 _STRONG_EVIDENCE_KINDS: Final = frozenset(
     {
         UrlEvidenceKind.CONFIRMED_SHORT_FEED,
@@ -347,12 +354,17 @@ def _redacted(platform_label: str, marker: str = "") -> str:
     base = {
         "Instagram": "instagram.com",
         "Facebook": "facebook.com",
+        "Reddit": "reddit.com",
         "YouTube": "youtube.com",
         "Snapchat": "snapchat.com",
         "TikTok": "tiktok.com",
         "Twitch": "twitch.tv",
         "LinkedIn": "linkedin.com",
         "X": "x.com",
+        "Overleaf": "overleaf.com",
+        "Coursera": "coursera.org",
+        "edX": "edx.org",
+        "Brilliant": "brilliant.org",
     }.get(platform_label, platform_label.casefold() or "unknown")
     return f"{base}/{marker}/[redacted]" if marker else base
 
@@ -459,6 +471,19 @@ def classify_address_value(
             return _evidence(UrlEvidenceKind.CONFIRMED_STATIC_ENTRY, "facebook", "Facebook", first, EvidenceConfidence.HIGH, "A Facebook entry route was observed.")
         return _evidence(UrlEvidenceKind.NOT_CONFIRMED, "facebook", "Facebook", "", EvidenceConfidence.NONE, "No recognised Facebook route was proved.")
 
+    if _host_matches(host, "reddit.com") and first == "chat":
+        return _evidence(UrlEvidenceKind.CONFIRMED_MESSAGING_PAGE, "reddit", "Reddit", first, EvidenceConfidence.HIGH, "A Reddit Chat route was observed.")
+
+    if _host_matches(host, "reddit.com"):
+        return _evidence(
+            UrlEvidenceKind.CONFIRMED_SOCIAL_FEED,
+            "reddit",
+            "Reddit",
+            "",
+            EvidenceConfidence.HIGH,
+            "A Reddit social surface was observed.",
+        )
+
     if _host_matches(host, "youtube.com") or _host_matches(host, "youtu.be"):
         if first == "shorts":
             return _evidence(UrlEvidenceKind.CONFIRMED_SHORT_FEED, "youtube", "YouTube", first, EvidenceConfidence.HIGH, "YouTube Shorts was proved by the URL path.")
@@ -527,6 +552,17 @@ def classify_address_value(
         if parts[:3] in (("i", "flow", "login"), ("i", "flow", "signup")):
             return _evidence(UrlEvidenceKind.CONFIRMED_STATIC_ENTRY, "x", "X", "login", EvidenceConfidence.HIGH, "An X entry route was observed.")
         return _evidence(UrlEvidenceKind.NOT_CONFIRMED, "x", "X", "", EvidenceConfidence.NONE, "The X URL did not prove a managed route.")
+
+    for domain, platform_key, platform_label in _CORE_FOCUS_WEB_HOSTS:
+        if _host_matches(host, domain):
+            return _evidence(
+                UrlEvidenceKind.CONFIRMED_PRODUCTIVE_PAGE,
+                platform_key,
+                platform_label,
+                "",
+                EvidenceConfidence.HIGH,
+                f"The approved {platform_label} host was observed.",
+            )
 
     return _evidence(UrlEvidenceKind.UNSUPPORTED_PLATFORM, "", "", "", EvidenceConfidence.NONE, "The certified host is not managed by MYELIN.")
 
@@ -742,7 +778,10 @@ class _EvidenceStabiliser:
         if evidence.is_strong:
             return self._replace(evidence, "New strong evidence from the same host was accepted.")
         if current.is_strong:
-            return self._handle_weak(evidence, now)
+            return self._replace(
+                evidence,
+                "Successful current weak evidence replaced the previous strong state.",
+            )
         return self._replace(evidence, "Weak evidence changed without a protected strong state.")
 
     def unavailable(self, observed_at: float) -> _StableEvidenceView:

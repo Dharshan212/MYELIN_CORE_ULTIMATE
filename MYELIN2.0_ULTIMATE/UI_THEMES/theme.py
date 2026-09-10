@@ -75,6 +75,7 @@ FEED_BADGE_COSINE: Final = "#14B8A6"
 FEED_BADGE_HANDOVER: Final = "#64748B"
 FEED_BADGE_MONITOR: Final = "#2563EB"
 FEED_BADGE_STUDY: Final = "#16A34A"
+FEED_BADGE_FOCUS: Final = "#FFFFFF"
 
 # Base themes differ only in background/surface/text/accent/border tokens.
 # The semantic fields (red/red_dim/amber/green/green_dim/violet) keep the
@@ -610,6 +611,9 @@ QLabel#feedTag[badge="MONITOR"] {{
 }}
 QLabel#feedTag[badge="STUDY"] {{
     color: {FEED_BADGE_STUDY}; background: {alpha(FEED_BADGE_STUDY, 0.12)};
+}}
+QLabel#feedTag[badge="FOCUS"] {{
+    color: {FEED_BADGE_FOCUS}; background: {alpha(FEED_BADGE_FOCUS, 0.12)};
 }}
 
 /* ---------- showcase hairlines (Metric Hub / Live MIRL / COSINE fixtures) --

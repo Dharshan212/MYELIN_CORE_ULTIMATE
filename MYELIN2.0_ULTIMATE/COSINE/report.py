@@ -1,4 +1,4 @@
-"""COSINE two-page PDF report -- NEW read-model presentation layer only.
+"""COSINE exactly-three-page PDF report -- read-model presentation only.
 
 This module owns none of COSINE's physiology, timing, event validation or
 platform certification. Its only input is an already-projected
@@ -8,7 +8,7 @@ platform-duration mathematics.
 
 The report is a bounded, deterministic projection of durable evidence:
 
-    * exactly two A4 pages, portrait, ``PageBreak()`` between them;
+    * exactly three A4 portrait pages: cover, analysis, evidence/about;
     * the eight most recent episodes (matching the dashboard's own database-
       snapshot framing), never a silent truncation -- a "showing N of M" line
       is printed whenever more exist;
@@ -56,9 +56,9 @@ from reportlab.platypus import (
 from COSINE.read_model import CosineAnalysisProjection, CosineEpisodeProjection
 from time_projection import parse_utc_timestamp, project_utc_timestamp, timezone_tag
 
-REPORT_SCHEMA_VERSION: Final = "myelin-cosine-pdf-v2"
+REPORT_SCHEMA_VERSION: Final = "myelin-cosine-pdf-v3"
 
-#: Two-page presentation caps -- visual page-capacity rules only. They never
+#: Three-page presentation caps -- visual page-capacity rules only. They never
 #: modify the read model, the dashboard's full evidence, or event storage.
 EPISODE_ROW_CAP: Final = 8
 KEY_EVIDENCE_ROW_CAP: Final = 10
@@ -86,6 +86,7 @@ class CosinePdfReportResult:
     recent_episode_id: str
     total_recent_event_count: int
     shown_key_evidence_count: int
+    page_count: int
 
 
 # ---------------------------------------------------------------------------
@@ -442,12 +443,14 @@ _RETURN_ELIGIBILITY_NAMES: Final = frozenset({
 
 
 def _select_return_episode(projection: CosineAnalysisProjection):
-    """Most recent durable episode containing return-pathway evidence, using
+    """Most recent *completed* episode containing return-pathway evidence, using
     the existing (already newest-first) episode ordering -- a deterministic
     specimen rule for the section dedicated to Return, not cherry-picking."""
 
     for spec in projection.episodes:
-        if any(e.event_name in _RETURN_ELIGIBILITY_NAMES for e in spec.events):
+        if spec.is_closed and any(
+            e.event_name in _RETURN_ELIGIBILITY_NAMES for e in spec.events
+        ):
             return spec
     return None
 
@@ -475,12 +478,12 @@ def _return_summary(episode: CosineEpisodeProjection) -> str:
 
 
 def _select_hopper_episode(projection: CosineAnalysisProjection):
-    """Most recent durable episode with recorded Hopper transitions, using
+    """Most recent completed episode with recorded Hopper transitions, using
     the existing (already newest-first) episode ordering -- a deterministic
     specimen rule for the section dedicated to Hopper, not cherry-picking."""
 
     for spec in projection.episodes:
-        if spec.hopper_count > 0 and spec.hopper_transitions:
+        if spec.is_closed and spec.hopper_count > 0 and spec.hopper_transitions:
             return spec
     return None
 
@@ -606,11 +609,55 @@ def _styles() -> dict[str, ParagraphStyle]:
                                 textColor=colors.HexColor("#233241")),
         "CellHead": ParagraphStyle("CosinePdfCellHead", fontName="Helvetica-Bold", fontSize=6.5,
                                     leading=7.8, textColor=colors.white),
+        "CoverKicker": ParagraphStyle(
+            "CosineCoverKicker", fontName="Helvetica-Bold", fontSize=10,
+            leading=12, textColor=_NAVY,
+        ),
+        "CoverOrgan": ParagraphStyle(
+            "CosineCoverOrgan", fontName="Helvetica-Bold", fontSize=31,
+            leading=35, textColor=_NAVY,
+        ),
+        "CoverTitle": ParagraphStyle(
+            "CosineCoverTitle", fontName="Helvetica-Bold", fontSize=22,
+            leading=27, textColor=_NAVY,
+        ),
+        "CoverAccent": ParagraphStyle(
+            "CosineCoverAccent", fontName="Helvetica-Bold", fontSize=13,
+            leading=17, textColor=_TEAL,
+        ),
+        "CoverMeta": ParagraphStyle(
+            "CosineCoverMeta", fontName="Helvetica", fontSize=8,
+            leading=13, textColor=_MUTED,
+        ),
+        "AboutTitle": ParagraphStyle(
+            "CosineAboutTitle", fontName="Helvetica-Bold", fontSize=15,
+            leading=18, textColor=colors.white,
+        ),
+        "AboutLabel": ParagraphStyle(
+            "CosineAboutLabel", fontName="Helvetica-Bold", fontSize=6.8,
+            leading=9, textColor=colors.HexColor("#5DE0D1"),
+        ),
+        "AboutBody": ParagraphStyle(
+            "CosineAboutBody", fontName="Helvetica", fontSize=8,
+            leading=10.8, textColor=colors.white,
+        ),
     }
 
 
+def _pdf_text(value: object) -> str:
+    text = " ".join(str(value or "").split())
+    replacements = {
+        "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-",
+        "\u2212": "-", "\u2192": "->", "\u00b7": "-", "\u00a0": " ",
+        "\u2019": "'", "\u2018": "'", "\u2026": "...",
+    }
+    for original, replacement in replacements.items():
+        text = text.replace(original, replacement)
+    return "".join(character if ord(character) < 128 else "?" for character in text)[:1000]
+
+
 def _escape(value: object) -> str:
-    return html.escape(" ".join(str(value or "").split())[:400])
+    return html.escape(_pdf_text(value)[:400])
 
 
 def _table(rows: list[list[str]], widths: list[float], styles: dict) -> Table:
@@ -643,7 +690,9 @@ def _map_card(nodes: list[str], styles: dict, empty_text: str) -> Table:
     if not nodes:
         text = f"<i>{_escape(empty_text)}</i>"
     else:
-        text = "&nbsp;&nbsp;→&nbsp;&nbsp;".join(f"<b>{_escape(node)}</b>" for node in nodes)
+        text = "&nbsp;&nbsp;-&gt;&nbsp;&nbsp;".join(
+            f"<b>{_escape(node)}</b>" for node in nodes
+        )
     para = Paragraph(text, styles["Map"])
     card = Table([[para]], colWidths=[180 * mm])
     card.setStyle(
@@ -663,12 +712,31 @@ def _section_title(text: str, styles: dict) -> Paragraph:
     return Paragraph(_escape(text), styles["H1"])
 
 
-def _footer(canvas, document) -> None:
+def _page_decoration(canvas, document) -> None:
     canvas.saveState()
+    if document.page == 1:
+        canvas.setFillColor(_NAVY)
+        canvas.rect(0, A4[1] - 9 * mm, A4[0], 9 * mm, fill=1, stroke=0)
+        canvas.setFillColor(_TEAL)
+        canvas.rect(16 * mm, A4[1] - 38 * mm, 18 * mm, 1.3 * mm, fill=1, stroke=0)
+        canvas.setStrokeColor(_HAIRLINE)
+        canvas.line(16 * mm, 42 * mm, A4[0] - 16 * mm, 42 * mm)
+        canvas.setFont("Helvetica-Bold", 10)
+        canvas.setFillColor(_NAVY)
+        canvas.drawString(16 * mm, 31 * mm, "MYELIN")
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(_MUTED)
+        canvas.drawString(16 * mm, 23 * mm, "GUIDE - RECOVER - FOCUS")
+        canvas.restoreState()
+        return
+    canvas.setFillColor(_NAVY)
+    canvas.rect(0, A4[1] - 8 * mm, A4[0], 8 * mm, fill=1, stroke=0)
     canvas.setFont("Helvetica", 7)
     canvas.setFillColor(_MUTED)
-    canvas.drawString(16 * mm, 9 * mm, "MYELIN · COSINE behavioral evidence")
-    canvas.drawRightString(A4[0] - 16 * mm, 9 * mm, f"Page {document.page} of 2")
+    canvas.drawString(16 * mm, 9 * mm, "MYELIN 2.0 - COSINE")
+    canvas.drawRightString(A4[0] - 16 * mm, 9 * mm, f"PAGE {document.page:02d}")
+    canvas.setStrokeColor(_HAIRLINE)
+    canvas.line(16 * mm, 14 * mm, A4[0] - 16 * mm, 14 * mm)
     canvas.restoreState()
 
 
@@ -722,22 +790,94 @@ def _overview_summary(projection: CosineAnalysisProjection) -> str:
     )
 
 
+def _cover(
+    projection: CosineAnalysisProjection,
+    completed: CosineEpisodeProjection | None,
+    aliases: dict,
+    styles: dict,
+) -> list:
+    generated, zone = _generated_display(projection)
+    latest = (
+        aliases.get((completed.cosine_session_id, completed.generation), "COS-UNKNOWN")
+        if completed is not None
+        else "No completed episode recorded"
+    )
+    return [
+        Spacer(1, 12 * mm),
+        Paragraph("MYELIN 2.0", styles["CoverKicker"]),
+        Spacer(1, 25 * mm),
+        Paragraph("COSINE", styles["CoverOrgan"]),
+        Paragraph("STREAMING BEHAVIOR REPORT", styles["CoverTitle"]),
+        Spacer(1, 10 * mm),
+        Paragraph(
+            "Choice-Oriented Streaming Insight and Navigation Engine",
+            styles["CoverAccent"],
+        ),
+        Spacer(1, 38 * mm),
+        Paragraph(
+            _escape(f"Generated: {generated} [{zone}]")
+            + "<br/>"
+            + _escape("Data Scope: Latest COSINE Durable Evidence")
+            + "<br/>"
+            + _escape(f"Latest completed episode: {latest}"),
+            styles["CoverMeta"],
+        ),
+    ]
+
+
 def _page_one(
     projection: CosineAnalysisProjection,
     episodes_window: tuple,
-    recent: CosineEpisodeProjection,
     aliases: dict,
     styles: dict,
 ) -> list:
     story: list = []
-    story.append(_section_title("1. COSINE principle", styles))
-    story.append(Paragraph(_PRINCIPLE_TEXT, styles["Body"]))
-    story.append(Paragraph(_PRINCIPLE_BOUNDARY_TEXT, styles["Muted"]))
-
-    story.append(_section_title("2. Total overview", styles))
+    story.append(_section_title("01  OVERVIEW", styles))
     story.append(Paragraph(_escape(_overview_summary(projection)), styles["Body"]))
+    story.append(Paragraph(_PRINCIPLE_TEXT, styles["Muted"]))
+    latest_completed = next((episode for episode in projection.episodes if episode.is_closed), None)
+    latest_id = (
+        aliases.get(
+            (latest_completed.cosine_session_id, latest_completed.generation),
+            "COS-UNKNOWN",
+        )
+        if latest_completed is not None
+        else "No completed episode"
+    )
+    overview = projection.overview
+    card_labels = ["CAPTURED EPISODES", "CONFIRMED RETURNS", "BREAK STARTS", "LATEST COMPLETED"]
+    card_values = [
+            str(overview.captured_episode_count)
+            if overview.captured_episode_count is not None
+            else "Unavailable",
+            str(overview.confirmed_return_count)
+            if overview.confirmed_return_count is not None
+            else "Unavailable",
+            str(overview.break_started_count)
+            if overview.break_started_count is not None
+            else "Unavailable",
+            latest_id,
+    ]
+    summary = Table(
+        [
+            [Paragraph(_escape(value), styles["Muted"]) for value in card_labels],
+            [Paragraph(_escape(value), styles["Body"]) for value in card_values],
+        ],
+        colWidths=[44.5 * mm] * 4,
+    )
+    summary.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F7F9")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), _MUTED),
+        ("TEXTCOLOR", (0, 1), (-1, 1), _NAVY),
+        ("FONTNAME", (0, 0), (-1, 1), "Helvetica-Bold"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    story.append(Spacer(1, 1.5 * mm))
+    story.append(summary)
 
-    story.append(_section_title("3. Episodes", styles))
+    story.append(_section_title("02  EPISODES", styles))
     story.append(Paragraph(
         "Episode IDs use the UTC episode-start date; displayed dates and times use "
         "the selected report time zone.",
@@ -761,36 +901,23 @@ def _page_one(
         ])
     story.append(_table(rows, [24 * mm, 22 * mm, 28 * mm, 42 * mm, 14 * mm, 48 * mm], styles))
 
-    story.append(_section_title("4. Recent episode map", styles))
-    recent_id = aliases.get((recent.cosine_session_id, recent.generation), "COS-UNKNOWN")
-    story.append(Paragraph(f"Episode {_escape(recent_id)}", styles["Muted"]))
-    story.append(_map_card(
-        _recent_episode_map_nodes(recent), styles,
-        "No evidence is available for the recent episode.",
-    ))
-
-    story.append(_section_title("5. Intent", styles))
+    story.append(_section_title("03  INTENT", styles))
     intent_rows = [["EPISODE", "PLATFORM", "RECORDED CHOICE", "OUTCOME"]]
     for spec in episodes_window:
-        if not spec.user_choice:
-            continue
         intent_rows.append([
             aliases.get((spec.cosine_session_id, spec.generation), "COS-UNKNOWN"),
             spec.starting_platform_label,
             _choice_text(spec),
             _compact_outcome(spec),
         ])
-    if len(intent_rows) > 1:
-        story.append(_table(intent_rows, [26 * mm, 34 * mm, 68 * mm, 50 * mm], styles))
-    else:
-        story.append(Paragraph("No episode in this window recorded a durable choice.", styles["Muted"]))
+    story.append(_table(intent_rows[:5], [26 * mm, 34 * mm, 68 * mm, 50 * mm], styles))
     story.append(Paragraph(_INTENT_DESCRIPTION_TEXT, styles["Muted"]))
 
-    story.append(_section_title("6. Return pathway", styles))
+    story.append(_section_title("04  RETURN", styles))
     return_episode = _select_return_episode(projection)
     if return_episode is None:
         story.append(Paragraph(
-            "No recorded return pathway exists in the analysed episodes.", styles["Muted"],
+            "No completed episode contains a recorded return pathway.", styles["Muted"],
         ))
     else:
         return_id = aliases.get(
@@ -811,13 +938,13 @@ def _page_one(
 def _page_two(
     projection: CosineAnalysisProjection,
     episodes_window: tuple,
-    recent: CosineEpisodeProjection,
+    completed: CosineEpisodeProjection | None,
     aliases: dict,
     styles: dict,
     total_episode_count: int,
 ) -> list:
     story: list = [PageBreak()]
-    story.append(_section_title("7. Overall Hopper", styles))
+    story.append(_section_title("05  HOPPER", styles))
     if total_episode_count > EPISODE_ROW_CAP:
         story.append(Paragraph(
             f"Showing {EPISODE_ROW_CAP} most recent of {total_episode_count} captured episodes.",
@@ -840,47 +967,106 @@ def _page_two(
         ])
     story.append(_table(rows, [24 * mm, 30 * mm, 66 * mm, 18 * mm, 40 * mm], styles))
 
-    story.append(_section_title("8. Recent Hopper map", styles))
     hopper_episode = _select_hopper_episode(projection)
     if hopper_episode is None:
         story.append(_map_card(
-            [], styles, "No Hopper transition was recorded in the analysed episodes.",
+            [], styles, "No completed episode records a Hopper transition.",
         ))
     else:
         hopper_id = aliases.get(
             (hopper_episode.cosine_session_id, hopper_episode.generation), "COS-UNKNOWN"
         )
-        story.append(Paragraph(f"Episode {_escape(hopper_id)}", styles["Muted"]))
+        story.append(Paragraph(
+            f"Recent completed Hopper path - Episode {_escape(hopper_id)}",
+            styles["Muted"],
+        ))
         story.append(_map_card(_hopper_collapsed_nodes(hopper_episode), styles, ""))
 
-    story.append(_section_title("9. Key evidence", styles))
-    selected, total = _select_key_evidence(recent)
-    story.append(Paragraph(
-        f"{len(selected)} key milestones shown · {recent.event_count} total recorded events",
-        styles["Muted"],
-    ))
-    evidence_rows = [["SEQ", "TIME", "EVENT", "CLASS", "PLATFORM", "EVIDENCE"]]
-    for event in selected:
-        evidence_rows.append([
-            str(event.sequence),
-            time_only(event.occurred_at_display),
-            event_label(event.event_name),
-            event_class_label(event.event_class),
-            event.platform_label,
-            _evidence_detail(event, recent),
-        ])
-    story.append(_table(evidence_rows, [8 * mm, 20 * mm, 42 * mm, 22 * mm, 30 * mm, 56 * mm], styles))
-    if recent.hold_context:
+    story.append(_section_title("06  EVIDENCE", styles))
+    if completed is None:
+        selected = []
         story.append(Paragraph(
-            "SINE handoff context recorded · mechanism interpretation deferred.",
+            "No completed COSINE episode is available; completed-episode evidence is not claimed.",
+            styles["Muted"],
+        ))
+    else:
+        selected, total = _select_key_evidence(completed)
+        completed_id = aliases.get(
+            (completed.cosine_session_id, completed.generation), "COS-UNKNOWN"
+        )
+        story.append(Paragraph(
+            f"Episode {_escape(completed_id)} - {len(selected)} key milestones shown - "
+            f"{completed.event_count} total recorded events",
+            styles["Muted"],
+        ))
+        evidence_rows = [["SEQ", "TIME", "EVENT", "CLASS", "PLATFORM", "EVIDENCE"]]
+        for event in selected:
+            evidence_rows.append([
+                str(event.sequence),
+                time_only(event.occurred_at_display),
+                event_label(event.event_name),
+                event_class_label(event.event_class),
+                event.platform_label,
+                _evidence_detail(event, completed),
+            ])
+        story.append(_table(
+            evidence_rows,
+            [8 * mm, 20 * mm, 42 * mm, 22 * mm, 30 * mm, 56 * mm],
+            styles,
+        ))
+    if completed is not None and completed.hold_context:
+        story.append(Paragraph(
+            "SINE handoff context recorded - mechanism interpretation deferred.",
             styles["Muted"],
         ))
 
-    story.append(_section_title("10. Scientific description", styles))
-    story.append(Paragraph(_SCIENTIFIC_BOUNDARY_TEXT, styles["Body"]))
-    story.append(Paragraph(_SEQUENCE_NOTE_TEXT, styles["Muted"]))
-    story.append(Paragraph(_TIMESTAMP_NOTE_TEXT, styles["Muted"]))
+    story.append(_section_title("07  ABOUT COSINE", styles))
+    story.append(_about_card(styles))
     return story
+
+
+def _about_card(styles: dict) -> Table:
+    title = Paragraph(
+        "COSINE<br/><font color='#5DE0D1' size='8'>"
+        "CHOICE-ORIENTED STREAMING INSIGHT AND NAVIGATION ENGINE</font>",
+        styles["AboutTitle"],
+    )
+    description = Paragraph(
+        "COSINE records supported OTT streaming episodes and the user's explicit "
+        "responses to streaming interventions. It preserves durable evidence of "
+        "streaming activity, user choices, platform movement, breaks and return.",
+        styles["AboutBody"],
+    )
+    observes = Paragraph(
+        "<b><font color='#5DE0D1' size='7'>IT OBSERVES</font></b><br/>"
+        "Streaming -&gt; Check-in -&gt; Choice -&gt; Platform movement -&gt; Break / Return",
+        styles["AboutBody"],
+    )
+    hopper = Paragraph(
+        "<b><font color='#5DE0D1' size='7'>HOPPER EFFECT</font></b><br/>"
+        "Records factual movement between supported streaming platforms during one COSINE episode.",
+        styles["AboutBody"],
+    )
+    boundary = Paragraph(
+        "<b><font color='#5DE0D1' size='7'>SCIENTIFIC BOUNDARY</font></b><br/>"
+        "Observable software behavior only. COSINE does not directly measure "
+        "attention, emotion, motivation, health, dopamine, cognition, brain "
+        "activity or psychological state.",
+        styles["AboutBody"],
+    )
+    card = Table(
+        [[title], [description], [Table([[observes, hopper, boundary]], colWidths=[58 * mm] * 3)]],
+        colWidths=[180 * mm],
+    )
+    card.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), _NAVY),
+        ("BOX", (0, 0), (-1, -1), 0.8, _TEAL),
+        ("LEFTPADDING", (0, 0), (-1, -1), 9),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 9),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    return card
 
 
 def _hopper_collapsed_nodes(episode: CosineEpisodeProjection) -> list[str]:
@@ -903,9 +1089,7 @@ def build_cosine_report_pdf(
     _require_evidence(projection)
 
     episodes_window = tuple(projection.episodes[:EPISODE_ROW_CAP])
-    recent = projection.latest_or_selected_recent_episode
-    if recent is None:
-        recent = projection.episodes[0]
+    completed = next((episode for episode in projection.episodes if episode.is_closed), None)
     aliases = episode_display_ids(projection.episodes)
     styles = _styles()
 
@@ -915,20 +1099,17 @@ def build_cosine_report_pdf(
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(f".{output.stem}-{secrets.token_hex(6)}.tmp.pdf")
 
-    generated_text, zone_label = _generated_display(projection)
-    zone_line = f"Time zone: {zone_label}"
-    generated_line = f"Generated: {generated_text}"
-
-    story: list = [
-        Paragraph(_escape("MYELIN"), styles["Subtitle"]),
-        Paragraph(_escape(request.title), styles["Title"]),
-        Paragraph(_escape(request.subtitle), styles["Subtitle"]),
-        Spacer(1, 1 * mm),
-        Paragraph(_escape(f"{generated_line}  ·  {zone_line}"), styles["Muted"]),
-        Spacer(1, 2 * mm),
-    ]
-    story.extend(_page_one(projection, episodes_window, recent, aliases, styles))
-    story.extend(_page_two(projection, episodes_window, recent, aliases, styles, len(projection.episodes)))
+    story: list = _cover(projection, completed, aliases, styles)
+    story.append(PageBreak())
+    story.extend(_page_one(projection, episodes_window, aliases, styles))
+    story.extend(_page_two(
+        projection,
+        episodes_window,
+        completed,
+        aliases,
+        styles,
+        len(projection.episodes),
+    ))
 
     try:
         document = SimpleDocTemplate(
@@ -936,13 +1117,17 @@ def build_cosine_report_pdf(
             pagesize=A4,
             leftMargin=15 * mm,
             rightMargin=15 * mm,
-            topMargin=12 * mm,
-            bottomMargin=13 * mm,
+            topMargin=15 * mm,
+            bottomMargin=16 * mm,
             title=request.title,
-            author="",
+            author="MYELIN",
             subject="MYELIN COSINE behavioral evidence report",
         )
-        document.build(story, onFirstPage=_footer, onLaterPages=_footer)
+        document.build(
+            story,
+            onFirstPage=_page_decoration,
+            onLaterPages=_page_decoration,
+        )
         if request.overwrite:
             os.replace(temporary, output)
         else:
@@ -953,16 +1138,21 @@ def build_cosine_report_pdf(
             temporary.unlink()
         raise
 
-    recent_id = aliases.get((recent.cosine_session_id, recent.generation), "COS-UNKNOWN")
-    selected, _ = _select_key_evidence(recent)
+    recent_id = (
+        aliases.get((completed.cosine_session_id, completed.generation), "COS-UNKNOWN")
+        if completed is not None
+        else "No completed episode"
+    )
+    selected = _select_key_evidence(completed)[0] if completed is not None else []
     return CosinePdfReportResult(
         output_path=str(output),
         generated_at_utc=projection.generated_at_utc,
         byte_size=output.stat().st_size,
         episode_count=len(projection.episodes),
         recent_episode_id=recent_id,
-        total_recent_event_count=recent.event_count,
+        total_recent_event_count=completed.event_count if completed is not None else 0,
         shown_key_evidence_count=len(selected),
+        page_count=3,
     )
 
 

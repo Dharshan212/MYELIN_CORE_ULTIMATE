@@ -198,9 +198,9 @@ class ControlStationPages:
     """The real pages shown by the Control Station.
 
     A frozen page bundle prevents page order from being silently changed in
-    several different parts of the program.  ``mine`` is a presentation-only
-    placeholder: a real navigation destination whose subsystem does not exist
-    yet.
+    several different parts of the program. ``mine`` is the real navigation
+    destination for durable MINE history; its live and Deep Analysis organs
+    remain separately staged.
     """
 
     control: QWidget
@@ -985,6 +985,38 @@ def bar_row(caption: str, colour: str = "cyan", label_w: int = 108):
     value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
     lay.addWidget(value)
     return host, track, value
+
+
+_MESSAGING_VISUAL_BADGES: Final = {
+    "whatsapp": "WHATSAPP",
+    "telegram": "TELEGRAM",
+    "discord": "DISCORD",
+    "slack": "SLACK",
+    "microsoft teams": "TEAMS",
+    "wechat": "WECHAT",
+    "signal": "SIGNAL",
+    "viber": "VIBER",
+    "instagram": "INSTAGRAM_MESSAGE",
+    "facebook": "FACEBOOK_MESSAGE",
+    "linkedin": "LINKEDIN_MESSAGE",
+    "x": "X_MESSAGE",
+    "reddit": "REDDIT_MESSAGE",
+}
+
+
+def _messaging_visual_badge(backend_badge: object, app: object) -> str:
+    """Project a factual MESSAGING event onto a platform-specific tag.
+
+    Pure presentation only: the backend badge is returned unchanged for any
+    app that is not an exact certified messaging label, so this never
+    invents a resource identity Monitor did not already report.
+    """
+
+    badge = str(backend_badge or "").strip()
+    if badge.casefold() != "messaging":
+        return badge
+    app_key = str(app or "").strip().casefold()
+    return _MESSAGING_VISUAL_BADGES.get(app_key, badge)
 
 
 class FeedTag(QLabel):
@@ -2632,6 +2664,2720 @@ def _clear_layout(layout) -> None:
             widget.deleteLater()
         elif child is not None:
             _clear_layout(child)
+
+
+# --------------------------------------------------------------------------
+# MINE Main Station: frozen visual body with durable Phase-3 history wiring.
+#
+# The page receives one immutable ``MineProjection`` from the existing shared
+# analytics refresh lane.  It owns no SQL, runtime, Monitor/Controller call,
+# timer or live MINE state.  Phase 3C changes only the durable Latest News,
+# Episode Timeline, Map and History contents; the frozen composition, live
+# slots and Deep Analysis surface remain otherwise untouched.
+# --------------------------------------------------------------------------
+
+_SHOWCASE_MINE_EPISODE_ID: Final = "MINE-09082926-01"
+
+#: Frozen MINE Activity captions with honest no-snapshot defaults.
+_SHOWCASE_MINE_ACTIVITY: Final = (
+    ("Current state", "No active episode"),
+    ("Current platform", "Unavailable"),
+    ("Branch", "Unavailable"),
+    ("Return status", "No active episode"),
+)
+
+_MINE_EVENT_LABELS: Final = {
+    "MINE_CANDIDATE_STARTED": "Messaging detected / MINE candidate started",
+    "MESSAGING_PLATFORM_ENTERED": "Messaging platform entered",
+    "MESSAGING_PLATFORM_TRANSITION": "Messenger platform changed",
+    "MESSAGING_DWELL_SEGMENT_COMPLETED": "Messaging dwell segment recorded",
+    "MINE_INITIAL_GATE_ELIGIBLE": "MINE-1 initial gate eligible",
+    "MINE1_REQUESTED": "MINE-1 pending / requested",
+    "MINE1_DISPLAYED": "MINE-1 displayed / active",
+    "MINE_EPISODE_STARTED": "MINE episode started",
+    "RETURN_INTENT_RECORDED": "I WILL COME BACK selected",
+    "IMPORTANT_INTENT_RECORDED": "IT'S IMPORTANT selected",
+    "RETURN_INTENT_WINDOW_STARTED": "Post-MINE1 return-intent window started",
+    "IMPORTANT_DURATION_REQUESTED": "Important duration requested",
+    "IMPORTANT_DURATION_COMMITTED": "Important duration committed",
+    "IMPORTANT_ALLOWANCE_STARTED": "Important allowance started",
+    "NORMAL_FINAL_DEADLINE_REACHED": "Normal final deadline reached",
+    "IMPORTANT_ALLOWANCE_DEADLINE_REACHED": "Important allowance deadline reached",
+    "MINE2A_REQUESTED": "MINE-2A pending / requested",
+    "MINE2A_DISPLAYED": "MINE-2A displayed / active",
+    "MINE2B_REQUESTED": "MINE-2B pending / requested",
+    "MINE2B_DISPLAYED": "MINE-2B displayed / active",
+    "RETURN_VISUAL_CONFIRMING_STARTED": "Return visual confirming started",
+    "FINAL_CALLBACK_HIDDEN_FOR_FOCUS": "Final callback hidden while focus evidence continues",
+    "FINAL_CALLBACK_RESTORED_AFTER_RELAPSE": "Final callback restored after relapse",
+    "RETURN_VERIFICATION_STARTED": "Return verification started",
+    "RETURN_VERIFICATION_COMPLETED": "Return verification completed",
+    "RETURN_VERIFICATION_INTERRUPTED": "Return verification interrupted",
+    "CLOSURE_CONFIRMATION_STARTED": "Closure confirmation started",
+    "CLOSURE_CONFIRMATION_COMPLETED": "Closure confirmation completed",
+    "CLOSURE_CONFIRMATION_INTERRUPTED": "Closure confirmation interrupted",
+    "RETURN_CONFIRMED": "Return confirmed",
+    "MINE_SESSION_CLOSED": "MINE episode closed",
+    "MINE_RUNTIME_STOPPED": "MINE runtime stopped",
+    "EMERGENCY_STOPPED": "MINE emergency stop recorded",
+    "COSINE_HANDOVER_STARTED": "COSINE handover started",
+    "COSINE_HANDOVER_RESUMED": "COSINE handover resumed",
+    "COSINE_HANDOVER_SETTLED": "COSINE handover settled",
+    "MINE_HANDOVER_SUPERSEDED_BY_CONTEXT": "MINE handover superseded by context",
+    "MINE_CANDIDATE_RESET": "MINE candidate reset before intervention",
+    "MINE_CANDIDATE_ENDED_BEFORE_INTERVENTION": "Messaging candidate ended before intervention",
+    "EVIDENCE_GAP": "Evidence gap recorded",
+    "STUDY_PREEMPTED_MINE": "Study Mode preempted MINE",
+    "STUDY_PREEMPTION_RELEASED": "Study Mode preemption released",
+    "GLOBAL_PAUSE_ENTERED": "Global Pause entered",
+    "GLOBAL_PAUSE_EXITED": "Global Pause exited",
+    "POPUP_DELIVERY_FAILED": "Popup delivery failed",
+}
+
+_MINE_TIMELINE_BUCKETS: Final = (
+    ("MINE1_DISPLAYED",),
+    ("RETURN_INTENT_RECORDED", "IMPORTANT_INTENT_RECORDED"),
+    ("RETURN_INTENT_WINDOW_STARTED", "IMPORTANT_ALLOWANCE_STARTED"),
+    ("MINE2A_DISPLAYED", "MINE2B_DISPLAYED"),
+    (
+        "RETURN_VISUAL_CONFIRMING_STARTED",
+        "RETURN_VERIFICATION_STARTED",
+        "RETURN_VERIFICATION_INTERRUPTED",
+        "RETURN_VERIFICATION_COMPLETED",
+    ),
+    (
+        "CLOSURE_CONFIRMATION_STARTED",
+        "CLOSURE_CONFIRMATION_INTERRUPTED",
+        "CLOSURE_CONFIRMATION_COMPLETED",
+    ),
+    ("MINE_RUNTIME_STOPPED", "EMERGENCY_STOPPED", "MINE_SESSION_CLOSED"),
+)
+
+
+def _mine_field_row(caption: str, value: str) -> QWidget:
+    """One ``caption: value`` row for the MINE Activity card."""
+
+    host = QWidget()
+    host.setObjectName("plainBox")
+    lay = QHBoxLayout(host)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(10)
+    lay.addWidget(label(f"{caption}:", 12, 400, "muted"))
+    lay.addStretch(1)
+    value_label = label(value, 12, 600, "text")
+    lay.addWidget(value_label)
+    host._mine_value_label = value_label  # noqa: SLF001 -- private view binding
+    return host
+
+
+def _mine_bullet_row(text: str) -> QWidget:
+    """One dotted bullet line for the Latest News / Episode Timeline cards."""
+
+    host = QWidget()
+    host.setObjectName("plainBox")
+    lay = QHBoxLayout(host)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(9)
+    lay.addWidget(Dot(6, "cyan", glow=False))
+    text_label = label(text, 12, 400, "text", wrap=True)
+    lay.addWidget(text_label)
+    host._mine_text_label = text_label  # noqa: SLF001 -- private view binding
+    return host
+
+
+def _mine_status_cell(text: str, role: str) -> QWidget:
+    """History row status -- coloured dot + status text, donor legend-row language."""
+
+    host = QWidget()
+    host.setObjectName("plainBox")
+    lay = QHBoxLayout(host)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(8)
+    lay.addWidget(Dot(8, _showcase_colour(role).name(), glow=False))
+    lay.addWidget(label(text, 11.5, 600, "text", spacing=0.4))
+    return host
+
+
+def _mine_words(value: object) -> str:
+    return " ".join(str(value or "").replace("_", " ").split())
+
+
+def _mine_episode_display(value: object) -> str:
+    """Accept only the Phase-4 presentation alias, never a durable raw ID."""
+
+    text = str(value or "").strip()
+    parts = text.split("-")
+    if (
+        len(parts) == 3
+        and parts[0] == "MINE"
+        and len(parts[1]) == 8
+        and parts[1].isdigit()
+        and len(parts[2]) >= 2
+        and parts[2].isdigit()
+    ):
+        return text
+    return "MINE EPISODE"
+
+
+def _mine_episode_alias(episode: object | None) -> str:
+    if episode is None:
+        return "MINE EPISODE"
+    return _mine_episode_display(getattr(episode, "display_episode_id", ""))
+
+
+def _mine_dwell_text(value: object) -> str:
+    """Format factual seconds without changing the stored numeric evidence."""
+
+    if type(value) not in {int, float} or not math.isfinite(float(value)) or value < 0:
+        return "Not recorded"
+    seconds = float(value)
+    whole = int(seconds)
+    nanos = int(round((seconds - whole) * 1_000_000_000))
+    if nanos == 1_000_000_000:
+        whole += 1
+        nanos = 0
+    hours, remainder = divmod(whole, 3600)
+    minutes, whole_seconds = divmod(remainder, 60)
+    base = (
+        f"{hours:02d}:{minutes:02d}:{whole_seconds:02d}"
+        if hours
+        else f"{minutes:02d}:{whole_seconds:02d}"
+    )
+    return base + (f".{nanos:09d}".rstrip("0") if nanos else "")
+
+
+def _mine_event_text(event: object) -> str:
+    """Translate one recorded event without adding a behavioral claim."""
+
+    name = str(getattr(event, "event_name", "") or "")
+    text = _MINE_EVENT_LABELS.get(name, _mine_words(name).title() or "Recorded MINE event")
+    facts = getattr(event, "payload_facts", {})
+    facts = facts if isinstance(facts, Mapping) else {}
+    if name == "MESSAGING_PLATFORM_ENTERED":
+        platform = str(getattr(event, "platform_label", "") or getattr(event, "platform_key", ""))
+        return f"{text}: {platform}" if platform else text
+    if name == "MESSAGING_PLATFORM_TRANSITION":
+        source = _mine_words(facts.get("from_platform"))
+        destination = str(
+            getattr(event, "platform_label", "")
+            or _mine_words(facts.get("to_platform"))
+        )
+        return f"Messenger hop: {source} → {destination}" if source and destination else text
+    if name == "MESSAGING_DWELL_SEGMENT_COMPLETED":
+        platform = str(getattr(event, "platform_label", "") or "").strip()
+        dwell = _mine_dwell_text(facts.get("dwell_seconds"))
+        detail = " · ".join(value for value in (platform, dwell) if value)
+        return f"{text}: {detail}" if detail else text
+    if name in {"RETURN_INTENT_RECORDED", "IMPORTANT_INTENT_RECORDED"}:
+        choice = _mine_words(facts.get("choice"))
+        return f"{choice} selected" if choice else text
+    if name in {"IMPORTANT_DURATION_COMMITTED", "IMPORTANT_ALLOWANCE_STARTED"}:
+        minutes = facts.get("duration_minutes")
+        return f"{text}: {minutes} minutes" if type(minutes) is int else text
+    if name in {"MINE_SESSION_CLOSED", "MINE_RUNTIME_STOPPED", "EMERGENCY_STOPPED"}:
+        outcome = _mine_words(facts.get("closure_outcome"))
+        return f"{text}: {outcome}" if outcome else text
+    if name in {
+        "RETURN_VERIFICATION_INTERRUPTED",
+        "CLOSURE_CONFIRMATION_INTERRUPTED",
+        "EVIDENCE_GAP",
+    }:
+        reason = _mine_words(facts.get("reason"))
+        return f"{text}: {reason}" if reason else text
+    return text
+
+
+def _mine_projected_stamp(value: object, *, include_date: bool) -> str:
+    """Compact a read-model-projected stamp; never perform timezone math."""
+
+    parts = str(value or "").split()
+    if len(parts) < 2:
+        return "—"
+    date_text = parts[0]
+    time_text = parts[1].split(".", 1)[0]
+    zone_text = parts[-1] if len(parts) > 2 else ""
+    if include_date:
+        return f"{date_text} {time_text[:5]}"
+    return " ".join(part for part in (time_text, zone_text) if part)
+
+
+def _mine_delta_text(value: object) -> str:
+    if type(value) not in {int, float} or not math.isfinite(float(value)) or value < 0:
+        return ""
+    seconds = float(value)
+    if seconds < 1:
+        return f"+{seconds:.3f}s"
+    rounded = int(round(seconds))
+    hours, remainder = divmod(rounded, 3600)
+    minutes, whole_seconds = divmod(remainder, 60)
+    if hours:
+        return f"+{hours}:{minutes:02d}:{whole_seconds:02d}"
+    return f"+{minutes:02d}:{whole_seconds:02d}"
+
+
+def _mine_event_pill(event: object) -> tuple[str, str]:
+    name = str(getattr(event, "event_name", "") or "")
+    if name == "MINE_CANDIDATE_STARTED":
+        return "start", "Start"
+    if name.endswith("_REQUESTED"):
+        return "", "Pending"
+    if name.endswith("_DISPLAYED"):
+        return "active", "Active"
+    if name.endswith("_INTERRUPTED") or name in {"EVIDENCE_GAP", "POPUP_DELIVERY_FAILED"}:
+        return "evidence", "Interrupted"
+    if name.endswith("_COMPLETED") or name in {"RETURN_CONFIRMED"}:
+        return "completed", "Completed"
+    if str(getattr(event, "event_class", "")) == "USER_ACTION":
+        return "completed", "Selected"
+    if str(getattr(event, "event_class", "")) == "PRESENTATION":
+        return "active", "Displayed"
+    if str(getattr(event, "event_class", "")) == "OBSERVED":
+        return "evidence", "Observed"
+    return "", "Derived"
+
+
+def _mine_timeline_events(episode: object) -> tuple[object, ...]:
+    """Select at most one factual event for each frozen compact-card slot."""
+
+    events = tuple(getattr(episode, "events", ()) or ())
+    selected = []
+    for names in _MINE_TIMELINE_BUCKETS:
+        matches = [event for event in events if getattr(event, "event_name", "") in names]
+        if matches:
+            # Recovery/closure buckets report the latest recorded state; the
+            # earlier pathway buckets report the first factual milestone.
+            selected.append(matches[-1] if names in _MINE_TIMELINE_BUCKETS[4:] else matches[0])
+    return tuple(selected)
+
+
+def _mine_history_status(episode: object) -> tuple[str, str, str]:
+    outcome = _mine_words(getattr(episode, "closure_outcome", None))
+    reason = _mine_words(getattr(episode, "closure_reason", None))
+    if not bool(getattr(episode, "is_closed", False)):
+        return "OPEN / INCOMPLETE", "amber", "No closure event recorded"
+    status = outcome.upper() if outcome else "CLOSED"
+    role = (
+        "green"
+        if status.startswith("RETURNED")
+        else "blue"
+        if status in {"COSINE HANDOVER", "STUDY PREEMPTION"}
+        else "red"
+    )
+    notes = f"Reason: {reason}" if reason else "Closure event recorded"
+    return status, role, notes
+
+
+def _mine_main_live_active(snapshot: object | None) -> bool:
+    if snapshot is None or not bool(_cosine_field(snapshot, "available", False)):
+        return False
+    return _cosine_phase_key(snapshot) not in {"", "IDLE", "CLOSED", "SHUTDOWN"}
+
+
+def _mine_main_return_status(snapshot: object, phase: str) -> str:
+    """Describe only the supplied phase/outcome; never predict a return."""
+
+    outcome = str(_cosine_field(snapshot, "closure_outcome", "") or "").strip()
+    if outcome:
+        return _mine_words(outcome).upper()
+    return {
+        "IDLE": "No active episode",
+        "SHUTDOWN": "No active episode",
+        "CLOSED": "Closed",
+        "OBSERVING_MESSAGING": "Return stage not started",
+        "STUDY_PREEMPTION_PENDING": "Study preemption pending",
+        "MINE1_PENDING": "Awaiting MINE-1 display",
+        "MINE1_ACTIVE": "Awaiting branch choice",
+        "RETURN_INTENT_ACTIVE": "Return intent active",
+        "IMPORTANT_DURATION_ENTRY": "Awaiting important duration",
+        "IMPORTANT_COMMIT_PENDING": "Starting important allowance",
+        "IMPORTANT_ALLOWANCE_ACTIVE": "Important allowance active",
+        "MINE2A_PENDING": "Awaiting MINE-2A display",
+        "MINE2A_ACTIVE": "Awaiting return",
+        "MINE2B_PENDING": "Awaiting MINE-2B display",
+        "MINE2B_ACTIVE": "Awaiting return",
+        "RETURN_VISUAL_CONFIRMING": "Return visual confirming",
+        "RETURN_VERIFYING": "Return verifying",
+        "CLOSURE_CONFIRMING": "Closure confirming",
+    }.get(phase, "Unavailable")
+
+
+def _mine_episode_key(episode: object | None) -> tuple[int, int] | None:
+    """Return the durable generation identity used by every analysis tab."""
+
+    if episode is None:
+        return None
+    session_id = getattr(episode, "session_id", None)
+    generation = getattr(episode, "generation", None)
+    if type(session_id) is not int or type(generation) is not int:
+        return None
+    return session_id, generation
+
+
+def _mine_event_named(episode: object, *names: str) -> object | None:
+    wanted = frozenset(names)
+    return next(
+        (
+            event
+            for event in tuple(getattr(episode, "events", ()) or ())
+            if str(getattr(event, "event_name", "") or "") in wanted
+        ),
+        None,
+    )
+
+
+def _mine_episode_summary(episode: object) -> str:
+    """Build a deterministic narrative from recorded episode facts only."""
+
+    events = tuple(getattr(episode, "events", ()) or ())
+    names = {str(getattr(event, "event_name", "") or "") for event in events}
+    clauses = []
+    platform = str(getattr(episode, "starting_platform_label", "") or "").strip()
+    if platform:
+        clauses.append(f"Messaging began on {platform}.")
+    if "MINE1_DISPLAYED" in names:
+        clauses.append("MINE-1 was displayed.")
+    branch = _mine_branch_words(getattr(episode, "branch", None))
+    if branch != "—":
+        clauses.append(f"{branch} was selected.")
+    if "MINE2A_DISPLAYED" in names:
+        clauses.append("MINE-2A was displayed.")
+    if "MINE2B_DISPLAYED" in names:
+        clauses.append("MINE-2B was displayed.")
+    if bool(getattr(episode, "return_verified", False)):
+        clauses.append("Return verification completed.")
+    if bool(getattr(episode, "is_closed", False)):
+        outcome = _mine_words(getattr(episode, "closure_outcome", None)).upper()
+        clauses.append(
+            f"The episode closed with {outcome}."
+            if outcome
+            else "The episode closed; no closure outcome was recorded."
+        )
+    else:
+        clauses.append("No closure event was recorded.")
+    return " ".join(clauses) or "No episode summary facts were recorded."
+
+
+def _mine_overview_trace(episode: object) -> tuple[tuple[str, str, object], ...]:
+    """Select the thesis-approved compact milestones without inferring gaps."""
+
+    buckets = (
+        ("START", "cyan", ("MINE_CANDIDATE_STARTED",)),
+        ("MINE-1", MINE_PURPLE, ("MINE1_DISPLAYED",)),
+        ("BRANCH", MINE_PURPLE, ("RETURN_INTENT_RECORDED", "IMPORTANT_INTENT_RECORDED")),
+        ("MINE-2", MINE_PURPLE, ("MINE2A_DISPLAYED", "MINE2B_DISPLAYED")),
+        ("RETURN", "cyan", ("RETURN_VERIFICATION_COMPLETED", "RETURN_CONFIRMED")),
+        ("CLOSED", "green", ("MINE_SESSION_CLOSED",)),
+    )
+    trace = []
+    for caption, role, names in buckets:
+        event = _mine_event_named(episode, *names)
+        if event is not None:
+            if caption == "CLOSED":
+                outcome = _mine_words(
+                    getattr(episode, "closure_outcome", None)
+                ).upper()
+                role = "green" if outcome.startswith("RETURNED") else (
+                    "blue" if outcome == "COSINE HANDOFF" else "red"
+                )
+            trace.append((caption, role, event))
+    return tuple(trace)
+
+
+def _mine_analysis_event_pill(event: object) -> tuple[str, str]:
+    """Translate an event name to a presentation status, never a new state."""
+
+    name = str(getattr(event, "event_name", "") or "")
+    exact = {
+        "RETURN_VERIFICATION_STARTED": ("active", "Verifying"),
+        "RETURN_VERIFICATION_COMPLETED": ("completed", "Verified"),
+        "RETURN_VERIFICATION_INTERRUPTED": ("evidence", "Interrupted"),
+        "CLOSURE_CONFIRMATION_STARTED": ("active", "Confirming"),
+        "CLOSURE_CONFIRMATION_COMPLETED": ("completed", "Completed"),
+        "CLOSURE_CONFIRMATION_INTERRUPTED": ("evidence", "Interrupted"),
+        "RETURN_CONFIRMED": ("completed", "Confirmed"),
+        "MINE_SESSION_CLOSED": ("completed", "Closed"),
+        "MINE_RUNTIME_STOPPED": ("evidence", "Stopped"),
+        "EMERGENCY_STOPPED": ("evidence", "Stopped"),
+    }
+    return exact.get(name, _mine_event_pill(event))
+
+
+def _mine_selected_step(episode: object) -> object | None:
+    """Use the factual branch event as the default selected step when present."""
+
+    return (
+        _mine_event_named(episode, "RETURN_INTENT_RECORDED", "IMPORTANT_INTENT_RECORDED")
+        or _mine_event_named(episode, "MINE_EPISODE_STARTED")
+        or next(iter(tuple(getattr(episode, "events", ()) or ())), None)
+    )
+
+
+def _mine_step_detail(episode: object) -> tuple[tuple[str, str], ...]:
+    events = tuple(getattr(episode, "events", ()) or ())
+    selected = _mine_selected_step(episode)
+    if selected is None:
+        return tuple((caption, "Not recorded") for caption in (
+            "Step", "Event", "Observed", "Platform", "Previous state", "Next state", "Status"
+        ))
+    index = events.index(selected)
+    previous = events[index - 1] if index else None
+    following = events[index + 1] if index + 1 < len(events) else None
+    _role, status = _mine_analysis_event_pill(selected)
+    platform = str(
+        getattr(selected, "platform_label", "")
+        or getattr(selected, "platform_key", "")
+        or ""
+    ).strip()
+    return (
+        ("Step", f"#{getattr(selected, 'sequence', index + 1)}"),
+        ("Event", _mine_event_text(selected)),
+        ("Observed", _mine_projected_stamp(
+            getattr(selected, "occurred_at_display", ""), include_date=True
+        )),
+        ("Platform", platform or "Not recorded"),
+        ("Previous state", _mine_event_text(previous) if previous is not None else "Not recorded"),
+        ("Next state", _mine_event_text(following) if following is not None else "Not recorded"),
+        ("Status", status or "Not recorded"),
+    )
+
+
+def _mine_return_detected_event(episode: object) -> object | None:
+    return _mine_event_named(
+        episode,
+        "RETURN_VISUAL_CONFIRMING_STARTED",
+        "RETURN_VERIFICATION_STARTED",
+        "RETURN_VERIFICATION_COMPLETED",
+        "RETURN_CONFIRMED",
+    )
+
+
+def _mine_event_detail(event: object) -> str:
+    facts = getattr(event, "payload_facts", {})
+    if not isinstance(facts, Mapping) or not facts:
+        return "No additional facts recorded"
+    return " · ".join(
+        f"{_mine_words(key).title()}: {_mine_words(value)}"
+        for key, value in facts.items()
+    )
+
+
+def _mine_status_role(event: object) -> str:
+    role, _status = _mine_analysis_event_pill(event)
+    return {
+        "completed": "green",
+        "active": "blue",
+        "evidence": "amber",
+        "start": "cyan",
+    }.get(role, "muted")
+
+
+def _mine_analysis_field_row(caption: str, value: str) -> QWidget:
+    """Use the frozen field row while allowing long factual text to wrap."""
+
+    row = _mine_field_row(caption, value)
+    row._mine_value_label.setMinimumWidth(0)  # noqa: SLF001 -- view binding
+    row._mine_value_label.setWordWrap(True)  # noqa: SLF001 -- view binding
+    return row
+
+
+def _mine_messenger_route(episode: object | None) -> tuple[tuple[str, str], ...]:
+    """Return only the projection's ordered, duplicate-collapsed platforms."""
+
+    if episode is None:
+        return ()
+    route = []
+    for item in tuple(getattr(episode, "messenger_platforms", ()) or ()):
+        if not isinstance(item, tuple) or len(item) != 2:
+            continue
+        key = str(item[0] or "").strip()
+        display = str(item[1] or key).strip()
+        if not key or (route and route[-1][0] == key):
+            continue
+        route.append((key, display or key))
+    return tuple(route)
+
+
+class MineDashboardShowcasePage(QWidget):
+    """Frozen MINE Main Station with live and durable presentation inputs.
+
+    The shared analytics lane supplies one immutable projection.  This page
+    formats only durable Latest News, recent Episode Timeline, the full
+    recorded episode map and History.  It opens no database, calls no MINE
+    runtime/Monitor/Controller method and starts no timer. The existing
+    controller live signal independently supplies one ``MineSnapshot`` to the
+    episode bar and Activity labels only. The separately authorized Deep
+    Analysis body remains untouched.
+    """
+
+    refresh_requested = pyqtSignal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("showcasePage")
+        self.setAccessibleName("MINE Main Station showcase")
+        self._projection: object | None = None
+        self._live_snapshot: object | None = None
+        self._refresh_failed = False
+        self._refreshing = False
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea(self)
+        scroll.setObjectName("showcaseScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        root.addWidget(scroll)
+
+        body = QWidget(scroll)
+        body.setObjectName("plainBox")
+        scroll.setWidget(body)
+        wrap = QVBoxLayout(body)
+        wrap.setContentsMargins(34, 14, 34, 34)
+        wrap.setSpacing(20)
+
+        wrap.addWidget(self._build_title())
+        wrap.addLayout(self._build_episode_bar())
+        wrap.addLayout(self._build_summary_row())
+        wrap.addWidget(self._build_map_card())
+        wrap.addWidget(self._build_history_card())
+        wrap.addStretch(1)
+
+        # The dedicated analysis surface is built once, hidden, and reused on
+        # every later click. Phase 3E lets it read this page's already-loaded
+        # immutable projection; it owns no refresh or persistence path.
+        self._analysis_overlay = MineDeepAnalysisDialog(self)
+        self._render_durable_history()
+        self.render_live_view(None)
+
+    # -- analytics refresh-lane contract -----------------------------
+
+    @property
+    def evidence_available(self) -> bool:
+        return (
+            self._projection is not None
+            and bool(getattr(self._projection, "available", False))
+            and not self._refresh_failed
+        )
+
+    @property
+    def episodes(self) -> tuple[object, ...]:
+        if not self.evidence_available:
+            return ()
+        return tuple(getattr(self._projection, "episodes", ()) or ())
+
+    @property
+    def current_episode(self) -> object | None:
+        if not self.evidence_available:
+            return None
+        return getattr(self._projection, "latest_or_selected_recent_episode", None)
+
+    def render_projection(self, projection: object) -> None:
+        self._projection = projection
+        self._refresh_failed = False
+        self._render_durable_history()
+        self._render_live_banner()
+        self._analysis_overlay.projection_changed()
+
+    def set_refreshing(self, refreshing: bool) -> None:
+        self._refreshing = bool(refreshing)
+
+    def show_refresh_failure(self) -> None:
+        # Durable cards withhold stale evidence; live/default cards are
+        # independent and remain untouched.
+        self._refresh_failed = True
+        self._render_durable_history()
+        self._analysis_overlay.projection_changed()
+
+    # -- live snapshot presentation ---------------------------------
+
+    def render_live_view(self, snapshot: object | None) -> None:
+        """Replace live labels from one snapshot; never touch durable history."""
+
+        self._live_snapshot = snapshot
+        self._render_live_banner()
+        self._render_live_activity()
+
+    def _render_live_banner(self) -> None:
+        _clear_layout(self._episode_bar_slot)
+        snapshot = self._live_snapshot
+        available = snapshot is not None and bool(
+            _cosine_field(snapshot, "available", False)
+        )
+        active = _mine_main_live_active(snapshot)
+        if active:
+            session_id = _cosine_field(snapshot, "parent_session_id", None)
+            generation = _cosine_field(snapshot, "generation", None)
+            matching_episode = next(
+                (
+                    episode
+                    for episode in self.episodes
+                    if _mine_episode_key(episode) == (session_id, generation)
+                ),
+                None,
+            )
+            raw_episode_id = str(
+                _cosine_field(snapshot, "mine_episode_id", "") or ""
+            ).strip()
+            status_value = (
+                _mine_episode_alias(matching_episode)
+                if matching_episode is not None
+                else "MINE EPISODE ACTIVE"
+                if raw_episode_id
+                else "Messaging candidate active"
+            )
+            paused = bool(_cosine_field(snapshot, "global_paused", False))
+            banner = showcase_episode_banner(
+                "Episode",
+                status_value,
+                "Live Status",
+                "PAUSED" if paused else "ACTIVE",
+                ok=True,
+                status_size=16.0,
+            )
+        elif snapshot is not None and not available:
+            banner = showcase_episode_banner(
+                "Episode",
+                "Evidence unavailable",
+                "",
+                "UNAVAILABLE",
+                ok=False,
+                status_size=16.0,
+            )
+        else:
+            banner = showcase_episode_banner(
+                "Episode",
+                "No active episode",
+                "",
+                "INACTIVE",
+                ok=False,
+                status_size=16.0,
+            )
+        self._episode_bar_slot.addWidget(banner)
+        _retheme_subtree(banner)
+
+    def _render_live_activity(self) -> None:
+        snapshot = self._live_snapshot
+        if snapshot is None:
+            values = dict(_SHOWCASE_MINE_ACTIVITY)
+        else:
+            phase = _cosine_phase_key(snapshot)
+            available = bool(_cosine_field(snapshot, "available", False))
+            if available:
+                state = (
+                    "Study Preemption Pending"
+                    if phase == "STUDY_PREEMPTION_PENDING"
+                    else _MINE_STATE_LABELS.get(phase, "Unknown")
+                )
+                if bool(_cosine_field(snapshot, "global_paused", False)):
+                    state = f"{state} · Paused"
+                platform = str(
+                    _cosine_field(snapshot, "current_platform_label", "")
+                    or _cosine_field(snapshot, "current_platform_key", "")
+                    or "Unavailable"
+                ).strip()
+                branch = _mine_branch_words(
+                    _cosine_field(snapshot, "selected_branch", "")
+                )
+                values = {
+                    "Current state": state,
+                    "Current platform": platform,
+                    "Branch": "Unavailable" if branch == "—" else branch,
+                    "Return status": _mine_main_return_status(snapshot, phase),
+                }
+            else:
+                values = {
+                    "Current state": "Unavailable",
+                    "Current platform": "Unavailable",
+                    "Branch": "Unavailable",
+                    "Return status": "Unavailable",
+                }
+        for caption, value in values.items():
+            self._activity_values[caption].setText(value)
+
+    # -- composition --------------------------------------------------
+
+    def _build_title(self) -> QFrame:
+        card, body = make_card(padding=18, shadow=False)
+        row = QHBoxLayout()
+        row.setSpacing(16)
+
+        text = QVBoxLayout()
+        text.setSpacing(6)
+        title = label("MINE MAIN STATION", 22, 700, "text", mono=True, spacing=3.0)
+        text.addWidget(title)
+        subtitle = label("Dedicated Dashboard", 12.5, 400, "muted", spacing=1.2)
+        text.addWidget(subtitle)
+        row.addLayout(text)
+        row.addStretch(1)
+
+        self._view_analysis_button = showcase_cta("VIEW ANALYSIS")
+        self._view_analysis_button.setEnabled(True)
+        self._view_analysis_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._view_analysis_button.clicked.connect(self._open_analysis)
+        row.addWidget(self._view_analysis_button, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        body.addLayout(row)
+        return card
+
+    def _open_analysis(self) -> None:
+        """Open the factual read-only Deep Analysis presentation.
+
+        No MINE action, DB action or timing action occurs here: the overlay
+        reads the projection this page already received from shared refresh.
+        """
+
+        self._analysis_overlay.open_overlay()
+
+    def _build_episode_bar(self) -> QVBoxLayout:
+        self._episode_bar_slot = QVBoxLayout()
+        self._episode_bar_slot.setContentsMargins(0, 0, 0, 0)
+        self._episode_bar_slot.setSpacing(0)
+        return self._episode_bar_slot
+
+    def _build_summary_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(20)
+        row.addWidget(self._build_activity_card(), 1)
+        row.addWidget(self._build_news_card(), 1)
+        row.addWidget(self._build_timeline_card(), 1)
+        return row
+
+    def _build_activity_card(self) -> QFrame:
+        card, body = make_card()
+        head, _ = card_head("MINE Activity", dot=True)
+        body.addWidget(head)
+        body.addSpacing(14)
+        self._activity_values = {}
+        for caption, value in _SHOWCASE_MINE_ACTIVITY:
+            row = _mine_field_row(caption, value)
+            self._activity_values[caption] = row._mine_value_label  # noqa: SLF001
+            body.addWidget(row)
+            body.addSpacing(10)
+        body.addStretch(1)
+        return card
+
+    def _build_news_card(self) -> QFrame:
+        card, body = make_card()
+        head, _ = card_head("Latest News")
+        body.addWidget(head)
+        body.addSpacing(14)
+        self._news_rows = []
+        for _index in range(3):
+            row = _mine_bullet_row("")
+            self._news_rows.append(row)
+            body.addWidget(row)
+            body.addSpacing(10)
+        body.addStretch(1)
+        return card
+
+    def _build_timeline_card(self) -> QFrame:
+        card, body = make_card()
+        head, self._timeline_episode_label = card_head("Episode Timeline", "")
+        body.addWidget(head)
+        body.addSpacing(14)
+        self._timeline_rows = []
+        for _index in range(7):
+            row = _mine_bullet_row("")
+            self._timeline_rows.append(row)
+            body.addWidget(row)
+            body.addSpacing(8)
+        body.addStretch(1)
+        return card
+
+    def _build_map_card(self) -> QFrame:
+        card, body = make_card()
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        head.addWidget(label("Map Of That Episode", 12.5, 700, "cyan", spacing=1.2))
+        head.addStretch(1)
+        self._map_episode_label = label("", 11.5, 400, "muted", mono=True)
+        head.addWidget(self._map_episode_label)
+        prev_button = _showcase_chevron_button(False)
+        next_button = _showcase_chevron_button(True)
+        head.addWidget(prev_button)
+        head.addWidget(next_button)
+        body.addLayout(head)
+        body.addSpacing(16)
+
+        strip_host = QScrollArea()
+        strip_host.setObjectName("showcaseScroll")
+        strip_host.setWidgetResizable(True)
+        strip_host.setFrameShape(QFrame.Shape.NoFrame)
+        strip_host.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        strip_host.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        strip_host.setMinimumHeight(150)
+
+        strip_body = QWidget()
+        strip_body.setObjectName("plainBox")
+        self._map_strip_layout = QHBoxLayout(strip_body)
+        self._map_strip_layout.setContentsMargins(0, 0, 0, 6)
+        self._map_strip_layout.setSpacing(6)
+
+        strip_host.setWidget(strip_body)
+        body.addWidget(strip_host)
+
+        step = 220
+
+        def _scroll(direction: int) -> None:
+            bar = strip_host.horizontalScrollBar()
+            bar.setValue(bar.value() + direction * step)
+
+        prev_button.clicked.connect(lambda: _scroll(-1))
+        next_button.clicked.connect(lambda: _scroll(1))
+        return card
+
+    def _build_history_card(self) -> QFrame:
+        card, body = make_card()
+        head, _ = card_head("History", dot=True)
+        body.addWidget(head)
+        body.addSpacing(16)
+
+        self._history_table = QGridLayout()
+        self._history_table.setHorizontalSpacing(14)
+        self._history_table.setVerticalSpacing(0)
+        body.addLayout(self._history_table)
+        return card
+
+    # -- durable history rendering ----------------------------------
+
+    def _evidence_message(self) -> str:
+        if self._refresh_failed:
+            return "MINE evidence unavailable · refresh failed"
+        if self._projection is None:
+            return "MINE evidence unavailable · not loaded"
+        if not bool(getattr(self._projection, "available", False)):
+            detail = str(getattr(self._projection, "status_message", "") or "refresh failed")
+            return f"MINE evidence unavailable · {detail}"
+        return "No MINE episodes available"
+
+    @staticmethod
+    def _set_bullet_rows(rows: list[QWidget], values: Sequence[str]) -> None:
+        for index, row in enumerate(rows):
+            visible = index < len(values)
+            if visible:
+                row._mine_text_label.setText(values[index])  # noqa: SLF001
+            row.setVisible(visible)
+
+    def _render_durable_history(self) -> None:
+        self._render_news()
+        self._render_timeline()
+        self._render_map()
+        self._render_history()
+        _retheme_subtree(self)
+
+    def _render_news(self) -> None:
+        if self.evidence_available:
+            events = tuple(getattr(self._projection, "latest_events", ()) or ())[:3]
+            values = tuple(
+                f"{_mine_projected_stamp(getattr(event, 'occurred_at_display', ''), include_date=False)}"
+                f" · {_mine_event_text(event)}"
+                for event in events
+            )
+            if not values:
+                values = ("No durable MINE events available",)
+        else:
+            values = (self._evidence_message(),)
+        self._set_bullet_rows(self._news_rows, values)
+
+    def _render_timeline(self) -> None:
+        episode = self.current_episode
+        if episode is None:
+            self._timeline_episode_label.setText("—")
+            self._timeline_episode_label.setToolTip("")
+            self._set_bullet_rows(self._timeline_rows, (self._evidence_message(),))
+            return
+        episode_alias = _mine_episode_alias(episode)
+        self._timeline_episode_label.setText(episode_alias)
+        self._timeline_episode_label.setToolTip(episode_alias)
+        values = tuple(_mine_event_text(event) for event in _mine_timeline_events(episode))
+        self._set_bullet_rows(
+            self._timeline_rows,
+            values or ("No compact timeline milestones recorded",),
+        )
+
+    def _render_map(self) -> None:
+        _clear_layout(self._map_strip_layout)
+        episode = self.current_episode
+        if episode is None:
+            self._map_episode_label.setText("—")
+            self._map_episode_label.setToolTip("")
+            self._map_strip_layout.addWidget(
+                showcase_flow_outcome(self._evidence_message(), "", kind="unavailable")
+            )
+            self._map_strip_layout.addStretch(1)
+            return
+
+        episode_alias = _mine_episode_alias(episode)
+        self._map_episode_label.setText(episode_alias)
+        self._map_episode_label.setToolTip(episode_alias)
+        events = tuple(getattr(episode, "events", ()) or ())
+        close = next(
+            (event for event in events if getattr(event, "event_name", "") == "MINE_SESSION_CLOSED"),
+            None,
+        )
+        path_events = tuple(event for event in events if event is not close)
+        for index, event in enumerate(path_events):
+            if index:
+                self._map_strip_layout.addWidget(
+                    ShowcaseFlowLink(_mine_delta_text(getattr(event, "elapsed_from_previous_seconds", None)))
+                )
+            pill_role, pill_text = _mine_event_pill(event)
+            self._map_strip_layout.addWidget(showcase_journey_step((
+                int(getattr(event, "sequence", index + 1)),
+                _mine_event_text(event),
+                pill_role,
+                pill_text,
+                _mine_words(getattr(event, "event_class", "Recorded")).title(),
+                _mine_projected_stamp(
+                    getattr(event, "occurred_at_display", ""), include_date=False
+                ),
+            )))
+
+        if close is not None:
+            if path_events:
+                self._map_strip_layout.addWidget(
+                    ShowcaseFlowLink(_mine_delta_text(
+                        getattr(close, "elapsed_from_previous_seconds", None)
+                    ))
+                )
+            outcome = _mine_words(getattr(episode, "closure_outcome", None)).upper() or "CLOSED"
+            kind = "returned" if outcome.startswith("RETURNED") else "other"
+            self._map_strip_layout.addWidget(showcase_flow_outcome(
+                outcome,
+                f"{_mine_words(getattr(close, 'event_class', 'Recorded')).title()} · "
+                f"{_mine_projected_stamp(getattr(close, 'occurred_at_display', ''), include_date=False)}",
+                kind=kind,
+            ))
+        else:
+            if path_events:
+                self._map_strip_layout.addWidget(ShowcaseFlowLink(""))
+            self._map_strip_layout.addWidget(
+                showcase_flow_outcome("OPEN / INCOMPLETE", "No closure event recorded", kind="open")
+            )
+        self._map_strip_layout.addStretch(1)
+
+    def _render_history(self) -> None:
+        _clear_layout(self._history_table)
+        headers = ("#", "Episode ID", "Start Time", "End Time", "Status", "Notes")
+        for column, name in enumerate(headers):
+            cell = label(name, 10, 700, "muted", spacing=1.2, upper=True)
+            cell.setContentsMargins(0, 8, 0, 8)
+            cell.setProperty("divider", True)
+            self._history_table.addWidget(cell, 0, column)
+
+        episodes = self.episodes
+        if not episodes:
+            message = label(self._evidence_message(), 12, 400, "muted", wrap=True)
+            message.setContentsMargins(0, 12, 0, 12)
+            self._history_table.addWidget(message, 1, 0, 1, len(headers))
+            self._history_table.setColumnStretch(5, 1)
+            return
+
+        for row_index, episode in enumerate(episodes, start=1):
+            status_text, status_role, notes = _mine_history_status(episode)
+            ended = (
+                _mine_projected_stamp(
+                    getattr(episode, "ended_at_display", ""), include_date=True
+                )
+                if bool(getattr(episode, "is_closed", False))
+                else "OPEN"
+            )
+            episode_alias = _mine_episode_alias(episode)
+            episode_id_label = label(
+                episode_alias, 12, 400, "text", mono=True
+            )
+            episode_id_label.setToolTip(episode_alias)
+            cells = (
+                label(str(row_index), 12, 400, "muted", mono=True),
+                episode_id_label,
+                label(
+                    _mine_projected_stamp(
+                        getattr(episode, "started_at_display", ""), include_date=True
+                    ),
+                    11.5,
+                    400,
+                    "muted",
+                    mono=True,
+                ),
+                label(ended, 11.5, 400, "muted", mono=True),
+                _mine_status_cell(status_text, status_role),
+                label(notes, 12, 400, "muted", wrap=True),
+            )
+            last = row_index == len(episodes)
+            for column, cell in enumerate(cells):
+                cell.setContentsMargins(0, 11, 0, 11)
+                if not last:
+                    cell.setProperty("divider", True)
+                self._history_table.addWidget(cell, row_index, column)
+        self._history_table.setColumnStretch(5, 1)
+
+
+# --------------------------------------------------------------------------
+# MINE Deep Analysis: Operation MINE Phase 2 -- dummy glass analysis surface.
+#
+# Visually aligned with ``CosineDeepAnalysisDialog``'s glass/translucent
+# language (blurred backdrop grab, floating panel, header/tabbar/scrollable
+# body/footer) but MINE keeps its own purple/cyan identity and its own,
+# fully independent dummy data -- it never imports or calls anything from
+# COSINE, MINE, Monitor, Controller or Persistence.  Every value below is a
+# fixed display fixture: this dialog holds no projection, requests no
+# refresh, reads no persistence, calls no MINE/Monitor/Controller method
+# and starts no timer.  Phase 3 must classify and replace every constant
+# here; see the Phase-2 execution thesis sec. 46 (Dummy Data Law) and
+# sec. 91 (field classification template).
+# --------------------------------------------------------------------------
+
+MINE_PURPLE: Final = "#A78BFA"
+
+_SHOWCASE_MINE_ANALYSIS_TABS: Final = (
+    ("overview", "Overview"),
+    ("episode_path", "Episode Path"),
+    ("mbi", "MBI"),
+    ("return_closure", "Return & Closure"),
+    ("about", "About"),
+)
+
+#: Overview -- last episode summary (dummy narrative, thesis sec. 13).
+_SHOWCASE_MINE_LAST_EPISODE_SUMMARY: Final = (
+    "Messaging began on WhatsApp. MINE-1 was displayed after qualifying "
+    "dwell, and I WILL COME BACK was selected. Messaging continued into "
+    "the post-MINE1 phase, and MINE-2A was later displayed. A return was "
+    "detected, verified, and the episode closed with RETURNED AFTER "
+    "CALLBACK."
+)
+
+#: Overview -- episode trace (label, colour role, observed time).
+_SHOWCASE_MINE_TRACE: Final = (
+    ("START", "cyan", "14:12:00"),
+    ("MINE-1", MINE_PURPLE, "14:22:05"),
+    ("BRANCH", MINE_PURPLE, "14:22:11"),
+    ("MINE-2", MINE_PURPLE, "15:35:36"),
+    ("RETURN", "cyan", "15:44:02"),
+    ("CLOSED", "green", "15:44:28"),
+)
+
+#: Overview -- compact fact cards.
+_SHOWCASE_MINE_OVERVIEW_FACTS: Final = (
+    ("Episode ID", _SHOWCASE_MINE_EPISODE_ID),
+    ("Platform", "WhatsApp"),
+    ("Branch", "I WILL COME BACK"),
+    ("Return", "VERIFIED"),
+    ("Outcome", "RETURNED AFTER CALLBACK"),
+)
+
+#: Episode Path -- (index, name, chip role, chip text, observed, platform,
+#: delta on the link arriving at this node; "" on the first node).  Chip
+#: roles reuse the SAME ``_JOURNEY_PILL_ROLES`` vocabulary as the Main
+#: Station map -- presentation buckets, not MINE-specific policy.
+_SHOWCASE_MINE_EPISODE_PATH_NODES: Final = (
+    (1, "Messaging detected", "start", "Start", "14:12:00", "WhatsApp", ""),
+    (2, "MINE-1 pending", "", "Pending", "14:22:00", "WhatsApp", "+10:00"),
+    (3, "MINE-1 active", "active", "Active", "14:22:05", "WhatsApp", "+00:05"),
+    (4, "I WILL COME BACK", "active", "Selected", "14:22:11", "WhatsApp", "+00:06"),
+    (5, "post-MINE1 timer", "active", "Active", "14:22:16", "WhatsApp", "+00:05"),
+    (6, "MINE-2A pending", "", "Pending", "15:35:31", "WhatsApp", "+1:13:15"),
+    (7, "MINE-2A active", "active", "Active", "15:35:36", "WhatsApp", "+00:05"),
+    (8, "return detected", "evidence", "Observed", "15:58:40", "VS Code", "+23:04"),
+    (9, "return verifying", "active", "Verifying", "15:59:10", "VS Code", "+00:30"),
+    (10, "closure confirming", "completed", "Confirming", "16:40:50", "VS Code", "+41:40"),
+)
+
+#: (label, selected) -- both MINE-1 choices; only one is ever taken.
+_SHOWCASE_MINE_BRANCH_ROUTE: Final = (
+    ("I WILL COME BACK", True),
+    ("IT'S IMPORTANT", False),
+)
+
+#: (platform, context tag) -- platform / context movement across the episode.
+_SHOWCASE_MINE_MESSAGING_JOURNEY: Final = (
+    ("WhatsApp", "MESSAGING"),
+    ("WhatsApp", "MESSAGING"),
+    ("Chrome", "NEUTRAL PAUSE"),
+    ("Telegram", "MESSAGING"),
+    ("VS Code", "RETURN"),
+)
+
+#: The default selected node's detail strip (thesis sec. 21 example).
+_SHOWCASE_MINE_STEP_DETAIL: Final = (
+    ("Step", "#4"),
+    ("Event", "I WILL COME BACK"),
+    ("Observed", "14:22:11"),
+    ("Platform", "WhatsApp"),
+    ("Previous state", "MINE-1 active"),
+    ("Next state", "post-MINE1 timer"),
+    ("Status", "Selected"),
+)
+
+# --------------------------------------------------------------------------
+# Episode Path -- historical dummy episode selection ("MAP THIS EPISODE").
+#
+# Three independent dummy specimens, each with its own path nodes, branch,
+# messaging journey and step detail -- so choosing one and mapping it
+# visibly changes the Episode Path tab.  Selection lives only in
+# ``MineDeepAnalysisDialog._selected_episode_id`` (local widget state); it
+# is never written anywhere, never read by any engine, and does not follow
+# the user to any other tab.
+# --------------------------------------------------------------------------
+
+_SHOWCASE_MINE_LATEST_EPISODE_ID: Final = _SHOWCASE_MINE_EPISODE_ID
+
+#: Specimen 2 -- IT'S IMPORTANT branch, temporary allowance, MINE-2B variant.
+_SHOWCASE_MINE_EPISODE_PATH_NODES_2: Final = (
+    (1, "Messaging detected", "start", "Start", "09:03:00", "Telegram", ""),
+    (2, "MINE-1 pending", "", "Pending", "09:13:00", "Telegram", "+10:00"),
+    (3, "MINE-1 active", "active", "Active", "09:13:04", "Telegram", "+00:04"),
+    (4, "IT'S IMPORTANT", "active", "Selected", "09:13:12", "Telegram", "+00:08"),
+    (5, "allowance active", "active", "Active", "09:13:12", "Telegram", "+00:00"),
+    (6, "allowance expired", "", "Expired", "09:26:27", "Telegram", "+13:15"),
+    (7, "MINE-2B pending", "", "Pending", "09:26:32", "Telegram", "+00:05"),
+    (8, "MINE-2B active", "active", "Active", "09:26:37", "Telegram", "+00:05"),
+    (9, "closure confirming", "completed", "Confirming", "09:46:50", "Telegram", "+20:13"),
+)
+
+#: Specimen 3 -- I WILL COME BACK branch, no return ever observed.
+_SHOWCASE_MINE_EPISODE_PATH_NODES_3: Final = (
+    (1, "Messaging detected", "start", "Start", "21:16:00", "Instagram", ""),
+    (2, "MINE-1 pending", "", "Pending", "21:26:00", "Instagram", "+10:00"),
+    (3, "MINE-1 active", "active", "Active", "21:26:03", "Instagram", "+00:03"),
+    (4, "I WILL COME BACK", "active", "Selected", "21:26:09", "Instagram", "+00:06"),
+    (5, "post-MINE1 timer", "active", "Active", "21:26:14", "Instagram", "+00:05"),
+    (6, "MINE-2A pending", "", "Pending", "21:39:29", "Instagram", "+13:15"),
+    (7, "MINE-2A active", "active", "Active", "21:39:34", "Instagram", "+00:05"),
+    (8, "no return observed", "", "Unresolved", "22:01:34", "Instagram", "+22:00"),
+)
+
+#: (episode id -> outcome, path nodes, terminal card, branch, messaging
+#: journey, step detail).  ``terminal`` is (text, sub, kind, delta-in);
+#: ``kind`` reuses ``showcase_flow_outcome``'s own returned/else-red rule.
+_SHOWCASE_MINE_EPISODE_SPECIMENS: Final = {
+    "MINE-09082926-01": {
+        "outcome": "RETURNED AFTER CALLBACK",
+        "nodes": _SHOWCASE_MINE_EPISODE_PATH_NODES,
+        "terminal": ("CLOSED", "Derived · 16:41:00", "returned", "+00:10"),
+        "branch": _SHOWCASE_MINE_BRANCH_ROUTE,
+        "journey": _SHOWCASE_MINE_MESSAGING_JOURNEY,
+        "step_detail": _SHOWCASE_MINE_STEP_DETAIL,
+    },
+    "MINE-09082925-02": {
+        "outcome": "CLOSED",
+        "nodes": _SHOWCASE_MINE_EPISODE_PATH_NODES_2,
+        "terminal": ("CLOSED", "Derived · 09:47:00", "returned", "+00:10"),
+        "branch": (
+            ("I WILL COME BACK", False),
+            ("IT'S IMPORTANT", True),
+        ),
+        "journey": (
+            ("Telegram", "MESSAGING"),
+            ("Telegram", "MESSAGING"),
+            ("Telegram", "RETURN"),
+        ),
+        "step_detail": (
+            ("Step", "#4"),
+            ("Event", "IT'S IMPORTANT"),
+            ("Observed", "09:13:12"),
+            ("Platform", "Telegram"),
+            ("Previous state", "MINE-1 active"),
+            ("Next state", "allowance active"),
+            ("Status", "Selected"),
+        ),
+    },
+    "MINE-09082924-03": {
+        "outcome": "NO RETURN",
+        "nodes": _SHOWCASE_MINE_EPISODE_PATH_NODES_3,
+        "terminal": ("NO RETURN", "Derived · 22:02:00", "no_return", "+00:26"),
+        "branch": (
+            ("I WILL COME BACK", True),
+            ("IT'S IMPORTANT", False),
+        ),
+        "journey": (
+            ("Instagram", "MESSAGING"),
+            ("Instagram", "MESSAGING"),
+        ),
+        "step_detail": (
+            ("Step", "#4"),
+            ("Event", "I WILL COME BACK"),
+            ("Observed", "21:26:09"),
+            ("Platform", "Instagram"),
+            ("Previous state", "MINE-1 active"),
+            ("Next state", "post-MINE1 timer"),
+            ("Status", "Selected"),
+        ),
+    },
+}
+
+#: MBI -- five approved dwell bands (label, dummy record count).
+_SHOWCASE_MINE_MBI_BANDS: Final = (
+    ("LESS THAN 10 MIN", "4"),
+    ("11–30 MIN", "7"),
+    ("31–60 MIN", "3"),
+    ("61–120 MIN", "2"),
+    ("MORE THAN 120 MIN", "1"),
+)
+
+#: MBI dwell table -- (platform, dwell, band, episode id, notes).
+_SHOWCASE_MINE_MBI_TABLE: Final = (
+    ("WhatsApp", "02:00:00", "61–120 MIN", "MINE-09082926-01", "continuous messaging dwell"),
+    ("Telegram", "00:24:18", "11–30 MIN", "MINE-09082925-02", "moderate dwell"),
+    ("Discord", "00:47:36", "31–60 MIN", "MINE-09082924-03", "long dwell"),
+    ("WhatsApp", "00:07:42", "LESS THAN 10 MIN", "MINE-09082923-04", "short messaging session"),
+    ("Microsoft Teams", "02:31:08", "MORE THAN 120 MIN", "MINE-09082922-05", "extended dwell"),
+)
+
+#: MBI -- dwell rows for the one band the filtered view has a specimen for.
+#: Any other band shows the honest "NO DWELL RECORDS" empty state.
+_SHOWCASE_MINE_MBI_FILTERED: Final = {
+    "61–120 MIN": (
+        ("WhatsApp", "01:18:24"),
+        ("Telegram", "01:42:10"),
+        ("WhatsApp", "02:00:00"),
+        ("Discord", "01:07:31"),
+    ),
+}
+
+_SHOWCASE_MINE_MBI_DETAIL: Final = (
+    ("Platform", "WhatsApp"),
+    ("Dwell", "02:00:00"),
+    ("Band", "61–120 MIN"),
+    ("Episode", _SHOWCASE_MINE_EPISODE_ID),
+    ("Started", "14:12:00"),
+    ("Ended", "16:12:00"),
+    ("Branch", "I WILL COME BACK"),
+    ("Final outcome", "RETURNED AFTER CALLBACK"),
+)
+
+#: (colour role, label, explanation) -- presentation vocabulary only.
+_SHOWCASE_MINE_MBI_LEGEND: Final = (
+    ("green", "Messaging", "Active messaging period within the same app"),
+    ("cyan", "App Switch", "Transition between different applications"),
+    ("muted", "Neutral Pause", "No messaging activity (pause interval)"),
+    (MINE_PURPLE, "Return", "User returned to continue the conversation"),
+)
+
+#: Return & Closure -- recovery snapshot (label, value).
+_SHOWCASE_MINE_RECOVERY_SNAPSHOT: Final = (
+    ("Return Detected", "15:44:02"),
+    ("Return Verified", "YES"),
+    ("Closure Confirmed", "YES"),
+    ("Final State", "CLOSED"),
+    ("Return Latency", "08:26"),
+    ("Callback Result", "RETURNED"),
+    ("Closed At", "15:44:28"),
+)
+
+#: Return & Closure -- trace (label, colour role, observed, detail).
+_SHOWCASE_MINE_RETURN_TRACE: Final = (
+    ("MINE-2A", MINE_PURPLE, "15:35:36", "Last intervention displayed"),
+    ("RETURN DETECTED", "cyan", "15:44:02", "User back on task"),
+    ("VISUAL CONFIRMING", "blue", "15:44:08", "Focused activity observed"),
+    ("RETURN VERIFYING", "blue", "15:44:12", "Sustained presence check"),
+    ("RETURN VERIFIED", "green", "15:44:18", "Return confirmed"),
+    ("CLOSURE CONFIRMING", "amber", "15:44:18", "Final safety window"),
+    ("CLOSED", "green", "15:44:28", "Episode ended"),
+)
+
+_SHOWCASE_MINE_RETURN_DETAIL: Final = (
+    ("Detected at", "15:44:02"),
+    ("Returned from", "VS Code"),
+    ("Previous state", "MINE-2A active"),
+    ("Verification", "VERIFIED"),
+    ("Callback result", "RETURNED AFTER CALLBACK"),
+)
+
+_SHOWCASE_MINE_VERIFICATION_DETAIL: Final = (
+    ("Return detected", "15:44:02"),
+    ("Visual confirming", "15:44:08"),
+    ("Return verifying", "15:44:12"),
+    ("Return verified", "15:44:18"),
+)
+
+_SHOWCASE_MINE_CLOSURE_DETAIL: Final = (
+    ("Closure started", "15:44:18"),
+    ("Closure state", "Confirming"),
+    ("Closed at", "15:44:28"),
+    ("Closure result", "CLOSED"),
+    ("Episode duration", "00:29:28"),
+)
+
+#: Recovery ledger -- (#, time, event, state, platform/context, detail,
+#: state colour role for the small status dot).
+_SHOWCASE_MINE_RECOVERY_LEDGER: Final = (
+    ("1", "15:44:02", "Return detected", "OBSERVED", "VS Code",
+     "User returned to productive application", "muted"),
+    ("2", "15:44:08", "Visual confirming", "CONFIRMING", "VS Code",
+     "Focused activity detected", "amber"),
+    ("3", "15:44:12", "Return verifying", "VERIFYING", "VS Code",
+     "Sustained presence check (in progress)", "blue"),
+    ("4", "15:44:18", "Return verified", "VERIFIED", "VS Code",
+     "Return confirmed", "green"),
+    ("5", "15:44:28", "Closure confirming", "CONFIRMING", "VS Code",
+     "Final safety window", "amber"),
+    ("6", "15:44:28", "Episode closed", "CLOSED", "VS Code",
+     "Episode successfully closed", "green"),
+)
+
+#: About -- conceptual policy flow.  Not an episode instance: no times, no
+#: chips, because nothing here happened at a specific observed moment.
+_SHOWCASE_MINE_ABOUT_FLOW: Final = (
+    "Messaging detected",
+    "Qualifying dwell",
+    "MINE-1",
+    "User branch",
+    "Post-MINE1",
+    "MINE-2",
+    "Return",
+    "Verification",
+    "Closure",
+)
+
+_SHOWCASE_MINE_ABOUT_TIMING: Final = (
+    "MINE-1: first intervention at 10:00 of qualifying messaging use.",
+    "Post-MINE1: a new independent timer begins only after MINE-1 is "
+    "actually displayed.",
+    "Post-MINE1 duration: 13:15.",
+    "MINE-2: second and final intervention. No buttons.",
+)
+
+_SHOWCASE_MINE_ABOUT_PURPOSE: Final = (
+    "Increase awareness of extended messaging interruptions",
+    "Encourage self-control",
+    "Reduce prolonged messaging use during intended work or study",
+    "Support focused work or study",
+)
+
+_SHOWCASE_MINE_ABOUT_TABS: Final = (
+    ("Overview", "Key facts and outcome at a glance."),
+    ("Episode Path", "Complete route of events step by step."),
+    ("MBI", "Messaging dwell analysis and duration distribution."),
+    ("Return & Closure", "Recovery sequence and closure details."),
+)
+
+_SHOWCASE_MINE_VERSION_INFO: Final = (
+    ("Project", "MYELIN 2.0"),
+    ("Module", "MINE Main Station"),
+    ("Dashboard type", "Read-only analysis"),
+    ("Durable data source", "mine_events via MineProjection"),
+    ("Live data source", "mine_watch_status_changed via MineSnapshot"),
+    ("Status", "Phase 4 certification candidate"),
+)
+
+
+class MineDeepAnalysisDialog(QWidget):
+    """MINE Deep Analysis -- glass overlay over one durable episode.
+
+    Structurally mirrors ``CosineDeepAnalysisDialog`` (blurred backdrop
+    grab, floating translucent panel, header / tabbar / scrollable body /
+    footer, Escape-to-close, click-outside-to-close) so MINE reads as a
+    sibling MYELIN organ rather than an unrelated widget -- but it is not a
+    clone: MINE keeps its own purple/cyan identity, its own header/footer
+    copy, and it never touches COSINE's code or data. It is the child of
+    exactly one ``MineDashboardShowcasePage``, built once and reused on
+    every later open.
+
+    Overview, Episode Path, Branch Route, Selected Step Detail, Return &
+    Closure and MBI consume the parent page's existing ``MineProjection`` only.
+    Selection is the durable ``(session_id, generation)`` key. Refresh merely
+    rebuilds the active presentation and never queries MINE, Monitor,
+    Controller or the database. Phase 4 presents only explicit durable dwell
+    segments; legacy episodes remain unrecorded and are never reconstructed.
+    PDF export requests one fresh shared projection, then passes that immutable
+    projection to MINE's dedicated A4 report renderer.
+    """
+
+    _EPISODE_ID: Final = _SHOWCASE_MINE_EPISODE_ID
+    _EXPORT_FEEDBACK_MS: Final = 4000
+
+    def __init__(self, page: "MineDashboardShowcasePage") -> None:
+        super().__init__(page)
+        self._page = page
+        self._backdrop: QPixmap | None = None
+        self._active = "overview"
+        self._tabs: dict[str, QPushButton] = {}
+        # Local presentation selection only. It is never persisted and every
+        # episode-specific 3E tab resolves the same durable generation key.
+        self._selected_episode_key: tuple[int, int] | None = None
+        self._episode_combo: QComboBox | None = None
+        self._map_episode_button: QPushButton | None = None
+        self._back_to_latest_button: QPushButton | None = None
+        self._exporting = False
+        self._export_pending_refresh = False
+        self._export_button: QPushButton | None = None
+        self.hide()
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(26, 26, 26, 26)
+
+        panel = QFrame(self)
+        panel.setObjectName("mineGlassPanel")
+        panel.setFrameShape(QFrame.Shape.NoFrame)
+        panel.setMaximumHeight(900)
+        surface = QColor(DEFAULT_THEME.surface)
+        panel.setStyleSheet(
+            f"QFrame#mineGlassPanel {{ background: rgba({surface.red()},"
+            f"{surface.green()},{surface.blue()},0.55);"
+            f" border: 1px solid {mix(MINE_PURPLE, 26, DEFAULT_THEME.border)};"
+            f" border-radius: {RADIUS_LG}px; }}"
+        )
+        card_shadow(panel, blur=80, dy=30, strength=0.7)
+        self._panel = panel
+        root.addWidget(panel)
+
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(self._build_header())
+        lay.addWidget(self._build_tabbar())
+
+        self._body = QScrollArea(panel)
+        self._body.setWidgetResizable(True)
+        self._body.setFrameShape(QFrame.Shape.NoFrame)
+        self._body.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        lay.addWidget(self._body, 1)
+        lay.addWidget(self._build_footer())
+
+    # ---------------------------------------------------------------- chrome
+    def _build_header(self) -> QWidget:
+        host = QWidget()
+        host.setFixedHeight(74)
+        host.setStyleSheet(
+            "QWidget { background: rgba(255,255,255,0.02);"
+            " border-bottom: 1px solid rgba(255,255,255,0.10); }"
+        )
+        lay = QHBoxLayout(host)
+        lay.setContentsMargins(26, 14, 26, 14)
+        lay.setSpacing(14)
+
+        icon = NavIcon(PAGE_MINE, host)
+        icon.set_colour(MINE_PURPLE)
+        lay.addWidget(icon)
+
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        title = QLabel("MINE — DEEP ANALYSIS")
+        title.setFont(make_font(13, 700, mono=True, spacing=2.0))
+        title.setStyleSheet(
+            f"color: {DEFAULT_THEME.text_primary}; background: transparent;"
+        )
+        titles.addWidget(title)
+        self._subtitle = QLabel("Evidence not loaded")
+        self._subtitle.setFont(make_font(11, 400))
+        self._subtitle.setStyleSheet(
+            f"color: {DEFAULT_THEME.muted}; background: transparent;"
+        )
+        titles.addWidget(self._subtitle)
+        lay.addLayout(titles)
+
+        centre = QLabel("Messaging Intervention Nudge Escalation")
+        centre.setFont(make_font(12, 400))
+        centre.setStyleSheet(f"color: {DEFAULT_THEME.muted}; background: transparent;")
+        centre.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(centre, 1)
+
+        refresh = showcase_outline_button("Refresh", small=True)
+        refresh.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        refresh.clicked.connect(self.refresh_body)
+        lay.addWidget(refresh)
+
+        export = showcase_outline_button("Export PDF", small=True)
+        self._export_button = export
+        export.setEnabled(False)
+        export.setToolTip("A completed durable MINE episode is required.")
+        export.clicked.connect(self._begin_pdf_export)
+        lay.addWidget(export)
+
+        close = QPushButton("✕")
+        close.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        close.setFixedSize(32, 32)
+        close.setFont(make_font(13, 400))
+        close.setStyleSheet(
+            f"QPushButton {{ color: {DEFAULT_THEME.muted};"
+            " background: rgba(255,255,255,0.03);"
+            " border: 1px solid rgba(255,255,255,0.18); border-radius: 16px; }"
+            f"QPushButton:hover {{ color: {DEFAULT_THEME.text_primary};"
+            f" border-color: {mix(MINE_PURPLE, 45, DEFAULT_THEME.border)}; }}"
+        )
+        close.clicked.connect(self.close_overlay)
+        lay.addWidget(close)
+        return host
+
+    def _build_tabbar(self) -> QWidget:
+        host = QWidget()
+        host.setStyleSheet(
+            "QWidget { background: rgba(255,255,255,0.015);"
+            " border-bottom: 1px solid rgba(255,255,255,0.08); }"
+        )
+        lay = QHBoxLayout(host)
+        lay.setContentsMargins(20, 10, 20, 10)
+        lay.setSpacing(6)
+        for key, text in _SHOWCASE_MINE_ANALYSIS_TABS:
+            # "&" is a Qt mnemonic marker on QPushButton text; escape it so
+            # "RETURN & CLOSURE" renders its literal ampersand.
+            button = QPushButton(text.upper().replace("&", "&&"))
+            button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            button.setFont(make_font(11, 700, spacing=0.9))
+            button.clicked.connect(lambda _checked=False, k=key: self.select_tab(k))
+            self._tabs[key] = button
+            lay.addWidget(button)
+        lay.addStretch(1)
+        return host
+
+    def _build_footer(self) -> QWidget:
+        host = QWidget()
+        host.setFixedHeight(44)
+        host.setStyleSheet(
+            "QWidget { background: rgba(255,255,255,0.015);"
+            " border-top: 1px solid rgba(255,255,255,0.08); }"
+        )
+        lay = QHBoxLayout(host)
+        lay.setContentsMargins(26, 10, 26, 10)
+        self._footer_left = QLabel("MINE · Durable episode analysis")
+        self._footer_left.setFont(make_font(11, 400))
+        self._footer_left.setStyleSheet(
+            f"color: {DEFAULT_THEME.muted}; background: transparent;"
+        )
+        lay.addWidget(self._footer_left)
+        lay.addStretch(1)
+        self._footer_right = QLabel("Evidence unavailable")
+        self._footer_right.setFont(make_font(10, 400, mono=True, spacing=0.6))
+        self._footer_right.setStyleSheet(
+            f"color: {DEFAULT_THEME.muted}; background: transparent;"
+        )
+        lay.addWidget(self._footer_right)
+        return host
+
+    def select_tab(self, key: str) -> None:
+        self._active = key
+        self.refresh_body()
+
+    def _can_export(self) -> bool:
+        return bool(
+            self._page.evidence_available
+            and any(
+                bool(getattr(episode, "is_closed", False))
+                for episode in self._episodes()
+            )
+        )
+
+    def _begin_pdf_export(self) -> None:
+        """Request one shared refresh; render only after its result arrives."""
+
+        if self._exporting:
+            return
+        if not self._can_export():
+            self._set_export_feedback("NO COMPLETED EPISODE")
+            return
+        self._exporting = True
+        self._export_pending_refresh = True
+        self._export_button.setEnabled(False)
+        self._export_button.setText("REFRESHING EVIDENCE...")
+        self._page.refresh_requested.emit()
+
+    def _complete_pdf_export(self) -> None:
+        if not self._export_pending_refresh:
+            return
+        self._export_pending_refresh = False
+        button = self._export_button
+        if button is None:
+            self._exporting = False
+            return
+        if not self._page.evidence_available:
+            self._set_export_feedback("EXPORT UNAVAILABLE")
+            return
+
+        from MINE.report import (
+            MinePdfReportRequest,
+            build_mine_report_pdf,
+            suggested_report_filename,
+        )
+
+        projection = self._page._projection
+        button.setText("EXPORTING...")
+        try:
+            filename = suggested_report_filename(projection)
+            output = Path.home() / "Downloads" / filename
+            result = build_mine_report_pdf(
+                projection,
+                MinePdfReportRequest(output_path=output, overwrite=True),
+            )
+        except Exception as error:  # export must never take the dashboard down
+            print(
+                f"[MYELIN][EXPORT] MINE pdf failed: {type(error).__name__}",
+                flush=True,
+            )
+            self._set_export_feedback("EXPORT FAILED")
+            return
+        print(
+            f"[MYELIN][EXPORT] MINE pdf written: {Path(result.output_path).name}",
+            flush=True,
+        )
+        self._set_export_feedback("PDF SAVED TO DOWNLOADS")
+
+    def _set_export_feedback(self, text: str) -> None:
+        if self._export_button is None:
+            self._exporting = False
+            self._export_pending_refresh = False
+            return
+        self._export_button.setText(text)
+        QTimer.singleShot(self._EXPORT_FEEDBACK_MS, self._restore_export_button)
+
+    def _restore_export_button(self) -> None:
+        self._exporting = False
+        self._export_pending_refresh = False
+        try:
+            self._export_button.setText("Export PDF")
+            self._export_button.setEnabled(self._can_export())
+            self._export_button.setToolTip(
+                "Export the latest completed MINE episode as a three-page A4 PDF"
+                if self._can_export()
+                else "A completed durable MINE episode is required."
+            )
+        except RuntimeError:
+            return
+
+    def _style_tabs(self) -> None:
+        for key, button in self._tabs.items():
+            if key == self._active:
+                button.setStyleSheet(
+                    f"QPushButton {{ color: {DEFAULT_THEME.cyan};"
+                    f" background: {mix(DEFAULT_THEME.cyan, 13, DEFAULT_THEME.surface)};"
+                    f" border: 1px solid {mix(DEFAULT_THEME.cyan, 40, DEFAULT_THEME.surface)};"
+                    f" border-radius: {RADIUS_SM}px; padding: 9px 15px; }}"
+                )
+            else:
+                button.setStyleSheet(
+                    f"QPushButton {{ color: {DEFAULT_THEME.muted}; background: transparent;"
+                    " border: 1px solid transparent;"
+                    f" border-radius: {RADIUS_SM}px; padding: 9px 15px; }}"
+                    f"QPushButton:hover {{ color: {DEFAULT_THEME.text_primary};"
+                    " background: rgba(255,255,255,0.05); }"
+                )
+
+    # -------------------------------------------------------------- helpers
+    def _section(self, lay: QVBoxLayout, title: str, hint: str = "") -> None:
+        head = label(title, 12, 700, "cyan", spacing=1.1, upper=True)
+        lay.addWidget(head)
+        if hint:
+            lay.addSpacing(4)
+            sub = label(hint, 11, 400, "muted", wrap=True)
+            lay.addWidget(sub)
+        lay.addSpacing(12)
+
+    def _note(self, lay: QVBoxLayout, text: str, tone: str = "muted") -> None:
+        colour = DEFAULT_THEME.muted if tone == "muted" else _showcase_colour(tone).name()
+        host = QFrame()
+        host.setFrameShape(QFrame.Shape.NoFrame)
+        host.setStyleSheet(
+            f"QFrame {{ background: {qalpha(QColor(colour), 0.08).name(QColor.NameFormat.HexArgb)};"
+            f" border: 1px dashed {qalpha(QColor(colour), 0.45).name(QColor.NameFormat.HexArgb)};"
+            f" border-radius: {RADIUS_SM}px; }}"
+        )
+        inner = QVBoxLayout(host)
+        inner.setContentsMargins(14, 12, 14, 12)
+        body = label(text, 11.5, 400, "text", wrap=True)
+        body.setStyleSheet(f"color: {colour}; background: transparent;")
+        inner.addWidget(body)
+        lay.addWidget(host)
+        lay.addSpacing(16)
+
+    def _stat_row(self, lay: QVBoxLayout, items: tuple, columns: int = 5) -> None:
+        row = None
+        for index, (caption, value) in enumerate(items):
+            if index % columns == 0:
+                row = QHBoxLayout()
+                row.setSpacing(14)
+                lay.addLayout(row)
+                lay.addSpacing(14)
+            row.addWidget(_glass_gstat(caption, str(value), 18.0))
+        if row is not None:
+            for _ in range((columns - (len(items) % columns)) % columns):
+                row.addStretch(1)
+
+    def _grid_table(self, lay: QVBoxLayout, headers: tuple, rows: tuple) -> None:
+        table = QGridLayout()
+        table.setHorizontalSpacing(14)
+        table.setVerticalSpacing(0)
+        for column, name in enumerate(headers):
+            cell = label(name, 10, 700, "muted", spacing=1.0, upper=True)
+            cell.setContentsMargins(0, 8, 0, 8)
+            cell.setProperty("divider", True)
+            table.addWidget(cell, 0, column)
+        last_row = len(rows)
+        for row_index, values in enumerate(rows, start=1):
+            last = row_index == last_row
+            for column, value in enumerate(values):
+                if isinstance(value, QWidget):
+                    cell = value
+                else:
+                    text = str(value)
+                    mono = ":" in text or text.isupper()
+                    cell = label(text, 11.5, 400, "text", mono=mono, wrap=True)
+                cell.setContentsMargins(0, 10, 0, 10)
+                if not last:
+                    cell.setProperty("divider", True)
+                table.addWidget(cell, row_index, column)
+        table.setColumnStretch(len(headers) - 1, 1)
+        host = QWidget()
+        host.setObjectName("plainBox")
+        host.setLayout(table)
+        lay.addWidget(host)
+        lay.addSpacing(16)
+
+    def _flow_node(self, text: str) -> QFrame:
+        box = QFrame()
+        box.setObjectName("mineAboutFlowNode")
+        box.setFrameShape(QFrame.Shape.NoFrame)
+        box.setStyleSheet(
+            f"QFrame#mineAboutFlowNode {{ background: {DEFAULT_THEME.surface_soft};"
+            f" border: 1px solid {DEFAULT_THEME.border}; border-radius: {RADIUS_SM}px; }}"
+        )
+        lay = QHBoxLayout(box)
+        lay.setContentsMargins(12, 8, 12, 8)
+        lay.addWidget(label(text, 11, 600, "text", wrap=True))
+        return box
+
+    # ------------------------------------------------------- episode context
+    def _episodes(self) -> tuple[object, ...]:
+        return self._page.episodes
+
+    def _latest_episode(self) -> object | None:
+        episodes = self._episodes()
+        if not episodes:
+            return None
+        latest_key = getattr(self._page._projection, "latest_episode_key", None)
+        return next(
+            (episode for episode in episodes if _mine_episode_key(episode) == latest_key),
+            episodes[0],
+        )
+
+    def _selected_episode(self) -> object | None:
+        return next(
+            (
+                episode
+                for episode in self._episodes()
+                if _mine_episode_key(episode) == self._selected_episode_key
+            ),
+            None,
+        )
+
+    def _normalize_selection(self) -> None:
+        if self._selected_episode() is None:
+            self._selected_episode_key = _mine_episode_key(self._latest_episode())
+
+    def _evidence_message(self) -> str:
+        if self._page._refresh_failed:
+            return "EVIDENCE UNAVAILABLE — refresh failed"
+        if self._page._projection is None:
+            return "EVIDENCE UNAVAILABLE — not loaded"
+        if not self._page.evidence_available:
+            message = str(
+                getattr(self._page._projection, "status_message", "") or ""
+            ).strip()
+            return message or "EVIDENCE UNAVAILABLE"
+        return "No MINE episodes available"
+
+    def _sync_context_chrome(self) -> None:
+        episode = self._selected_episode()
+        if episode is None:
+            message = self._evidence_message()
+            self._subtitle.setText(message)
+            self._subtitle.setToolTip(message)
+            self._footer_right.setText("No recorded episode selected")
+            return
+        episode_alias = _mine_episode_alias(episode)
+        self._subtitle.setText(episode_alias)
+        self._subtitle.setToolTip(episode_alias)
+        count = len(tuple(getattr(episode, "events", ()) or ()))
+        self._footer_right.setText(f"{count} recorded steps")
+
+    def projection_changed(self) -> None:
+        """Reconcile local selection with the page's newest shared bundle."""
+
+        self._normalize_selection()
+        self._sync_context_chrome()
+        if self._export_pending_refresh:
+            self._complete_pdf_export()
+        elif not self._exporting and self._export_button is not None:
+            self._restore_export_button()
+        if self.isVisible():
+            self.refresh_body()
+
+    # -------------------------------------------------------------- content
+    def refresh_body(self) -> None:
+        self._normalize_selection()
+        self._sync_context_chrome()
+        if not self._exporting and self._export_button is not None:
+            self._export_button.setEnabled(self._can_export())
+            self._export_button.setToolTip(
+                "Export the latest completed MINE episode as a three-page A4 PDF"
+                if self._can_export()
+                else "A completed durable MINE episode is required."
+            )
+        self._style_tabs()
+        host = QWidget()
+        host.setStyleSheet("QWidget { background: transparent; }")
+        lay = QVBoxLayout(host)
+        lay.setContentsMargins(26, 22, 26, 22)
+        lay.setSpacing(0)
+        {
+            "overview": self._tab_overview,
+            "episode_path": self._tab_episode_path,
+            "mbi": self._tab_mbi,
+            "return_closure": self._tab_return_closure,
+            "about": self._tab_about,
+        }[self._active](lay)
+        lay.addStretch(1)
+        self._body.setWidget(host)
+
+    def _tab_overview(self, lay: QVBoxLayout) -> None:
+        self._section(lay, "Episode Overview", "High-level summary and key insights from the selected episode.")
+
+        episode = self._selected_episode()
+        if episode is None:
+            self._note(lay, self._evidence_message())
+            return
+
+        card, body = _glass_gcard(padding=18)
+        body.addWidget(label("Selected Episode Summary", 11.5, 700, "text", spacing=0.6, upper=True))
+        body.addSpacing(8)
+        summary = label(_mine_episode_summary(episode), 12, 400, "muted", wrap=True)
+        body.addWidget(summary)
+        lay.addWidget(card)
+        lay.addSpacing(16)
+
+        trace_card, trace_body = _glass_gcard(padding=18)
+        trace_body.addWidget(label("Episode Trace", 11.5, 700, "text", spacing=0.6, upper=True))
+        trace_body.addSpacing(4)
+        trace_body.addWidget(label("Timeline of key events in this episode.", 10.5, 400, "muted", wrap=True))
+        trace_body.addSpacing(16)
+        trace_row = QHBoxLayout()
+        trace_row.setSpacing(0)
+        trace = _mine_overview_trace(episode)
+        for index, (name, role, event) in enumerate(trace):
+            if index:
+                rule = QFrame()
+                rule.setFixedHeight(1)
+                rule.setStyleSheet(f"background: {DEFAULT_THEME.border};")
+                trace_row.addWidget(rule, 1)
+            node = QVBoxLayout()
+            node.setSpacing(4)
+            cap = label(name, 10, 700, "text", spacing=0.8, upper=True)
+            cap.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            node.addWidget(cap)
+            dot_row = QHBoxLayout()
+            dot_row.addStretch(1)
+            dot_row.addWidget(Dot(11, _showcase_colour(role).name()))
+            dot_row.addStretch(1)
+            node.addLayout(dot_row)
+            time_label = label(
+                _mine_projected_stamp(
+                    getattr(event, "occurred_at_display", ""), include_date=False
+                ),
+                9.5,
+                400,
+                "muted",
+                mono=True,
+            )
+            time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            node.addWidget(time_label)
+            trace_row.addLayout(node)
+        if not trace:
+            trace_row.addWidget(label("No overview milestones recorded", 11, 400, "muted"))
+        trace_body.addLayout(trace_row)
+        lay.addWidget(trace_card)
+        lay.addSpacing(16)
+
+        branch = _mine_branch_words(getattr(episode, "branch", None))
+        outcome = _mine_words(getattr(episode, "closure_outcome", None)).upper()
+        facts = (
+            ("Episode ID", _mine_episode_alias(episode)),
+            ("Platform", str(getattr(episode, "starting_platform_label", "") or "Not recorded")),
+            ("Branch", "Not recorded" if branch == "—" else branch),
+            ("Return", "VERIFIED" if bool(getattr(episode, "return_verified", False)) else "NOT RECORDED"),
+            (
+                "Outcome",
+                outcome
+                or ("CLOSED — NOT RECORDED" if bool(getattr(episode, "is_closed", False)) else "OPEN / INCOMPLETE"),
+            ),
+        )
+        self._stat_row(lay, facts, columns=5)
+
+    def _tab_episode_path(self, lay: QVBoxLayout) -> None:
+        self._section(lay, "Episode Path", "The complete recorded route through this selected MINE episode.")
+
+        card, body = _glass_gcard(padding=18)
+        body.addWidget(label("Complete Episode Path", 11.5, 700, "text", spacing=0.6, upper=True))
+        body.addSpacing(4)
+        body.addWidget(label("Chronological path for the selected episode, with timing and status.", 10.5, 400, "muted", wrap=True))
+        body.addSpacing(12)
+
+        # Local selection over the already-loaded durable projection. Merely
+        # changing the combo does not remap; MAP THIS EPISODE deliberately
+        # applies its (session_id, generation) key to every factual 3E tab.
+        control_row = QHBoxLayout()
+        control_row.setSpacing(10)
+        control_row.addWidget(label("Selected Episode", 11, 400, "muted"))
+        combo = QComboBox()
+        combo.setMinimumWidth(220)
+        for episode in self._episodes():
+            key = _mine_episode_key(episode)
+            episode_alias = _mine_episode_alias(episode)
+            outcome = _mine_words(getattr(episode, "closure_outcome", None)).upper()
+            outcome = outcome or (
+                "CLOSED — OUTCOME NOT RECORDED"
+                if bool(getattr(episode, "is_closed", False))
+                else "OPEN / INCOMPLETE"
+            )
+            combo.addItem(f"{episode_alias}   {outcome}", key)
+            combo.setItemData(combo.count() - 1, episode_alias, Qt.ItemDataRole.ToolTipRole)
+        # PyQt's QVariant comparison does not reliably find tuple payloads;
+        # compare the durable keys explicitly instead of stringifying them.
+        start_index = next(
+            (
+                index
+                for index in range(combo.count())
+                if combo.itemData(index) == self._selected_episode_key
+            ),
+            -1,
+        )
+        combo.setCurrentIndex(start_index if start_index >= 0 else 0)
+        combo.setEnabled(bool(self._episodes()))
+        self._episode_combo = combo
+        control_row.addWidget(combo)
+        control_row.addStretch(1)
+        back_button = showcase_outline_button("Back To Latest", small=True)
+        back_button.setEnabled(bool(self._episodes()))
+        back_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._back_to_latest_button = back_button
+        control_row.addWidget(back_button)
+        map_button = showcase_cta("MAP THIS EPISODE")
+        map_button.setEnabled(bool(self._episodes()))
+        map_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._map_episode_button = map_button
+        control_row.addWidget(map_button)
+        body.addLayout(control_row)
+        body.addSpacing(14)
+
+        strip_host = QScrollArea()
+        strip_host.setFrameShape(QFrame.Shape.NoFrame)
+        strip_host.setWidgetResizable(True)
+        strip_host.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        strip_host.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        strip_host.setMinimumHeight(150)
+        strip_body = QWidget()
+        strip_body.setObjectName("plainBox")
+        strip_layout = QHBoxLayout(strip_body)
+        strip_layout.setContentsMargins(0, 0, 0, 6)
+        strip_layout.setSpacing(6)
+        strip_host.setWidget(strip_body)
+        body.addWidget(strip_host)
+        lay.addWidget(card)
+        lay.addSpacing(16)
+
+        row = QHBoxLayout()
+        row.setSpacing(16)
+
+        branch_card, branch_body = _glass_gcard(padding=16)
+        branch_body.addWidget(label("Branch Route", 11.5, 700, "text", spacing=0.6, upper=True))
+        branch_body.addSpacing(4)
+        branch_body.addWidget(label("Selected branch for this episode.", 10.5, 400, "muted", wrap=True))
+        branch_body.addSpacing(12)
+        branch_list = QVBoxLayout()
+        branch_body.addLayout(branch_list)
+        row.addWidget(branch_card, 1)
+
+        journey_card, journey_body = _glass_gcard(padding=16)
+        journey_body.addWidget(label("Messenger Hop", 11.5, 700, "text", spacing=0.6, upper=True))
+        journey_body.addSpacing(4)
+        journey_body.addWidget(label("Recorded messaging-platform route for this episode.", 10.5, 400, "muted", wrap=True))
+        journey_body.addSpacing(12)
+        journey_chain = QHBoxLayout()
+        journey_body.addLayout(journey_chain)
+        journey_body.addSpacing(10)
+        journey_status = label("", 9.5, 400, "muted", wrap=True)
+        journey_body.addWidget(journey_status)
+        row.addWidget(journey_card, 1)
+
+        detail_card, detail_body = _glass_gcard(padding=16)
+        detail_body.addWidget(label("Selected Step Detail", 11.5, 700, "text", spacing=0.6, upper=True))
+        detail_body.addSpacing(10)
+        detail_list = QVBoxLayout()
+        detail_body.addLayout(detail_list)
+        row.addWidget(detail_card, 1)
+
+        lay.addLayout(row)
+
+        episode = self._selected_episode()
+        if episode is None:
+            strip_layout.addWidget(label(self._evidence_message(), 11, 400, "muted", wrap=True))
+        else:
+            events = tuple(getattr(episode, "events", ()) or ())
+            for index, event in enumerate(events):
+                delta = _mine_delta_text(
+                    getattr(event, "elapsed_from_previous_seconds", None)
+                )
+                if index and delta:
+                    strip_layout.addWidget(ShowcaseFlowLink(delta))
+                role, chip_text = _mine_analysis_event_pill(event)
+                strip_layout.addWidget(showcase_journey_step((
+                    getattr(event, "sequence", index + 1),
+                    _mine_event_text(event),
+                    role,
+                    chip_text,
+                    "Observed",
+                    _mine_projected_stamp(
+                        getattr(event, "occurred_at_display", ""), include_date=False
+                    ),
+                )))
+            strip_layout.addWidget(ShowcaseFlowLink(""))
+            closed = bool(getattr(episode, "is_closed", False))
+            outcome = _mine_words(getattr(episode, "closure_outcome", None)).upper()
+            terminal_text = "CLOSED" if closed else "OPEN / INCOMPLETE"
+            terminal_sub = outcome or (
+                "No outcome recorded" if closed else "No closure event recorded"
+            )
+            terminal_kind = "returned" if outcome.startswith("RETURNED") else "no_return"
+            strip_layout.addWidget(
+                showcase_flow_outcome(terminal_text, terminal_sub, kind=terminal_kind)
+            )
+        strip_layout.addStretch(1)
+
+        branch = str(getattr(episode, "branch", "") or "") if episode is not None else ""
+        for token, name in (
+            ("I_WILL_COME_BACK", "I WILL COME BACK"),
+            ("ITS_IMPORTANT", "IT'S IMPORTANT"),
+        ):
+            selected = branch == token
+            recorded = branch in {"I_WILL_COME_BACK", "ITS_IMPORTANT"}
+            item = QHBoxLayout()
+            item.setSpacing(8)
+            item.addWidget(Dot(9, "cyan" if selected else "muted", glow=False))
+            role = "text" if selected else "muted"
+            item.addWidget(label(name, 12, 700 if selected else 400, role))
+            item.addStretch(1)
+            item.addWidget(showcase_status_badge(
+                "SELECTED" if selected else "NOT TAKEN" if recorded else "UNAVAILABLE",
+                "cyan" if selected else "muted",
+            ))
+            branch_list.addLayout(item)
+            branch_list.addSpacing(8)
+
+        route = _mine_messenger_route(episode)
+        hops = tuple(getattr(episode, "messenger_hops", ()) or ()) if episode is not None else ()
+        for index, (platform_key, platform) in enumerate(route):
+            if index:
+                journey_chain.addWidget(label("→", 12, 400, "muted"))
+            column = QVBoxLayout()
+            column.setSpacing(3)
+            dot_row = QHBoxLayout()
+            dot_row.addStretch(1)
+            dot_row.addWidget(Dot(10, "cyan"))
+            dot_row.addStretch(1)
+            column.addLayout(dot_row)
+            name_label = label(platform, 10.5, 600, "text")
+            name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            if index and index - 1 < len(hops):
+                hop = hops[index - 1]
+                name_label.setToolTip(
+                    f"{getattr(hop, 'from_platform_label', '')} → "
+                    f"{getattr(hop, 'to_platform_label', '')} · "
+                    f"{getattr(hop, 'occurred_at_display', '')}"
+                )
+            else:
+                name_label.setToolTip(platform_key)
+            column.addWidget(name_label)
+            tag_label = label(
+                "START" if index == 0 else f"HOP {index}",
+                8.5,
+                400,
+                "muted",
+                spacing=0.4,
+            )
+            tag_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            column.addWidget(tag_label)
+            journey_chain.addLayout(column)
+        journey_chain.addStretch(1)
+        if episode is None:
+            journey_status.setText(self._evidence_message())
+        elif not route:
+            journey_status.setText("No messaging platform evidence recorded")
+        elif not hops:
+            journey_status.setText("No messenger hops recorded")
+        else:
+            journey_status.setText(
+                f"{len(hops)} recorded messenger hop{'s' if len(hops) != 1 else ''}"
+            )
+
+        details = _mine_step_detail(episode) if episode is not None else tuple(
+            (caption, "Not recorded") for caption in (
+                "Step", "Event", "Observed", "Platform", "Previous state", "Next state", "Status"
+            )
+        )
+        for index, (caption, value) in enumerate(details):
+            if index:
+                detail_list.addSpacing(8)
+            detail_list.addWidget(_mine_analysis_field_row(caption, value))
+
+        def _on_map_clicked() -> None:
+            chosen = combo.currentData()
+            if chosen is None:
+                return
+            self._selected_episode_key = tuple(chosen)
+            self.refresh_body()
+
+        def _on_back_clicked() -> None:
+            self._selected_episode_key = _mine_episode_key(self._latest_episode())
+            self.refresh_body()
+
+        map_button.clicked.connect(_on_map_clicked)
+        back_button.clicked.connect(_on_back_clicked)
+
+    def _tab_mbi(self, lay: QVBoxLayout) -> None:
+        self._section(
+            lay,
+            "MBI",
+            "Messaging Bit Interval / factual dwell history for the latest 10 formal episodes.",
+        )
+        projection = self._page._projection
+        projection_available = self._page.evidence_available
+        records = (
+            tuple(getattr(projection, "dwell_records", ()) or ())
+            if projection_available
+            else ()
+        )
+        measured = tuple(
+            record for record in records
+            if getattr(record, "dwell_seconds", None) is not None
+        )
+        message = (
+            str(getattr(projection, "mbi_status_message", "") or "").strip()
+            if projection_available
+            else self._evidence_message()
+        )
+        message = message or "Factual messaging dwell duration is unavailable."
+        band_names = (
+            "10 MIN OR LESS",
+            "11–30 MIN",
+            "31–60 MIN",
+            "61–120 MIN",
+            "MORE THAN 120 MIN",
+        )
+        bands = tuple(
+            (
+                band,
+                str(sum(getattr(record, "mbi_band", None) == band for record in measured))
+                if projection_available and measured
+                else "Unavailable",
+            )
+            for band in band_names
+        )
+        self._stat_row(lay, bands, columns=5)
+
+        card, body = _glass_gcard(padding=18)
+        body.addWidget(label("MBI Dwell Table", 11.5, 700, "text", spacing=0.6, upper=True))
+        body.addSpacing(4)
+        body.addWidget(label("Every recorded segment from the latest 10 formal episodes, newest first.", 10.5, 400, "muted", wrap=True))
+        body.addSpacing(14)
+        rows = tuple(
+            (
+                str(getattr(record, "platform_label", "") or "Not recorded"),
+                _mine_dwell_text(getattr(record, "dwell_seconds", None)),
+                str(getattr(record, "mbi_band", "") or "Not recorded"),
+                _mine_episode_display(getattr(record, "display_episode_id", "")),
+                (
+                    f"Segment {getattr(record, 'segment_order', '')}"
+                    if getattr(record, "segment_order", None) is not None
+                    else "Legacy episode · dwell not recorded"
+                ),
+            )
+            for record in records
+        )
+        self._grid_table(
+            body,
+            ("Platform", "Dwell Time", "MBI Band", "Episode ID", "Notes"),
+            rows,
+        )
+        self._note(body, message)
+        lay.addWidget(card)
+        lay.addSpacing(16)
+
+        row = QHBoxLayout()
+        row.setSpacing(16)
+
+        filtered_card, filtered_body = _glass_gcard(padding=16)
+        filtered_body.addWidget(label("Filtered Band View", 11.5, 700, "text", spacing=0.6, upper=True))
+        filtered_body.addSpacing(4)
+        filtered_body.addWidget(label("Dwell entries for the selected band.", 10.5, 400, "muted", wrap=True))
+        filtered_body.addSpacing(10)
+        combo = QComboBox()
+        for band_label in band_names:
+            combo.addItem(band_label)
+        combo.setCurrentText("10 MIN OR LESS")
+        combo.setEnabled(bool(measured))
+        filtered_body.addWidget(combo)
+        filtered_body.addSpacing(10)
+        filtered_list = QVBoxLayout()
+        filtered_body.addLayout(filtered_list)
+
+        def _rebuild_filtered(_band_label: str) -> None:
+            _clear_layout(filtered_list)
+            matches = tuple(
+                record
+                for record in measured
+                if getattr(record, "mbi_band", None) == _band_label
+            )
+            if not matches:
+                self._note(
+                    filtered_list,
+                    "No factual dwell segments in this band"
+                    if measured
+                    else "MBI dwell records unavailable",
+                )
+                return
+            for record in matches:
+                self._note(
+                    filtered_list,
+                    f"{_mine_episode_display(getattr(record, 'display_episode_id', ''))} · "
+                    f"{getattr(record, 'platform_label', '') or 'Not recorded'} · "
+                    f"{_mine_dwell_text(getattr(record, 'dwell_seconds', None))}",
+                    tone="cyan",
+                )
+
+        combo.currentTextChanged.connect(_rebuild_filtered)
+        _rebuild_filtered(combo.currentText())
+        row.addWidget(filtered_card, 1)
+
+        detail_card, detail_body = _glass_gcard(padding=16)
+        detail_body.addWidget(label("Selected Dwell Detail", 11.5, 700, "text", spacing=0.6, upper=True))
+        detail_body.addSpacing(4)
+        detail_body.addWidget(label("Detailed information for the selected messaging dwell.", 10.5, 400, "muted", wrap=True))
+        detail_body.addSpacing(10)
+        selected_record = measured[0] if measured else (records[0] if records else None)
+        detail = (
+            (
+                "Platform",
+                str(getattr(selected_record, "platform_label", "") or "Not recorded"),
+            ),
+            ("Dwell", _mine_dwell_text(getattr(selected_record, "dwell_seconds", None))),
+            ("Band", str(getattr(selected_record, "mbi_band", "") or "Not recorded")),
+            (
+                "Episode",
+                _mine_episode_display(getattr(selected_record, "display_episode_id", ""))
+                if selected_record is not None
+                else "Not recorded",
+            ),
+            (
+                "Segment",
+                str(getattr(selected_record, "segment_order", "") or "Not recorded"),
+            ),
+            (
+                "Completed",
+                _mine_projected_stamp(
+                    getattr(selected_record, "completed_at_display", ""),
+                    include_date=True,
+                )
+                if getattr(selected_record, "completed_at_display", None)
+                else "Not recorded",
+            ),
+            ("Source", "MESSAGING DWELL SEGMENT" if measured else "Not recorded"),
+            ("Scope", "LATEST 10 FORMAL EPISODES"),
+        )
+        for index, (caption, value) in enumerate(detail):
+            if index:
+                detail_body.addSpacing(8)
+            detail_body.addWidget(_mine_analysis_field_row(caption, value))
+        row.addWidget(detail_card, 1)
+
+        legend_card, legend_body = _glass_gcard(padding=16)
+        legend_body.addWidget(label("MBI Status", 11.5, 700, "text", spacing=0.6, upper=True))
+        legend_body.addSpacing(4)
+        legend_body.addWidget(label("Factual dwell-source boundary.", 10.5, 400, "muted", wrap=True))
+        legend_body.addSpacing(10)
+        legend_body.addWidget(label(message, 11, 600, "text", wrap=True))
+        legend_body.addSpacing(8)
+        legend_body.addWidget(label(
+            "Source: certified platform identity plus durable factual dwell seconds.",
+            10.5,
+            400,
+            "muted",
+            wrap=True,
+        ))
+        legend_body.addSpacing(8)
+        legend_body.addWidget(label(
+            "Approved boundary: dwell_seconds ≤ 600 → 10 MIN OR LESS.",
+            10.5,
+            400,
+            "muted",
+            wrap=True,
+        ))
+        legend_body.addSpacing(8)
+        legend_body.addWidget(label(
+            "Event-to-event elapsed time is never used as messaging dwell.",
+            10.5,
+            400,
+            "muted",
+            wrap=True,
+        ))
+        row.addWidget(legend_card, 1)
+
+        lay.addLayout(row)
+
+    def _tab_return_closure(self, lay: QVBoxLayout) -> None:
+        self._section(lay, "Return & Closure", "Recovery and closure sequence for the selected MINE episode.")
+        episode = self._selected_episode()
+        if episode is None:
+            self._note(lay, self._evidence_message())
+            return
+
+        events = tuple(getattr(episode, "events", ()) or ())
+        return_events = tuple(getattr(episode, "return_closure_events", ()) or ())
+        return_detected = _mine_return_detected_event(episode)
+        visual = _mine_event_named(episode, "RETURN_VISUAL_CONFIRMING_STARTED")
+        verifying = _mine_event_named(episode, "RETURN_VERIFICATION_STARTED")
+        verified = _mine_event_named(
+            episode, "RETURN_VERIFICATION_COMPLETED", "RETURN_CONFIRMED"
+        )
+        closure_started = _mine_event_named(episode, "CLOSURE_CONFIRMATION_STARTED")
+        closure_completed = _mine_event_named(
+            episode, "CLOSURE_CONFIRMATION_COMPLETED"
+        )
+        closure_interrupted = _mine_event_named(
+            episode, "CLOSURE_CONFIRMATION_INTERRUPTED"
+        )
+        closed = (
+            _mine_event_named(episode, "MINE_SESSION_CLOSED")
+            or _mine_event_named(episode, "MINE_RUNTIME_STOPPED", "EMERGENCY_STOPPED")
+        )
+
+        def stamp(event: object | None) -> str:
+            if event is None:
+                return "Not recorded"
+            return _mine_projected_stamp(
+                getattr(event, "occurred_at_display", ""), include_date=True
+            )
+
+        outcome = _mine_words(getattr(episode, "closure_outcome", None)).upper()
+        final_state = (
+            "CLOSED" if bool(getattr(episode, "is_closed", False)) else "OPEN / INCOMPLETE"
+        )
+        recovery = (
+            ("Return Detected", stamp(return_detected)),
+            (
+                "Return Verified",
+                "YES" if bool(getattr(episode, "return_verified", False)) else "NOT RECORDED",
+            ),
+            (
+                "Closure Confirmed",
+                "YES" if bool(getattr(episode, "closure_confirmed", False)) else "NOT RECORDED",
+            ),
+            ("Final State", final_state),
+            ("Return Latency", "Not recorded"),
+            ("Callback Result", outcome or "Not recorded"),
+            ("Closed At", stamp(closed) if bool(getattr(episode, "is_closed", False)) else "Not recorded"),
+        )
+        lay.addWidget(label("Recovery Snapshot", 11, 700, "cyan", spacing=1.1, upper=True))
+        lay.addSpacing(12)
+        self._stat_row(lay, recovery, columns=4)
+
+        card, body = _glass_gcard(padding=18)
+        body.addWidget(label("Return & Closure Trace", 11.5, 700, "text", spacing=0.6, upper=True))
+        body.addSpacing(14)
+        if return_detected is None:
+            body.addWidget(label("No return evidence recorded", 11, 400, "muted"))
+            body.addSpacing(12)
+        trace_row = QHBoxLayout()
+        trace_row.setSpacing(0)
+        # Repeated interruptions remain in the ledger. The compact trace keeps
+        # the latest occurrence of each event name, still ordered by sequence.
+        latest_by_name = {
+            str(getattr(event, "event_name", "") or ""): event
+            for event in return_events
+        }
+        trace_events = tuple(sorted(
+            latest_by_name.values(), key=lambda event: getattr(event, "sequence", 0)
+        ))
+        for index, event in enumerate(trace_events):
+            if index:
+                rule = QFrame()
+                rule.setFixedHeight(1)
+                rule.setStyleSheet(f"background: {DEFAULT_THEME.border};")
+                trace_row.addWidget(rule, 1)
+            node = QVBoxLayout()
+            node.setSpacing(4)
+            dot_row = QHBoxLayout()
+            dot_row.addStretch(1)
+            dot_row.addWidget(Dot(12, _showcase_colour(_mine_status_role(event)).name()))
+            dot_row.addStretch(1)
+            node.addLayout(dot_row)
+            cap = label(_mine_event_text(event), 9.5, 700, "text", spacing=0.5, upper=True, wrap=True)
+            cap.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            node.addWidget(cap)
+            note = label(_mine_event_detail(event), 9, 400, "muted", wrap=True)
+            note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            node.addWidget(note)
+            time_label = label(
+                _mine_projected_stamp(
+                    getattr(event, "occurred_at_display", ""), include_date=False
+                ),
+                9,
+                400,
+                "muted",
+                mono=True,
+            )
+            time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            node.addWidget(time_label)
+            trace_row.addLayout(node)
+        if not trace_events:
+            trace_row.addWidget(label("No return evidence recorded", 11, 400, "muted"))
+        body.addLayout(trace_row)
+        lay.addWidget(card)
+        lay.addSpacing(16)
+
+        return_index = events.index(return_detected) if return_detected in events else -1
+        previous = events[return_index - 1] if return_index > 0 else None
+        returned_from = "Not recorded"
+        if return_detected is not None:
+            returned_from = str(
+                getattr(return_detected, "platform_label", "")
+                or getattr(return_detected, "platform_key", "")
+                or "Not recorded"
+            )
+        closure_state = (
+            "CONFIRMED"
+            if bool(getattr(episode, "closure_confirmed", False))
+            else "INTERRUPTED"
+            if closure_interrupted is not None
+            else "STARTED — NOT COMPLETED"
+            if closure_started is not None
+            else "NOT RECORDED"
+        )
+        return_detail = (
+            ("Detected at", stamp(return_detected)),
+            ("Returned from", returned_from),
+            ("Previous state", _mine_event_text(previous) if previous is not None else "Not recorded"),
+            (
+                "Verification",
+                "VERIFIED" if bool(getattr(episode, "return_verified", False)) else "NOT RECORDED",
+            ),
+            ("Callback result", outcome or "Not recorded"),
+        )
+        verification_detail = (
+            ("Return detected", stamp(return_detected)),
+            ("Visual confirming", stamp(visual)),
+            ("Return verifying", stamp(verifying)),
+            ("Return verified", stamp(verified)),
+        )
+        closure_detail = (
+            ("Closure started", stamp(closure_started)),
+            ("Closure state", closure_state),
+            ("Closed at", stamp(closed) if bool(getattr(episode, "is_closed", False)) else "Not recorded"),
+            ("Closure result", outcome or final_state),
+            ("Episode duration", "Not recorded"),
+        )
+        row = QHBoxLayout()
+        row.setSpacing(16)
+        for title, pairs in (
+            ("Return Detail", return_detail),
+            ("Verification Detail", verification_detail),
+            ("Closure Detail", closure_detail),
+        ):
+            detail_card, detail_body = _glass_gcard(padding=16)
+            detail_body.addWidget(label(title, 11.5, 700, "text", spacing=0.6, upper=True))
+            detail_body.addSpacing(10)
+            for index, (caption, value) in enumerate(pairs):
+                if index:
+                    detail_body.addSpacing(8)
+                detail_body.addWidget(_mine_analysis_field_row(caption, value))
+            row.addWidget(detail_card, 1)
+        lay.addLayout(row)
+        lay.addSpacing(16)
+
+        ledger_card, ledger_body = _glass_gcard(padding=18)
+        ledger_body.addWidget(label("Recovery Ledger", 11.5, 700, "text", spacing=0.6, upper=True))
+        ledger_body.addSpacing(14)
+        if return_events:
+            ledger_rows = tuple(
+                (
+                    str(getattr(event, "sequence", index)),
+                    _mine_projected_stamp(
+                        getattr(event, "occurred_at_display", ""), include_date=False
+                    ),
+                    _mine_event_text(event),
+                    _mine_status_cell(
+                        _mine_analysis_event_pill(event)[1].upper(),
+                        _mine_status_role(event),
+                    ),
+                    str(
+                        getattr(event, "platform_label", "")
+                        or getattr(event, "platform_key", "")
+                        or "Not recorded"
+                    ),
+                    _mine_event_detail(event),
+                )
+                for index, event in enumerate(return_events, start=1)
+            )
+            self._grid_table(
+                ledger_body,
+                ("#", "Time", "Event", "State", "Platform / Context", "Detail"),
+                ledger_rows,
+            )
+        else:
+            ledger_body.addWidget(label("No return evidence recorded", 11, 400, "muted"))
+            ledger_body.addSpacing(16)
+        lay.addWidget(ledger_card)
+
+    def _tab_about(self, lay: QVBoxLayout) -> None:
+        self._section(lay, "About MINE")
+        card, body = _glass_gcard(padding=18)
+        body.addWidget(label("MINE", 18, 700, "text"))
+        body.addSpacing(2)
+        body.addWidget(label("Messaging Intervention Nudge Escalation", 12, 600, "cyan"))
+        body.addSpacing(10)
+        body.addWidget(label(
+            "MINE observes qualifying messaging activity and provides structured "
+            "interventions when messaging use continues during a MYELIN session. "
+            "The MINE Main Station presents factual episode activity, history, "
+            "return and closure information, helping users recognize extended "
+            "messaging interruptions and return to their intended task.",
+            12, 400, "muted", wrap=True,
+        ))
+        lay.addWidget(card)
+        lay.addSpacing(16)
+
+        flow_card, flow_body = _glass_gcard(padding=18)
+        flow_body.addWidget(label("How MINE Works", 11.5, 700, "text", spacing=0.6, upper=True))
+        flow_body.addSpacing(4)
+        flow_body.addWidget(label("From messaging detection to episode closure.", 10.5, 400, "muted", wrap=True))
+        flow_body.addSpacing(14)
+        chain = QHBoxLayout()
+        chain.setSpacing(4)
+        for index, step in enumerate(_SHOWCASE_MINE_ABOUT_FLOW):
+            if index:
+                chain.addWidget(label("→", 12, 400, "muted"))
+            chain.addWidget(self._flow_node(step))
+        flow_body.addLayout(chain)
+        flow_body.addSpacing(14)
+        for line in _SHOWCASE_MINE_ABOUT_TIMING:
+            flow_body.addWidget(label(line, 11, 400, "muted", wrap=True))
+            flow_body.addSpacing(4)
+        lay.addWidget(flow_card)
+        lay.addSpacing(16)
+
+        row = QHBoxLayout()
+        row.setSpacing(16)
+
+        purpose_card, purpose_body = _glass_gcard(padding=16)
+        purpose_body.addWidget(label("Purpose", 11.5, 700, "text", spacing=0.6, upper=True))
+        purpose_body.addSpacing(10)
+        for index, text in enumerate(_SHOWCASE_MINE_ABOUT_PURPOSE):
+            if index:
+                purpose_body.addSpacing(8)
+            purpose_body.addWidget(_mine_bullet_row(text))
+        row.addWidget(purpose_card, 1)
+
+        station_card, station_body = _glass_gcard(padding=16)
+        station_body.addWidget(label("MINE Main Station", 11.5, 700, "text", spacing=0.6, upper=True))
+        station_body.addSpacing(4)
+        station_body.addWidget(label("The analysis dashboard provides a complete view of each episode.", 10.5, 400, "muted", wrap=True))
+        station_body.addSpacing(10)
+        for index, (tab_name, explanation) in enumerate(_SHOWCASE_MINE_ABOUT_TABS):
+            if index:
+                station_body.addSpacing(8)
+            station_body.addWidget(label(tab_name, 11.5, 600, "text"))
+            station_body.addWidget(label(explanation, 10.5, 400, "muted", wrap=True))
+        row.addWidget(station_card, 1)
+
+        lay.addLayout(row)
+        lay.addSpacing(16)
+
+        boundary_card, boundary_body = _glass_gcard(padding=16)
+        boundary_body.addWidget(label("Scientific Boundary", 11.5, 700, "text", spacing=0.6, upper=True))
+        boundary_body.addSpacing(4)
+        boundary_body.addWidget(label("Important limitations and scope.", 10.5, 400, "muted", wrap=True))
+        boundary_body.addSpacing(10)
+        self._note(
+            boundary_body,
+            "MINE records behavioral and computer-resource evidence. It does "
+            "not directly measure attention, dopamine, brain activity, "
+            "addiction, or other neural states.",
+            tone="amber",
+        )
+        boundary_body.addWidget(label(
+            "MINE is a behavioral observation tool, not a medical device. "
+            "All interpretations are based on observable digital behavior only.",
+            10.5, 400, "muted", wrap=True,
+        ))
+        lay.addWidget(boundary_card)
+        lay.addSpacing(16)
+
+        version_card, version_body = _glass_gcard(padding=16)
+        version_body.addWidget(label("Version & System Information", 11.5, 700, "text", spacing=0.6, upper=True))
+        version_body.addSpacing(4)
+        version_body.addWidget(label("Module details and configuration.", 10.5, 400, "muted", wrap=True))
+        version_body.addSpacing(10)
+        for index, (caption, value) in enumerate(_SHOWCASE_MINE_VERSION_INFO):
+            if index:
+                version_body.addSpacing(8)
+            version_body.addWidget(_mine_field_row(caption, value))
+        lay.addWidget(version_card)
+
+    # ------------------------------------------------------------- lifecycle
+    def open_overlay(self) -> None:
+        self.setGeometry(self._page.rect())
+        self._backdrop = self._grab_blurred()
+        self.refresh_body()
+        self.show()
+        self.raise_()
+        self.setFocus()
+
+    def close_overlay(self) -> None:
+        self.hide()
+        self._backdrop = None
+
+    def _grab_blurred(self) -> QPixmap | None:
+        """Blur a grab of the page underneath -- the same honest stand-in
+        for CSS ``backdrop-filter`` ``CosineDeepAnalysisDialog`` already
+        uses; this is a one-time screenshot, never persisted."""
+
+        try:
+            source = self._page.grab()
+            if source.isNull():
+                return None
+            scene = QGraphicsScene()
+            item = QGraphicsPixmapItem(source)
+            effect = QGraphicsBlurEffect()
+            effect.setBlurRadius(14)
+            item.setGraphicsEffect(effect)
+            scene.addItem(item)
+            output = QPixmap(source.size())
+            output.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(output)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            scene.render(painter)
+            painter.end()
+            return output
+        except Exception:
+            return None
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        if self._backdrop is not None:
+            painter.drawPixmap(self.rect(), self._backdrop)
+        painter.fillRect(self.rect(), QColor(4, 8, 16, 140))
+        painter.end()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Escape:
+            self.close_overlay()
+            return
+        super().keyPressEvent(event)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if not self._panel.geometry().contains(event.pos()):
+            self.close_overlay()
+            return
+        super().mousePressEvent(event)
 
 
 # --------------------------------------------------------------------------
@@ -4495,7 +7241,7 @@ class LiveMirlDashboardDialog(QWidget):
             f" background: {qalpha(_showcase_colour('cyan', tokens), 0.16).name(QColor.NameFormat.HexArgb)};"
             f" color: {tokens.cyan}; }}"
         )
-        pdf_action = menu.addAction("PDF report  \u00b7  2 pages")
+        pdf_action = menu.addAction("PDF report  \u00b7  3 pages")
         json_action = menu.addAction("JSON data  \u00b7  all five tabs")
         button = self._export_button
         chosen = menu.exec(button.mapToGlobal(QPoint(0, button.height() + 4)))
@@ -6980,7 +9726,7 @@ class CosineDeepAnalysisDialog(QWidget):
         self._page.refresh_requested.emit()
 
     def _export_pdf(self) -> None:
-        """Write the two-page COSINE PDF report and report the outcome on the
+        """Write the three-page COSINE PDF report and report the outcome on the
         button itself, matching LiveMirlDashboardDialog's own export pattern.
 
         Run on the GUI thread deliberately: measured generation time on
@@ -7077,7 +9823,7 @@ class CosineDeepAnalysisDialog(QWidget):
             can_export = self._page.evidence_available and bool(self._page.episodes)
             self._export_button.setEnabled(can_export)
             self._export_button.setToolTip(
-                "Export current COSINE durable evidence as a two-page PDF report"
+                "Export current COSINE durable evidence as a three-page PDF report"
                 if can_export else "Durable COSINE evidence is unavailable."
             )
         host = QWidget()
@@ -10145,10 +12891,10 @@ class ControlStationWindow(QMainWindow):
             live_mirl=self.analytics._create_page(  # noqa: SLF001 -- see above
                 PAGE_LIVE_MIRL, LiveMirlShowcasePage
             ),
-            mine=ComingSoonPage(
-                "MINE",
-                "Messaging Intervention Nudge Escalation",
-            ),
+            # Operation MINE Phase 3C: durable history joins the existing
+            # shared analytics refresh lane. Live MineSnapshot wiring remains
+            # deliberately absent until Phase 3D.
+            mine=self.analytics.create_mine_page(MineDashboardShowcasePage),
             # CosineLivePage is wired to the shared durable COSINE read model;
             # CURRENT arrives independently through the live COSINE signal.
             cosine=self.analytics._create_page(PAGE_COSINE, CosineLivePage),
@@ -10238,6 +12984,12 @@ class ControlStationWindow(QMainWindow):
         )
         self.engine.mine_watch_status_changed.connect(
             self.pages.control.render_mine
+        )
+        # Phase 3D: the MINE Main Station is a sibling presentation subscriber
+        # to the same prepared MineSnapshot. It owns no timer, poller, runtime
+        # call, Controller interpretation or persistence refresh.
+        self.engine.mine_watch_status_changed.connect(
+            self.pages.mine.render_live_view
         )
         # Live MIRL's "Episode Active" badge must read the running engine,
         # not be inferred from the read model's history -- see ruling
@@ -10431,10 +13183,11 @@ class ControlStationWindow(QMainWindow):
                 flush=True,
             )
 
+            visual_badge = _messaging_visual_badge(badge, app)
             self.pages.control.append_telemetry(
                 time_text=local_time,
                 text=feed_text or f"{(app or 'UNKNOWN').upper()} \u2014 {headline}",
-                tag=badge,
+                tag=visual_badge,
                 tone=tone,
             )
             return

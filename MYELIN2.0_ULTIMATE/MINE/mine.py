@@ -326,6 +326,13 @@ class MineRuntime:
         self._current_platform_label = ""
         self._last_evidence_token = ""
         self._messaging_transitions = 0
+        # Presentation/analytics evidence only.  This accumulator receives the
+        # same certified supported intervals already credited to MINE's frozen
+        # physiology; it never owns a clock or changes an intervention gate.
+        self._dwell_segment_order = 0
+        self._dwell_platform_key = ""
+        self._dwell_platform_label = ""
+        self._dwell_accumulated_ns = 0
         self._initial_ns = 0
         self._return_intent_ns = 0
         self._important_minutes: int | None = None
@@ -726,6 +733,8 @@ class MineRuntime:
                 self._clear_recovery()
                 self._break_continuity()
 
+            if not self._finish_dwell_segment(now):
+                return self.drain_effects()
             if not self._commit(
                 "STUDY_PREEMPTED_MINE",
                 MineEventClass.OBSERVED,
@@ -789,6 +798,8 @@ class MineRuntime:
             if self._phase in {MinePhase.IDLE, MinePhase.CLOSED, MinePhase.SHUTDOWN}:
                 return ()
             now = _now_ns(now_ns)
+            if not self._finish_dwell_segment(now):
+                return self.drain_effects()
             outcome = {
                 MineClosureReason.STUDY_MODE_ACTIVATED: MineClosureOutcome.STUDY_PREEMPTION,
                 MineClosureReason.EMERGENCY: MineClosureOutcome.EMERGENCY,
@@ -849,20 +860,16 @@ class MineRuntime:
             self._start_candidate(observation, now)
             return
         if observation.platform_key != self._current_platform_key:
-            if not self._commit(
-                "MESSAGING_PLATFORM_TRANSITION",
-                MineEventClass.OBSERVED,
-                now,
-                platform_key=observation.platform_key,
-                platform_label=observation.platform_label,
-                evidence_token=observation.evidence_token,
-                payload={
-                    "from_platform": self._current_platform_key,
-                    "to_platform": observation.platform_key,
-                },
-            ):
+            if not self._commit_platform_transition(observation, now):
                 return
             self._messaging_transitions += 1
+        elif not self._dwell_platform_key:
+            # Messaging resumed after a factual non-messaging boundary on the
+            # same platform.  It is a new dwell segment, not a platform hop.
+            self._start_dwell_segment(
+                observation.platform_key,
+                observation.platform_label,
+            )
         self._current_platform_key = observation.platform_key
         self._current_platform_label = observation.platform_label
         self._last_evidence_token = observation.evidence_token
@@ -874,6 +881,8 @@ class MineRuntime:
             self._relapse(now)
 
     def _observe_focus(self, now: int) -> None:
+        if not self._finish_dwell_segment(now):
+            return
         if self._phase is MinePhase.OBSERVING_MESSAGING:
             if self._commit(
                 "MINE_CANDIDATE_ENDED_BEFORE_INTERVENTION",
@@ -897,6 +906,8 @@ class MineRuntime:
             self._focus_active = True
 
     def _observe_neutral(self, now: int) -> None:
+        if not self._finish_dwell_segment(now):
+            return
         if self._phase is MinePhase.OBSERVING_MESSAGING:
             if self._commit(
                 "MINE_CANDIDATE_RESET",
@@ -935,6 +946,8 @@ class MineRuntime:
 
     def _credit(self, elapsed: int, kind: MineObservationKind) -> None:
         if kind is MineObservationKind.MESSAGING:
+            if self._dwell_platform_key:
+                self._dwell_accumulated_ns += elapsed
             if self._phase is MinePhase.OBSERVING_MESSAGING:
                 self._initial_ns += elapsed
             elif self._phase is MinePhase.RETURN_INTENT_ACTIVE:
@@ -1258,6 +1271,10 @@ class MineRuntime:
         self._current_platform_key = observation.platform_key
         self._current_platform_label = observation.platform_label
         self._last_evidence_token = observation.evidence_token
+        self._start_dwell_segment(
+            observation.platform_key,
+            observation.platform_label,
+        )
         self._quality = "OBSERVED"
 
     def _request_mine1(self, now: int) -> None:
@@ -1650,6 +1667,83 @@ class MineRuntime:
         self._durable_detail = "" if accepted else " ".join(detail.split())[:240]
         return accepted
 
+    def _start_dwell_segment(self, platform_key: str, platform_label: str) -> None:
+        """Begin one factual platform segment without starting a clock."""
+
+        if self._dwell_platform_key or not platform_key:
+            return
+        self._dwell_segment_order += 1
+        self._dwell_platform_key = platform_key
+        self._dwell_platform_label = platform_label or platform_key
+        self._dwell_accumulated_ns = 0
+
+    def _dwell_event(self, now: int, sequence: int) -> MineEvent:
+        return self._event(
+            "MESSAGING_DWELL_SEGMENT_COMPLETED",
+            MineEventClass.DERIVED,
+            now,
+            platform_key=self._dwell_platform_key,
+            platform_label=self._dwell_platform_label,
+            payload={
+                "segment_order": self._dwell_segment_order,
+                "platform_key": self._dwell_platform_key,
+                "dwell_seconds": self._dwell_accumulated_ns / _NS,
+            },
+            sequence=sequence,
+        )
+
+    def _clear_active_dwell_segment(self) -> None:
+        self._dwell_platform_key = ""
+        self._dwell_platform_label = ""
+        self._dwell_accumulated_ns = 0
+
+    def _finish_dwell_segment(self, now: int) -> bool:
+        """Persist the existing certified accumulator, including zero seconds."""
+
+        if not self._dwell_platform_key:
+            return True
+        event = self._dwell_event(now, self._event_sequence + 1)
+        if not self._write((event,)):
+            return False
+        self._event_sequence += 1
+        self._clear_active_dwell_segment()
+        return True
+
+    def _commit_platform_transition(
+        self,
+        observation: MineObservation,
+        now: int,
+    ) -> bool:
+        """Atomically close the old dwell and record the certified hop."""
+
+        events: list[MineEvent] = []
+        next_sequence = self._event_sequence + 1
+        if self._dwell_platform_key:
+            events.append(self._dwell_event(now, next_sequence))
+            next_sequence += 1
+        events.append(self._event(
+            "MESSAGING_PLATFORM_TRANSITION",
+            MineEventClass.OBSERVED,
+            now,
+            platform_key=observation.platform_key,
+            platform_label=observation.platform_label,
+            evidence_token=observation.evidence_token,
+            payload={
+                "from_platform": self._current_platform_key,
+                "to_platform": observation.platform_key,
+            },
+            sequence=next_sequence,
+        ))
+        if not self._write(tuple(events)):
+            return False
+        self._event_sequence += len(events)
+        self._clear_active_dwell_segment()
+        self._start_dwell_segment(
+            observation.platform_key,
+            observation.platform_label,
+        )
+        return True
+
     def _flush_pause_events(self) -> bool:
         while self._pending_pause_events:
             name, occurred = self._pending_pause_events[0]
@@ -1718,6 +1812,8 @@ class MineRuntime:
         self._branch = ""
         self._current_platform_key = ""
         self._current_platform_label = ""
+        self._dwell_segment_order = 0
+        self._clear_active_dwell_segment()
         self._initial_ns = 0
         self._return_intent_ns = 0
         self._important_minutes = None
@@ -1738,6 +1834,8 @@ class MineRuntime:
         self._current_platform_label = ""
         self._last_evidence_token = ""
         self._messaging_transitions = 0
+        self._dwell_segment_order = 0
+        self._clear_active_dwell_segment()
         self._initial_ns = 0
         self._return_intent_ns = 0
         self._important_minutes = None

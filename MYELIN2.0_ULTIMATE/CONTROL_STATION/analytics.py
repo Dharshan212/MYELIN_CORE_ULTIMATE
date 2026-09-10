@@ -5,7 +5,8 @@ This file owns the presentation shell for:
 * Metric Hub;
 * Science Lab;
 * Live MIRL;
-* COSINE; and
+* COSINE;
+* durable MINE history; and
 * the Analytics Sheet composer.
 
 Important boundary
@@ -75,12 +76,14 @@ PAGE_METRIC_HUB: Final = "metric-hub"
 PAGE_SCIENCE_LAB: Final = "science-lab"
 PAGE_LIVE_MIRL: Final = "live-mirl"
 PAGE_COSINE: Final = "cosine"
+PAGE_MINE: Final = "mine"
 
 PROJECTION_NAMES: Final = {
     PAGE_METRIC_HUB: "metric_hub",
     PAGE_SCIENCE_LAB: "science_lab",
     PAGE_LIVE_MIRL: "live_mirl",
     PAGE_COSINE: "cosine",
+    PAGE_MINE: "mine",
 }
 
 #: Telemetry kinds that must trigger a Today Health re-read. ``trigger`` only
@@ -1032,6 +1035,15 @@ class AnalyticsController(QObject):
 
     def create_cosine_page(self) -> CosinePage:
         return self._create_page(PAGE_COSINE, CosinePage)
+
+    def create_mine_page(self, page_type):
+        """Register the frozen MINE page on the shared projection lane.
+
+        The concrete page remains launcher-owned until the separately
+        authorized visual wiring phase, avoiding a UI import cycle here.
+        """
+
+        return self._create_page(PAGE_MINE, page_type)
 
     def page_opened(self, page_name: str) -> None:
         """Refresh only when an analytics page or Control becomes visible."""
