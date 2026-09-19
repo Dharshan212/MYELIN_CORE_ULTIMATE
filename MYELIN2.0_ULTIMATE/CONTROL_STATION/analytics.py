@@ -25,7 +25,7 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from typing import Final
 
@@ -78,6 +78,8 @@ PAGE_SCIENCE_LAB: Final = "science-lab"
 PAGE_LIVE_MIRL: Final = "live-mirl"
 PAGE_COSINE: Final = "cosine"
 PAGE_MINE: Final = "mine"
+#: Analytics Sheet chapter only (no dashboard page is created for it).
+PAGE_STUDY_MODE: Final = "study-mode"
 
 PROJECTION_NAMES: Final = {
     PAGE_METRIC_HUB: "lifetime_metric_hub",
@@ -254,25 +256,32 @@ def _default_export_provider(snapshot: object, request: "AnalyticsSheetRequest")
 
 @dataclass(frozen=True, slots=True)
 class AnalyticsSheetRequest:
-    """Validated user selection; it contains no calculated analytics."""
+    """Validated user selection; it contains no calculated analytics.
+
+    ``range_start`` and ``range_end`` are inclusive local calendar dates.  They
+    genuinely decide which records enter the report (see ANALYTICS_SHEET.period);
+    ``presentation_timezone`` is the user's selected timezone key and is
+    stamped by the export lane, not chosen in the composer.
+    """
 
     range_start: date
     range_end: date
-    include_metric_hub: bool
-    include_science_lab: bool
-    include_live_mirl: bool
+    include_mirl: bool
     include_cosine: bool
+    include_mine: bool
+    include_study_mode: bool
+    presentation_timezone: str = "local"
 
     def selected_sections(self) -> tuple[str, ...]:
         selected: list[str] = []
-        if self.include_metric_hub:
-            selected.append(PAGE_METRIC_HUB)
-        if self.include_science_lab:
-            selected.append(PAGE_SCIENCE_LAB)
-        if self.include_live_mirl:
+        if self.include_mirl:
             selected.append(PAGE_LIVE_MIRL)
         if self.include_cosine:
             selected.append(PAGE_COSINE)
+        if self.include_mine:
+            selected.append(PAGE_MINE)
+        if self.include_study_mode:
+            selected.append(PAGE_STUDY_MODE)
         return tuple(selected)
 
 
@@ -765,8 +774,52 @@ class CosinePage(DashboardPage):
         _replace_rows(self.events, event_rows)
 
 
+#: (section key, title, descriptor, accent colour) in the approved order.
+_ORGAN_CHOICES: Final = (
+    (PAGE_LIVE_MIRL, "MIRL", "Recovery episodes", "#38bdf8"),
+    (PAGE_COSINE, "COSINE", "OTT episodes", "#a855f7"),
+    (PAGE_MINE, "MINE", "Messaging episodes", "#ec4899"),
+    (PAGE_STUDY_MODE, "STUDY MODE", "Study records", "#34d399"),
+)
+
+
+class _OrganChoice(QFrame):
+    """One selectable organ card; the real control is its QCheckBox."""
+
+    def __init__(self, title: str, descriptor: str, colour: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("analyticsOrganChoice")
+        self._colour = colour
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(4)
+        self.checkbox = QCheckBox(title, self)
+        self.checkbox.setChecked(True)
+        self.descriptor = QLabel(descriptor, self)
+        layout.addWidget(self.checkbox)
+        layout.addWidget(self.descriptor)
+        self.checkbox.toggled.connect(self._restyle)
+        self._restyle(True)
+
+    def _restyle(self, checked: bool) -> None:
+        border = self._colour if checked else "#2a3441"
+        title = self._colour if checked else "#7b8794"
+        body = "#cbd5e1" if checked else "#6b7684"
+        self.setStyleSheet(
+            f"QFrame#analyticsOrganChoice {{ background: #151d27; border: 1px solid {border}; border-radius: 12px; }}"
+            f"QCheckBox {{ color: {title}; font-size: 18px; font-weight: 700; spacing: 10px; background: transparent; }}"
+            f"QLabel {{ color: {body}; font-size: 12px; background: transparent; border: 0; }}"
+        )
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.checkbox.toggle()
+        event.accept()
+
+
 class AnalyticsSheetDialog(QDialog):
-    """User-facing report selection surface; it calculates no evidence."""
+    """Compose one date-specific, four-organ Analytics Sheet."""
 
     export_requested = pyqtSignal(object)
 
@@ -775,43 +828,79 @@ class AnalyticsSheetDialog(QDialog):
         self.setObjectName("analyticsSheetDialog")
         self.setWindowTitle("MYELIN Analytics Sheet")
         self.setModal(False)
-        self.resize(620, 620)
+        self.resize(700, 700)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 26, 28, 26)
-        root.setSpacing(16)
-        title = QLabel("ANALYTICS SHEET")
+        root.setSpacing(14)
+        title = QLabel("MYELIN Analytics Sheet")
         title.setObjectName("analyticsPageTitle")
-        description = QLabel(
-            "Choose which authoritative dashboard projections should appear "
-            "in the exported sheet."
-        )
-        description.setObjectName("analyticsPageSubtitle")
-        description.setWordWrap(True)
+        subtitle = QLabel("Four individual organs \u00b7 Selected dates only")
+        subtitle.setObjectName("analyticsPageSubtitle")
         root.addWidget(title)
-        root.addWidget(description)
+        root.addWidget(subtitle)
 
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(14)
+        self.sections: dict[str, QCheckBox] = {}
+        self.choices: dict[str, _OrganChoice] = {}
+        for index, (key, name, descriptor, colour) in enumerate(_ORGAN_CHOICES):
+            choice = _OrganChoice(name, descriptor, colour)
+            grid.addWidget(choice, index // 2, index % 2)
+            self.choices[key] = choice
+            self.sections[key] = choice.checkbox
+        root.addLayout(grid)
+
+        rule = QFrame()
+        rule.setFrameShape(QFrame.Shape.HLine)
+        rule.setObjectName("analyticsSheetRule")
+        root.addWidget(rule)
+
+        heading = QLabel("FROM \u2192 TO")
+        heading.setObjectName("analyticsSheetDateHeading")
+        heading.setStyleSheet("font-size: 16px; font-weight: 700;")
+        root.addWidget(heading)
         dates = QGridLayout()
         dates.addWidget(QLabel("FROM"), 0, 0)
-        dates.addWidget(QLabel("TO"), 0, 1)
+        dates.addWidget(QLabel("TO"), 0, 2)
         self.start_date = QDateEdit(QDate.currentDate().addMonths(-1))
         self.end_date = QDateEdit(QDate.currentDate())
         for editor in (self.start_date, self.end_date):
             editor.setCalendarPopup(True)
             editor.setDisplayFormat("dd MMM yyyy")
         dates.addWidget(self.start_date, 1, 0)
-        dates.addWidget(self.end_date, 1, 1)
+        arrow = QLabel("\u2192")
+        arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        dates.addWidget(arrow, 1, 1)
+        dates.addWidget(self.end_date, 1, 2)
+        dates.setColumnStretch(0, 1)
+        dates.setColumnStretch(2, 1)
         root.addLayout(dates)
 
-        self.sections = {
-            PAGE_METRIC_HUB: QCheckBox("Metric Hub"),
-            PAGE_SCIENCE_LAB: QCheckBox("Science Lab"),
-            PAGE_LIVE_MIRL: QCheckBox("Live MIRL"),
-            PAGE_COSINE: QCheckBox("COSINE"),
-        }
-        for checkbox in self.sections.values():
-            checkbox.setChecked(True)
-            root.addWidget(checkbox)
+        rule_text = QLabel("Only records belonging to the selected period enter the report.")
+        rule_text.setObjectName("analyticsPageSubtitle")
+        rule_text.setWordWrap(True)
+        root.addWidget(rule_text)
+
+        hint = QFrame()
+        hint.setObjectName("analyticsSheetEmptyHint")
+        hint.setStyleSheet(
+            "QFrame#analyticsSheetEmptyHint { background: #1a1a1a; border-radius: 10px; }"
+            "QLabel { background: transparent; }"
+        )
+        hint_layout = QVBoxLayout(hint)
+        hint_layout.setContentsMargins(16, 12, 16, 12)
+        hint_layout.setSpacing(2)
+        hint_title = QLabel("No episode recorded")
+        hint_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint_title.setStyleSheet("font-size: 15px; font-weight: 700;")
+        hint_body = QLabel("When an available organ has zero episodes in the selected period, its chapter says so.")
+        hint_body.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint_body.setWordWrap(True)
+        hint_layout.addWidget(hint_title)
+        hint_layout.addWidget(hint_body)
+        root.addWidget(hint)
 
         self.message = QLabel("Ready")
         self.message.setObjectName("analyticsEvidenceNote")
@@ -830,7 +919,7 @@ class AnalyticsSheetDialog(QDialog):
 
     def set_busy(self, busy: bool) -> None:
         self.export_button.setEnabled(not busy)
-        self.message.setText("Preparing authoritative report…" if busy else "Ready")
+        self.message.setText("Preparing authoritative report\u2026" if busy else "Ready")
 
     def show_error(self, message: str) -> None:
         self.set_busy(False)
@@ -849,13 +938,13 @@ class AnalyticsSheetDialog(QDialog):
         request = AnalyticsSheetRequest(
             range_start=start,
             range_end=end,
-            include_metric_hub=self.sections[PAGE_METRIC_HUB].isChecked(),
-            include_science_lab=self.sections[PAGE_SCIENCE_LAB].isChecked(),
-            include_live_mirl=self.sections[PAGE_LIVE_MIRL].isChecked(),
+            include_mirl=self.sections[PAGE_LIVE_MIRL].isChecked(),
             include_cosine=self.sections[PAGE_COSINE].isChecked(),
+            include_mine=self.sections[PAGE_MINE].isChecked(),
+            include_study_mode=self.sections[PAGE_STUDY_MODE].isChecked(),
         )
         if not request.selected_sections():
-            self.show_error("Select at least one analytics section.")
+            self.show_error("Select at least one organ.")
             return
         self.export_requested.emit(request)
 
@@ -872,10 +961,12 @@ class _AnalyticsExport(QObject):
         report_access,
         exporter: Callable[[object, AnalyticsSheetRequest], str],
         parent: QObject | None = None,
+        timezone_key_provider: Callable[[], str] | None = None,
     ) -> None:
         super().__init__(parent)
         self._report_access = report_access
         self._exporter = exporter
+        self._timezone_key_provider = timezone_key_provider or (lambda: "local")
         self._snapshot = None
         self._busy = False
         self._closed = False
@@ -896,6 +987,12 @@ class _AnalyticsExport(QObject):
         if self._snapshot is None:
             self.failed.emit("Refresh analytics before exporting.")
             return False
+        # The period is interpreted in the user's selected timezone.
+        try:
+            zone_key = str(self._timezone_key_provider() or "local")
+        except Exception:
+            zone_key = "local"
+        request = replace(request, presentation_timezone=zone_key)
         refusal = self._report_access.refusal()
         if refusal is not None:
             self.failed.emit(_safe_text(_field(refusal, "message", refusal)))
@@ -1034,6 +1131,7 @@ class AnalyticsController(QObject):
             report_access,
             export_provider or _default_export_provider,
             parent=self,
+            timezone_key_provider=self._timezone_key_provider,
         )
 
     def create_metric_hub_page(self) -> MetricHubPage:

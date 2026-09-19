@@ -12,13 +12,16 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import QObject, pyqtSignal
-from PyQt6.QtWidgets import QApplication, QLabel, QPushButton
+from PyQt6.QtCore import QObject, QPoint, QRect, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QApplication, QLabel, QPushButton, QWidget
 
 from CONTROL_STATION.get_chart import (
     LOCKED_BODY,
     LOCKED_TITLE,
     ChartAccessRevoked,
+    ChartLockedDialog,
     GetChartController,
     NeonPosterWindow,
 )
@@ -545,6 +548,333 @@ class GetChartTests(unittest.TestCase):
         self.assertIn('"EXPORT PDF"', source)
         self.assertIn("def open_composer(self) -> bool:", source)
         self.assertIn("export_analytics_sheet", source)
+
+
+class _WhiteHost(QWidget):
+    """Stand-in Control Station window: opaque white so dimming is measurable."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.resize(1000, 700)
+        self.presses = 0
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Window, QColor(255, 255, 255))
+        self.setPalette(palette)
+        self.setAutoFillBackground(True)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        self.presses += 1
+
+
+class _CountingLifecycle(_Lifecycle):
+    pass
+
+
+def _near(color: QColor, expected: tuple[int, int, int], tolerance: int) -> bool:
+    return all(
+        abs(actual - wanted) <= tolerance
+        for actual, wanted in zip((color.red(), color.green(), color.blue()), expected)
+    )
+
+
+class ChartLockedDialogAppearanceTests(unittest.TestCase):
+    """The CHART NOT AVAILABLE card must look like START MYELIN and act like before."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self) -> None:
+        self.engine = _Engine()
+        self.lifecycle = _Lifecycle()
+        self.host = _WhiteHost()
+        self.button = QPushButton("GET CHART", self.host)
+        self.button.move(820, 640)  # keep the probe corner (2, 2) on plain host
+        self.poster = _ExportPoster()
+        self.controller = GetChartController(
+            engine=self.engine,
+            lifecycle=self.lifecycle,
+            analytics_opener=lambda: True,
+            data_provider=_poster_contract,
+            parent=self.host,
+        )
+        self.controller.register_button(self.button)
+        self.controller.register_poster(self.poster)
+        for signal in (
+            self.engine.engine_status_changed,
+            self.engine.engine_stopped,
+            self.engine.engine_failed,
+        ):
+            signal.connect(self.controller.lifecycle_changed)
+        self.host.show()
+        self.app.processEvents()
+
+    def tearDown(self) -> None:
+        self.controller.shutdown()
+        self.host.close()
+        self.host.deleteLater()
+        self.app.sendPostedEvents(None, 16)  # QEvent.DeferredDelete
+        self.app.processEvents()
+
+    # -- helpers --------------------------------------------------------------
+
+    def show_dialog(self) -> ChartLockedDialog:
+        self.engine.publish("ACTIVE", active=True)
+        self.assertFalse(self.controller.open_poster())
+        self.app.processEvents()
+        dialog = self.controller._locked_dialog
+        self.assertIsNotNone(dialog)
+        self.assertTrue(dialog.isVisible())
+        return dialog
+
+    def frame(self):
+        return self.host.grab().toImage()
+
+    @staticmethod
+    def px(image, x: float, y: float) -> QColor:
+        """Sample in logical coordinates; grab() is device-pixel-ratio scaled."""
+
+        ratio = image.devicePixelRatio()
+        return image.pixelColor(int(x * ratio), int(y * ratio))
+
+    def card_rect(self, dialog: ChartLockedDialog) -> QRect:
+        return QRect(dialog.card.mapTo(self.host, QPoint(0, 0)), dialog.card.size())
+
+    def dialogs(self) -> list:
+        return self.host.findChildren(ChartLockedDialog)
+
+    # -- visual ---------------------------------------------------------------
+
+    def test_card_is_centred_over_the_control_station(self) -> None:
+        dialog = self.show_dialog()
+        self.assertEqual(dialog.geometry(), self.host.rect())
+        card = self.card_rect(dialog)
+        self.assertLessEqual(abs(card.center().x() - self.host.rect().center().x()), 1)
+        self.assertLessEqual(abs(card.center().y() - self.host.rect().center().y()), 1)
+        self.assertTrue(self.host.rect().contains(card))
+        self.assertGreaterEqual(card.width(), 460)
+        self.assertLessEqual(card.width(), 560)
+
+    def test_background_is_dimmed_but_not_opaque_black(self) -> None:
+        dialog = self.show_dialog()
+        corner = self.px(self.frame(), 2, 2)
+        # white under rgba(4, 9, 13, 218): dark, yet the window still shows through
+        self.assertTrue(_near(corner, (40, 45, 48), 3), corner.name())
+        self.assertNotEqual((corner.red(), corner.green(), corner.blue()), (4, 9, 13))
+        # the card itself is not dimmed
+        card = self.card_rect(dialog)
+        inside = self.px(self.frame(), card.x() + 12, card.center().y())
+        self.assertTrue(_near(inside, (16, 24, 33), 2), inside.name())
+
+    def test_card_border_and_rounded_corners(self) -> None:
+        dialog = self.show_dialog()
+        card = self.card_rect(dialog)
+        image = self.frame()
+        ratio = image.devicePixelRatio()
+        row = int(card.center().y() * ratio)
+        edge_pixels = [
+            image.pixelColor(int(card.x() * ratio) + offset, row) for offset in (-1, 0, 1, 2)
+        ]
+        self.assertTrue(
+            any(_near(color, (41, 64, 79), 14) for color in edge_pixels),
+            [color.name() for color in edge_pixels],
+        )
+        corner = self.px(image, card.x() + 1, card.y() + 1)
+        overlay = (40, 45, 48)
+        self.assertTrue(_near(corner, overlay, 10), f"corner is not rounded: {corner.name()}")
+
+    def test_type_hierarchy_matches_start_confirmation(self) -> None:
+        dialog = self.show_dialog()
+        title = dialog.findChild(QLabel, "getChartLockedTitle")
+        body = dialog.findChild(QLabel, "getChartLockedBody")
+        self.assertEqual(title.text(), LOCKED_TITLE)
+        self.assertEqual(body.text(), LOCKED_BODY)
+        self.assertEqual(title.font().pixelSize(), 20)
+        self.assertTrue(title.font().bold())
+        self.assertEqual(body.font().pixelSize(), 14)
+        self.assertLess(body.font().weight(), title.font().weight())
+        self.assertIn("#b8cad4", body.styleSheet())
+        self.assertEqual(len(dialog.findChildren(QLabel)), 2, "no extra copy may be added")
+        self.assertLess(title.geometry().top(), body.geometry().top())
+
+    def test_style_values_match_the_start_confirmation_source(self) -> None:
+        lifecycle_source = (Path(__file__).with_name("lifecycle.py")).read_text(encoding="utf-8")
+        chart_source = (Path(__file__).with_name("get_chart.py")).read_text(encoding="utf-8")
+        for literal in ("#101821", "#29404f", "border-radius: 14px", "#b8cad4"):
+            self.assertIn(literal, lifecycle_source)
+            self.assertIn(literal, chart_source)
+        self.assertIn("QColor(4, 9, 13, 218)", lifecycle_source)
+        self.assertIn("_OVERLAY_RGBA: Final = (4, 9, 13, 218)", chart_source)
+
+    def test_buttons_are_bottom_right_aligned_and_unclipped(self) -> None:
+        dialog = self.show_dialog()
+        card = self.card_rect(dialog)
+        close, stop = dialog.close_button, dialog.stop_button
+        self.assertEqual([close.text(), stop.text()], ["CLOSE", "STOP MYELIN"])
+        self.assertEqual(len(dialog.findChildren(QPushButton)), 2)
+        close_box = QRect(close.mapTo(self.host, QPoint(0, 0)), close.size())
+        stop_box = QRect(stop.mapTo(self.host, QPoint(0, 0)), stop.size())
+        self.assertLessEqual(abs(stop_box.right() - (card.right() - 32)), 1)
+        self.assertLess(close_box.right(), stop_box.left())
+        self.assertEqual(stop_box.left() - close_box.right() - 1, 12)
+        self.assertEqual(close_box.height(), stop_box.height())
+        self.assertGreater(close_box.center().x(), card.center().x())
+        self.assertGreater(close_box.top(), card.center().y())
+        for box, button in ((close_box, close), (stop_box, stop)):
+            self.assertTrue(card.contains(box))
+            self.assertLessEqual(button.fontMetrics().horizontalAdvance(button.text()), button.width())
+
+    def test_text_is_never_clipped(self) -> None:
+        dialog = self.show_dialog()
+        for label in dialog.findChildren(QLabel):
+            needed = label.fontMetrics().boundingRect(
+                QRect(0, 0, label.width(), 10000), int(Qt.TextFlag.TextWordWrap), label.text()
+            )
+            self.assertLessEqual(needed.height(), label.height() + 1, label.text())
+
+    def test_it_is_an_in_window_card_with_no_title_bar(self) -> None:
+        dialog = self.show_dialog()
+        self.assertFalse(dialog.isWindow(), "must not be a second top-level window")
+        self.assertIs(dialog.parent(), self.host)
+        self.assertFalse(dialog.windowFlags() & Qt.WindowType.Dialog == Qt.WindowType.Dialog)
+
+    def test_card_follows_the_window_when_it_is_moved_or_resized(self) -> None:
+        dialog = self.show_dialog()
+        for size in ((1400, 800), (760, 520), (500, 320)):
+            self.host.resize(*size)
+            self.app.processEvents()
+            self.assertEqual(dialog.geometry(), self.host.rect())
+            card = self.card_rect(dialog)
+            self.assertTrue(self.host.rect().contains(card), f"card clipped at {size}")
+            self.assertLessEqual(abs(card.center().x() - self.host.rect().center().x()), 1)
+        self.host.move(40, 55)
+        self.app.processEvents()
+        self.assertEqual(dialog.geometry(), self.host.rect())
+
+    def test_default_and_visible_keyboard_focus(self) -> None:
+        dialog = self.show_dialog()
+        self.assertIs(dialog.focusWidget(), dialog.close_button, "default must not be STOP")
+        self.assertIn(":focus", dialog.card.styleSheet())
+        QTest.keyClick(dialog, Qt.Key.Key_Tab)
+        self.assertIs(dialog.focusWidget(), dialog.stop_button)
+        QTest.keyClick(dialog, Qt.Key.Key_Tab)
+        self.assertIs(dialog.focusWidget(), dialog.close_button, "focus must stay inside the card")
+        QTest.keyClick(dialog, Qt.Key.Key_Backtab)
+        self.assertIs(dialog.focusWidget(), dialog.stop_button)
+
+    def test_overlay_swallows_clicks_meant_for_the_dimmed_window(self) -> None:
+        dialog = self.show_dialog()
+        QTest.mouseClick(dialog, Qt.MouseButton.LeftButton, pos=QPoint(6, 6))
+        self.assertEqual(self.host.presses, 0)
+        self.assertTrue(dialog.isVisible(), "a click outside the card must not dismiss it")
+
+    # -- overlay lifetime -------------------------------------------------------
+
+    def test_overlay_disappears_completely_after_dismissal(self) -> None:
+        dialog = self.show_dialog()
+        dialog.close_button.click()
+        self.app.processEvents()
+        self.assertFalse(dialog.isVisible())
+        self.assertTrue(_near(self.px(self.frame(), 2, 2), (255, 255, 255), 0))
+
+    def test_no_stale_overlay_after_stop_then_a_new_session(self) -> None:
+        dialog = self.show_dialog()
+        dialog.stop_button.click()
+        self.app.processEvents()
+        self.assertFalse(dialog.isVisible())
+        self.engine.publish("STOPPED", active=False)
+        self.engine.publish("STARTING", active=True)
+        self.engine.publish("ACTIVE", active=True)
+        self.app.processEvents()
+        self.assertEqual([d for d in self.dialogs() if d.isVisible()], [])
+        self.assertTrue(_near(self.px(self.frame(), 2, 2), (255, 255, 255), 0))
+
+    def test_shutdown_removes_dialog_and_overlay(self) -> None:
+        self.show_dialog()
+        self.controller.shutdown()
+        self.app.sendPostedEvents(None, 16)
+        self.app.processEvents()
+        self.assertEqual(self.dialogs(), [])
+        self.assertTrue(_near(self.px(self.frame(), 2, 2), (255, 255, 255), 0))
+        self.assertFalse(self.controller.open_poster())
+
+    # -- behaviour that must be unchanged ---------------------------------------
+
+    def test_close_dismisses_without_stopping_or_unlocking(self) -> None:
+        dialog = self.show_dialog()
+        dialog.close_button.click()
+        self.assertEqual(self.lifecycle.stop_calls, 0)
+        self.assertTrue(self.engine.active)
+        self.assertFalse(dialog.isVisible())
+        self.assertIn("\U0001f512", self.button.text())
+        self.assertFalse(self.controller.open_poster())
+        self.assertFalse(self.poster.isVisible())
+
+    def test_stop_uses_the_existing_signal_and_lifecycle_request(self) -> None:
+        dialog = self.show_dialog()
+        emitted = []
+        dialog.stop_requested.connect(lambda: emitted.append(True))
+        dialog.stop_button.click()
+        self.assertEqual(emitted, [True])
+        self.assertEqual(self.lifecycle.stop_calls, 1)
+        self.assertFalse(dialog.isVisible())
+
+    def test_refused_stop_does_not_unlock_the_chart(self) -> None:
+        dialog = self.show_dialog()
+        dialog.stop_button.click()
+        self.controller.lifecycle_changed("COMMAND_REFUSED")
+        self.assertTrue(self.engine.active)
+        self.assertIn("\U0001f512", self.button.text())
+        self.assertFalse(self.controller.open_poster())
+        self.assertFalse(self.poster.isVisible())
+
+    def test_repeated_clicks_reuse_one_dialog(self) -> None:
+        first = self.show_dialog()
+        for _ in range(4):
+            self.assertFalse(self.controller.open_poster())
+        self.assertIs(self.controller._locked_dialog, first)
+        self.assertEqual(len(self.dialogs()), 1)
+        first.close_button.click()
+        self.assertFalse(self.controller.open_poster())
+        self.assertIs(self.controller._locked_dialog, first)
+        self.assertEqual(len(self.dialogs()), 1)
+        self.assertTrue(first.isVisible())
+
+    def test_escape_dismisses_but_cannot_bypass_the_lock(self) -> None:
+        dialog = self.show_dialog()
+        QTest.keyClick(dialog, Qt.Key.Key_Escape)
+        self.assertFalse(dialog.isVisible())
+        self.assertEqual(self.lifecycle.stop_calls, 0)
+        self.assertTrue(self.engine.active)
+        self.assertFalse(self.controller.open_poster())
+        self.assertFalse(self.poster.isVisible())
+
+    def test_enter_on_the_default_button_never_requests_a_stop(self) -> None:
+        dialog = self.show_dialog()
+        QTest.keyClick(dialog, Qt.Key.Key_Return)
+        self.assertEqual(self.lifecycle.stop_calls, 0)
+        self.assertFalse(dialog.isVisible())
+
+    def test_paused_and_running_stay_locked_and_stopped_opens_the_poster(self) -> None:
+        for state in ("ACTIVE", "PAUSED"):
+            self.engine.publish(state, active=True)
+            self.assertFalse(self.controller.open_poster())
+            self.assertFalse(self.poster.isVisible())
+        self.controller._locked_dialog.close_button.click()
+        self.engine.publish("STOPPED", active=False)
+        self.assertTrue(self.controller.open_poster())
+        self.app.processEvents()
+        self.assertTrue(self.poster.isVisible())
+
+    def test_without_a_host_window_the_card_still_shows_alone(self) -> None:
+        standalone = ChartLockedDialog()
+        standalone.present()
+        self.app.processEvents()
+        self.assertTrue(standalone.isVisible())
+        self.assertEqual(standalone.windowTitle(), LOCKED_TITLE)
+        standalone.close_button.click()
+        self.assertFalse(standalone.isVisible())
+        standalone.deleteLater()
 
 
 if __name__ == "__main__":

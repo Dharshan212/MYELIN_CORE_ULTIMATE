@@ -25,9 +25,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Final
 
-from PyQt6.QtCore import QObject, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QKeyEvent, QPainter
 from PyQt6.QtWidgets import (
-    QDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -52,40 +53,126 @@ class ChartAccessRevoked(RuntimeError):
     """Raised when a data load loses its stopped-session access grant."""
 
 
-class ChartLockedDialog(QDialog):
-    """One reusable, non-nested lock explanation and safe-stop choice."""
+# Presentation values mirror LifecycleConfirmSurface (START MYELIN?) so the two
+# confirmations read as one interface.  They are reproduced here, not imported:
+# lifecycle.py owns that surface and is not modified by this presentation patch.
+_OVERLAY_RGBA: Final = (4, 9, 13, 218)
+_CARD_STYLE: Final = (
+    "QFrame#getChartLockedCard { background: #101821; border: 1px solid #29404f;"
+    " border-radius: 14px; }"
+    "QLabel { color: #edf7fb; background: transparent; border: 0; }"
+    "QPushButton:focus { border: 1px solid #6f9bb3; }"
+    "QPushButton:pressed { background: #0b1218; }"
+)
+
+
+class ChartLockedDialog(QWidget):
+    """One reusable, non-nested lock explanation and safe-stop choice.
+
+    Presented like the START MYELIN confirmation: a dimmed, in-window overlay
+    over the Control Station with one centred navy card.  It is a child of the
+    Control Station window (no second top-level window, no title bar), so it
+    always follows that window's size and position.  Without a host window it
+    falls back to a small frameless window that shows only the card.
+    """
 
     stop_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
+        if parent is None:
+            super().__init__(
+                None,
+                Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint,
+            )
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        else:
+            super().__init__(parent)
+        self._host = parent
+        self._filter_installed = False
+        self._previous_focus: QWidget | None = None
+
         self.setObjectName("getChartLockedDialog")
         self.setWindowTitle(LOCKED_TITLE)
-        self.setWindowModality(Qt.WindowModality.WindowModal)
-        self.setModal(True)
-        self.setMinimumWidth(420)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName(LOCKED_TITLE)
+        self.setAccessibleDescription(LOCKED_BODY)
 
-        layout = QVBoxLayout(self)
-        body = QLabel(LOCKED_BODY, self)
+        self.card = QFrame(self)
+        self.card.setObjectName("getChartLockedCard")
+        self.card.setMinimumWidth(460)
+        self.card.setMaximumWidth(560)
+        self.card.setStyleSheet(_CARD_STYLE)
+
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(32, 30, 32, 26)
+        card_layout.setSpacing(14)
+
+        self.title_label = QLabel(LOCKED_TITLE, self.card)
+        self.title_label.setObjectName("getChartLockedTitle")
+        self.title_label.setWordWrap(True)
+        self.title_label.setAccessibleName(LOCKED_TITLE)
+        self.title_label.setStyleSheet(
+            "font-size: 20px; font-weight: 700; letter-spacing: 1px;"
+        )
+        card_layout.addWidget(self.title_label)
+
+        body = QLabel(LOCKED_BODY, self.card)
         body.setObjectName("getChartLockedBody")
         body.setWordWrap(True)
-        layout.addWidget(body)
+        body.setAccessibleDescription(LOCKED_BODY)
+        body.setStyleSheet("font-size: 14px; color: #b8cad4;")
+        card_layout.addWidget(body)
+        card_layout.addSpacing(8)
 
         actions = QHBoxLayout()
+        actions.setSpacing(12)
         actions.addStretch(1)
-        self.close_button = QPushButton("CLOSE", self)
-        self.stop_button = QPushButton("STOP MYELIN", self)
+        self.close_button = QPushButton("CLOSE", self.card)
+        self.close_button.setObjectName("getChartLockedCloseButton")
+        self.close_button.setAccessibleName("CLOSE")
+        self.stop_button = QPushButton("STOP MYELIN", self.card)
+        self.stop_button.setObjectName("getChartLockedStopButton")
+        self.stop_button.setAccessibleName("STOP MYELIN")
         self.close_button.clicked.connect(self.reject)
         self.stop_button.clicked.connect(self._request_stop)
         actions.addWidget(self.close_button)
         actions.addWidget(self.stop_button)
-        layout.addLayout(actions)
+        card_layout.addLayout(actions)
+        self.setTabOrder(self.close_button, self.stop_button)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addStretch(1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(self.card)
+        row.addStretch(1)
+        outer.addLayout(row)
+        outer.addStretch(1)
+        self.hide()
 
     def present(self) -> None:
-        if not self.isVisible():
-            self.show()
+        """Show (or re-raise) the single card; safe to call repeatedly."""
+
+        host = self._host
+        if host is not None:
+            if not self._filter_installed:
+                host.installEventFilter(self)
+                self._filter_installed = True
+                focus = host.focusWidget()
+                self._previous_focus = focus if isinstance(focus, QWidget) else None
+            self.setGeometry(host.rect())
+        self.show()
         self.raise_()
-        self.activateWindow()
+        if host is None:
+            self.activateWindow()
+        # CLOSE is the default so a stray Enter can never request a stop.
+        self.close_button.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def reject(self) -> None:
+        """Dismiss only.  Never stops MYELIN and never changes chart access."""
+
+        self.close()
 
     def _request_stop(self) -> None:
         # This dialog is the user's explicit stop confirmation.  The signal is
@@ -93,6 +180,83 @@ class ChartLockedDialog(QDialog):
         # worker or its thread primitives directly.
         self.stop_requested.emit()
         self.reject()
+
+    # -- keyboard: stay inside the card, Escape only dismisses ---------------
+
+    def focusNextPrevChild(self, next_: bool) -> bool:  # noqa: N802
+        order = (self.close_button, self.stop_button)
+        current = self.focusWidget()
+        index = order.index(current) if current in order else -1
+        target = order[(index + (1 if next_ else -1)) % len(order)]
+        target.setFocus(
+            Qt.FocusReason.TabFocusReason if next_ else Qt.FocusReason.BacktabFocusReason
+        )
+        return True
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        key = event.key()
+        if key == Qt.Key.Key_Escape:
+            event.accept()
+            self.reject()
+            return
+        if key in {Qt.Key.Key_Return, Qt.Key.Key_Enter}:
+            event.accept()
+            focused = self.focusWidget()
+            button = focused if focused in (self.close_button, self.stop_button) else self.close_button
+            button.click()
+            return
+        super().keyPressEvent(event)
+
+    # -- the overlay swallows input meant for the dimmed window ---------------
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        event.accept()
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        event.accept()
+
+    # -- lifecycle: no overlay may outlive the dialog ------------------------
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        self._release_host()
+        super().hideEvent(event)
+
+    def _release_host(self) -> None:
+        host = self._host
+        if host is not None and self._filter_installed:
+            host.removeEventFilter(self)
+        self._filter_installed = False
+        previous, self._previous_focus = self._previous_focus, None
+        if previous is not None and not previous.isHidden():
+            try:
+                previous.setFocus(Qt.FocusReason.OtherFocusReason)
+            except RuntimeError:
+                pass
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if (
+            watched is self._host
+            and self.isVisible()
+            and event.type() in {QEvent.Type.Resize, QEvent.Type.Move}
+        ):
+            self.setGeometry(self._host.rect())
+        return False
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        if self._host is None:
+            return  # standalone fallback: only the card is drawn
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(*_OVERLAY_RGBA))
+        painter.end()
 
 
 class GetChartController(QObject):

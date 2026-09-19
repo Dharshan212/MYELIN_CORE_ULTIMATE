@@ -2674,41 +2674,52 @@ def record_emergency_followup_reason(reason_code: str) -> bool:
 # the already-prepared immutable projection and commits one PDF safely.
 # ---------------------------------------------------------------------------
 
+def _read_study_records_for_report(snapshot: object) -> tuple:
+    """Read every durable Study Mode snapshot through the existing reader.
+
+    The only Study Mode reader is per session (``read_science_lab_study_records``),
+    so the sessions come from the snapshot's session list.  Read-only; nothing
+    is written and no new SQL is introduced here.
+    """
+
+    hub = getattr(snapshot, "lifetime_metric_hub", None)
+    if hub is None:
+        raise RuntimeError("the session list needed to read Study Mode is unavailable")
+    records: list = []
+    for row in tuple(getattr(hub, "session_rows", ()) or ()):
+        records.extend(read_science_lab_study_records(int(row.session_id)))
+    return tuple(records)
+
+
 def export_analytics_sheet(*, snapshot: object, request: object) -> str:
-    from reportlab.lib.pagesizes import A4
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
-    from reportlab.lib.styles import getSampleStyleSheet
+    # Presentation and period filtering live in ANALYTICS_SHEET.  This function
+    # keeps the safe-commit responsibilities: choose the file, render to a
+    # temporary name, verify, then publish without clobbering.
+    from ANALYTICS_SHEET.render import build_analytics_sheet_pdf
 
     selected = tuple(request.selected_sections())
     if not selected:
         raise ValueError("at least one analytics section is required")
+    study_records = None
+    study_error = None
+    if "study-mode" in selected:
+        try:
+            study_records = _read_study_records_for_report(snapshot)
+        except Exception as error:  # reported as "unavailable", never as zero
+            study_error = type(error).__name__
     downloads = Path.home() / "Downloads"
     downloads.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     output = downloads / f"MYELIN_Analytics_{stamp}.pdf"
     temporary = output.with_name(f".{output.name}.{os.getpid()}.tmp")
-    styles = getSampleStyleSheet()
-    story = [
-        Paragraph("MYELIN Analytics Sheet", styles["Title"]),
-        Paragraph(
-            f"Range: {request.range_start.isoformat()} to {request.range_end.isoformat()}",
-            styles["Normal"],
-        ),
-        Spacer(1, 12),
-    ]
-    for section in selected:
-        attr = {
-            "metric-hub": "metric_hub",
-            "science-lab": "legacy_evidence_summary",
-            "live-mirl": "live_mirl",
-            "cosine": "cosine",
-        }[section]
-        projection = getattr(snapshot, attr, None)
-        story.append(Paragraph(section.replace("-", " ").upper(), styles["Heading2"]))
-        story.append(Paragraph(_json_text(projection)[:12000].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"), styles["Code"]))
-        story.append(Spacer(1, 12))
     try:
-        SimpleDocTemplate(str(temporary), pagesize=A4).build(story)
+        build_analytics_sheet_pdf(
+            snapshot=snapshot,
+            request=request,
+            output_path=temporary,
+            study_records=study_records,
+            study_error=study_error,
+        )
         # Never claim no-clobber after a check/replace race.  A hard-link commit
         # is atomic on the same filesystem and fails if the target appeared.
         os.link(temporary, output)
