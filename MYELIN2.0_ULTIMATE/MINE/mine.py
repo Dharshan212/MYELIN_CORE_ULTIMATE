@@ -234,6 +234,8 @@ class MineSnapshot:
     current_platform_label: str
     messaging_transition_count: int
     initial_gate_remaining_seconds: float
+    initial_gate_elapsed_seconds: float
+    initial_gate_seconds: float
     selected_branch: str
     return_intent_remaining_seconds: float
     important_chosen_minutes: int | None
@@ -409,6 +411,12 @@ class MineRuntime:
                     max(0.0, self._policy.initial_gate_seconds - self._initial_ns / _NS)
                     if initial_active
                     else 0.0
+                ),
+                initial_gate_elapsed_seconds=(
+                    self._initial_ns / _NS if initial_active else 0.0
+                ),
+                initial_gate_seconds=(
+                    self._policy.initial_gate_seconds if initial_active else 0.0
                 ),
                 selected_branch=self._branch,
                 return_intent_remaining_seconds=(

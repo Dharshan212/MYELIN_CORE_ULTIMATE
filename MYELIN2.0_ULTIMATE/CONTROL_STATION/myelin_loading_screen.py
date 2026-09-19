@@ -73,7 +73,7 @@ from PyQt6.QtGui import (
     QRadialGradient,
     QLinearGradient,
 )
-from PyQt6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 __all__ = ["MyelinLoadingScreen", "find_logo", "TOKENS"]
 
@@ -503,38 +503,37 @@ class LogoBadge(QWidget):
 # ============================================================
 
 
-class SweepBar(QWidget):
-    """320x6 track with the violet -> cyan indeterminate sweep (1.8s)."""
+class NeonProgressBar(QWidget):
+    """One hero determinate neon progress bar. Presentation only.
 
-    DURATION_MS = 1800
+    Holds no timer and simulates nothing -- ``set_progress`` is the only
+    way its fill changes, driven by real startup-stage milestones from
+    ``StartupSequence``.
+    """
+
+    WIDTH = 420
+    HEIGHT = 14
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setFixedSize(320, 8)  # 6px track + 1px border on each side
+        self.setFixedSize(self.WIDTH, self.HEIGHT)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self._phase = 0.0
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
+        self._percent = 0
 
+    # Interface parity with the other decorative widgets this screen
+    # start()s/stop()s in a loop; this bar has no animation of its own.
     def start(self) -> None:
-        if not self._timer.isActive():
-            self._timer.start(16)
+        return
 
     def stop(self) -> None:
-        self._timer.stop()
+        return
 
-    def _tick(self) -> None:
-        self._phase = (self._phase + 16.0 / self.DURATION_MS) % 1.0
+    def set_progress(self, percent: int) -> None:
+        clamped = max(0, min(100, int(percent)))
+        if clamped == self._percent:
+            return
+        self._percent = clamped
         self.update()
-
-    def _geometry(self) -> tuple[float, float]:
-        """@keyframes loadSweep -> (left%, width%) at the current phase."""
-        t = ease_in_out(self._phase)
-        if t < 0.5:
-            k = t / 0.5
-            return -40 + (30 - -40) * k, 40 + (55 - 40) * k
-        k = (t - 0.5) / 0.5
-        return 30 + (100 - 30) * k, 55 + (40 - 55) * k
 
     def paintEvent(self, event) -> None:  # noqa: N802
         p = QPainter(self)
@@ -544,27 +543,37 @@ class SweepBar(QWidget):
 
         track = QPainterPath()
         track.addRoundedRect(outer, radius, radius)
-        p.fillPath(track, c("surface-soft"))
+        p.fillPath(track, c("base"))
 
-        inner = outer.adjusted(1, 1, -1, -1)
-        clip = QPainterPath()
-        clip.addRoundedRect(inner, inner.height() / 2.0, inner.height() / 2.0)
-        p.save()
-        p.setClipPath(clip)
-        left_pct, width_pct = self._geometry()
-        x = inner.width() * left_pct / 100.0
-        w = inner.width() * width_pct / 100.0
-        fill = QRectF(inner.left() + x, inner.top(), w, inner.height())
-        grad = QLinearGradient(fill.topLeft(), fill.topRight())
-        grad.setColorAt(0.0, c("violet"))
-        grad.setColorAt(1.0, c("cyan"))
-        bar = QPainterPath()
-        bar.addRoundedRect(fill, inner.height() / 2.0, inner.height() / 2.0)
-        p.fillPath(bar, QBrush(grad))
-        p.restore()
+        inner = outer.adjusted(1.5, 1.5, -1.5, -1.5)
+        if self._percent > 0 and inner.width() > 0:
+            fill_w = inner.width() * (self._percent / 100.0)
+            fill = QRectF(inner.left(), inner.top(), fill_w, inner.height())
 
-        pen = QPen(c("border"))
-        pen.setWidthF(1.0)
+            glow_rect = fill.adjusted(-4, -4, 4, 4)
+            glow = QPainterPath()
+            glow.addRoundedRect(glow_rect, glow_rect.height() / 2.0, glow_rect.height() / 2.0)
+            p.fillPath(glow, rgba("cyan", 0.22))
+
+            clip = QPainterPath()
+            clip.addRoundedRect(inner, inner.height() / 2.0, inner.height() / 2.0)
+            p.save()
+            p.setClipPath(clip)
+
+            grad = QLinearGradient(fill.topLeft(), fill.topRight())
+            grad.setColorAt(0.0, c("cyan-dim"))
+            grad.setColorAt(1.0, c("cyan"))
+            bar = QPainterPath()
+            bar.addRoundedRect(fill, inner.height() / 2.0, inner.height() / 2.0)
+            p.fillPath(bar, QBrush(grad))
+
+            edge_w = min(6.0, fill.width())
+            edge = QRectF(fill.right() - edge_w, fill.top(), edge_w, fill.height())
+            p.fillRect(edge, rgba("text", 0.9))
+            p.restore()
+
+        pen = QPen(c("cyan"))
+        pen.setWidthF(1.2)
         p.setPen(pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(track)
@@ -649,15 +658,38 @@ class MyelinLoadingScreen(QWidget):
         lay.addWidget(tagline, 0, Qt.AlignmentFlag.AlignHCenter)
         lay.addSpacing(46)
 
+        header_row = QWidget(self.panel)
+        header_row.setFixedWidth(NeonProgressBar.WIDTH)
+        header_row.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        header_lay = QHBoxLayout(header_row)
+        header_lay.setContentsMargins(0, 0, 0, 0)
+        header_lay.setSpacing(0)
+
+        self.loading_label = QLabel("LOADING")
+        self.loading_label.setFont(mkfont(11.5, 700, mono=True, spacing=2.0))
+        self.loading_label.setStyleSheet("color: %s; background: transparent;" % TOKENS["muted"])
+
+        self.percent_label = QLabel("0%")
+        self.percent_label.setFont(mkfont(11.5, 700, mono=True))
+        self.percent_label.setStyleSheet("color: %s; background: transparent;" % TOKENS["cyan"])
+        self.percent_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        header_lay.addWidget(self.loading_label, 0, Qt.AlignmentFlag.AlignLeft)
+        header_lay.addStretch(1)
+        header_lay.addWidget(self.percent_label, 0, Qt.AlignmentFlag.AlignRight)
+        lay.addWidget(header_row, 0, Qt.AlignmentFlag.AlignHCenter)
+        lay.addSpacing(6)
+
+        self.bar = NeonProgressBar()
+        self._progress = 0
+        lay.addWidget(self.bar, 0, Qt.AlignmentFlag.AlignHCenter)
+        lay.addSpacing(14)
+
         self.status = QLabel(self._messages[0])
         self.status.setFont(mkfont(13, 400))
         self.status.setStyleSheet("color: %s; background: transparent;" % TOKENS["muted"])
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(self.status, 0, Qt.AlignmentFlag.AlignHCenter)
-        lay.addSpacing(18)
-
-        self.bar = SweepBar()
-        lay.addWidget(self.bar, 0, Qt.AlignmentFlag.AlignHCenter)
 
         # ---- bottom caption ----
         self.version = QLabel(VERSION_CAPTION, self)
@@ -706,6 +738,22 @@ class MyelinLoadingScreen(QWidget):
         self._cycle.stop()
         self._base_text = text
         self.status.setText(text + "." * self._dot_step)
+        QApplication.processEvents()
+
+    def set_progress(self, percent: int, text: str = "") -> None:
+        """Advance the determinate stage indicator. Never moves backwards.
+
+        ``text`` is optional so a caller can bump the percentage alone; when
+        given it is pinned via :meth:`set_status`, the one status authority.
+        """
+        clamped = max(0, min(100, int(percent)))
+        if clamped < self._progress:
+            return
+        self._progress = clamped
+        self.bar.set_progress(clamped)
+        self.percent_label.setText(f"{clamped}%")
+        if text:
+            self.set_status(text)
         QApplication.processEvents()
 
     def resume_cycle(self) -> None:

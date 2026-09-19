@@ -1264,6 +1264,229 @@ class EngineStorage:
         receipt = _terminal(self._lane, self._submit("record Study snapshot", write))
         return receipt.state is ReceiptState.COMMITTED
 
+    def start_science_lab_experiment(
+        self,
+        *,
+        parent_session_id: int,
+        date_key: str,
+        started_at_utc: str,
+        started_monotonic_ns: int,
+        runtime_instance_id: str,
+    ) -> int:
+        """Durably allocate and start one explicit Science Lab experiment."""
+
+        sid = _science_lab_session_id(parent_session_id)
+        day = _science_lab_date_key(date_key)
+        started_utc = _science_lab_nonempty_text(
+            started_at_utc, name="started_at_utc"
+        )
+        started_ns = _positive_int(
+            started_monotonic_ns, name="started_monotonic_ns"
+        )
+        runtime_id = _science_lab_nonempty_text(
+            runtime_instance_id, name="runtime_instance_id"
+        )
+
+        def write(connection):
+            parent = connection.execute(
+                "SELECT id, closed_at_utc FROM sessions WHERE id=?",
+                (sid,),
+            ).fetchone()
+            if parent is None:
+                raise RuntimeError("parent MYELIN session does not exist")
+            if parent["closed_at_utc"] is not None:
+                raise RuntimeError("parent MYELIN session is already closed")
+
+            existing = connection.execute(
+                "SELECT experiment_id FROM science_lab_experiments "
+                "WHERE status='RUNNING'"
+            ).fetchall()
+            if existing:
+                raise RuntimeError("a Science Lab experiment is already running")
+
+            row = connection.execute(
+                "SELECT MAX(daily_sequence) AS max_sequence "
+                "FROM science_lab_experiments WHERE date_key=?",
+                (day,),
+            ).fetchone()
+            max_sequence = (
+                int(row["max_sequence"])
+                if row is not None and row["max_sequence"] is not None
+                else 0
+            )
+            sequence = max_sequence + 1
+            if sequence > 99:
+                raise RuntimeError(
+                    "Science Lab daily experiment sequence is exhausted"
+                )
+
+            experiment_id = _science_lab_experiment_id(day, sequence)
+            connection.execute(
+                "INSERT INTO science_lab_experiments("
+                "experiment_id, parent_session_id, date_key, daily_sequence, "
+                "status, started_at_utc, started_monotonic_ns, "
+                "ended_at_utc, ended_monotonic_ns, end_reason, "
+                "runtime_instance_id, created_at_utc, updated_at_utc"
+                ") VALUES(?, ?, ?, ?, 'RUNNING', ?, ?, NULL, NULL, '', ?, ?, ?)",
+                (
+                    experiment_id,
+                    sid,
+                    day,
+                    sequence,
+                    started_utc,
+                    started_ns,
+                    runtime_id,
+                    started_utc,
+                    started_utc,
+                ),
+            )
+            return TransactionResult(result_id=sequence, session_id=sid)
+
+        receipt = _terminal(
+            self._lane,
+            self._submit("start Science Lab experiment", write),
+        )
+        if receipt.state is not ReceiptState.COMMITTED:
+            raise RuntimeError(
+                "Science Lab experiment start was not committed: "
+                f"{receipt.error or 'refused'}"
+            )
+        if receipt.session_id != sid or type(receipt.result_id) is not int:
+            raise RuntimeError(
+                "Science Lab experiment start returned invalid durable identity"
+            )
+        return receipt.result_id
+
+    def complete_science_lab_experiment(
+        self,
+        *,
+        experiment_id: str,
+        parent_session_id: int,
+        ended_at_utc: str,
+        ended_monotonic_ns: int,
+        end_reason: str,
+    ) -> bool:
+        """Durably complete one RUNNING experiment without closing MYELIN."""
+
+        target = _science_lab_experiment_identifier(experiment_id)
+        sid = _science_lab_session_id(parent_session_id)
+        ended_utc = _science_lab_nonempty_text(
+            ended_at_utc, name="ended_at_utc"
+        )
+        ended_ns = _positive_int(
+            ended_monotonic_ns, name="ended_monotonic_ns"
+        )
+        reason = _science_lab_nonempty_text(end_reason, name="end_reason")
+        if reason not in {"USER_END", "PARENT_SESSION_ENDED"}:
+            raise ValueError("end_reason is not an approved completion reason")
+
+        def write(connection):
+            row = connection.execute(
+                "SELECT * FROM science_lab_experiments WHERE experiment_id=?",
+                (target,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Science Lab experiment does not exist")
+            record = _science_lab_experiment_from_row(row)
+            if record.status != "RUNNING":
+                raise RuntimeError("Science Lab experiment is not RUNNING")
+            if record.parent_session_id != sid:
+                raise RuntimeError(
+                    "Science Lab experiment belongs to another parent session"
+                )
+            if ended_ns < record.started_monotonic_ns:
+                raise RuntimeError(
+                    "Science Lab experiment end precedes its start boundary"
+                )
+
+            cursor = connection.execute(
+                "UPDATE science_lab_experiments SET "
+                "status='COMPLETED', ended_at_utc=?, ended_monotonic_ns=?, "
+                "end_reason=?, updated_at_utc=? "
+                "WHERE experiment_id=? AND parent_session_id=? "
+                "AND status='RUNNING'",
+                (ended_utc, ended_ns, reason, ended_utc, target, sid),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    "Science Lab completion did not update exactly one RUNNING experiment"
+                )
+            return TransactionResult(result_id=1, session_id=sid)
+
+        receipt = _terminal(
+            self._lane,
+            self._submit("complete Science Lab experiment", write),
+        )
+        if receipt.state is not ReceiptState.COMMITTED:
+            raise RuntimeError(
+                "Science Lab experiment completion was not committed: "
+                f"{receipt.error or 'refused'}"
+            )
+        return True
+
+    def interrupt_stale_science_lab_experiment(
+        self,
+        *,
+        experiment_id: str,
+        current_runtime_instance_id: str,
+        interrupted_at_utc: str,
+    ) -> bool:
+        """Preserve a RUNNING experiment from an older process as interrupted."""
+
+        target = _science_lab_experiment_identifier(experiment_id)
+        current_runtime = _science_lab_nonempty_text(
+            current_runtime_instance_id,
+            name="current_runtime_instance_id",
+        )
+        interrupted_utc = _science_lab_nonempty_text(
+            interrupted_at_utc, name="interrupted_at_utc"
+        )
+
+        def write(connection):
+            row = connection.execute(
+                "SELECT * FROM science_lab_experiments WHERE experiment_id=?",
+                (target,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Science Lab experiment does not exist")
+            record = _science_lab_experiment_from_row(row)
+            if record.status != "RUNNING":
+                raise RuntimeError("Science Lab experiment is not RUNNING")
+            if record.runtime_instance_id == current_runtime:
+                return TransactionResult(
+                    result_id=0,
+                    session_id=record.parent_session_id,
+                )
+
+            cursor = connection.execute(
+                "UPDATE science_lab_experiments SET "
+                "status='INTERRUPTED', ended_at_utc=?, "
+                "ended_monotonic_ns=NULL, end_reason='CRASH_RECOVERY', "
+                "updated_at_utc=? "
+                "WHERE experiment_id=? AND status='RUNNING' "
+                "AND runtime_instance_id<>?",
+                (interrupted_utc, interrupted_utc, target, current_runtime),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    "Science Lab interruption did not update exactly one stale experiment"
+                )
+            return TransactionResult(
+                result_id=1,
+                session_id=record.parent_session_id,
+            )
+
+        receipt = _terminal(
+            self._lane,
+            self._submit("interrupt stale Science Lab experiment", write),
+        )
+        if receipt.state is not ReceiptState.COMMITTED:
+            raise RuntimeError(
+                "Science Lab experiment interruption was not committed: "
+                f"{receipt.error or 'refused'}"
+            )
+        return receipt.result_id == 1
+
     # ------------------------------------------------------------------
     # C11-B: Planner and Notes repositories.
     #
@@ -1573,10 +1796,415 @@ class EngineStorage:
 # Read side
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True, slots=True)
+class ScienceLabExperimentRecord:
+    experiment_id: str
+    parent_session_id: int
+    date_key: str
+    daily_sequence: int
+    status: str
+    started_at_utc: str
+    started_monotonic_ns: int
+    ended_at_utc: str | None
+    ended_monotonic_ns: int | None
+    end_reason: str
+    runtime_instance_id: str
+    created_at_utc: str
+    updated_at_utc: str
+
+
+@dataclass(frozen=True, slots=True)
+class ScienceLabSourceRecord:
+    """One immutable persisted source row exposed for Science Lab reading.
+
+    This object is factual persistence evidence only.  ``kind`` is the exact
+    persisted event/fact/action label.  ``payload_json`` is preserved verbatim;
+    this reader performs no behavioral interpretation.
+    """
+
+    source_system: str
+    source_event_id: str
+    session_id: int
+    kind: str
+    occurred_monotonic_ns: int
+    payload_json: str
+    created_at_utc: str
+
+
+def _science_lab_session_id(value: object) -> int:
+    return _positive_int(value, name="session_id")
+
+
+def _science_lab_nonempty_text(value: object, *, name: str) -> str:
+    if type(value) is not str or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    if value != value.strip():
+        raise ValueError(f"{name} must not contain surrounding whitespace")
+    return value
+
+
+def _science_lab_date_key(value: object) -> str:
+    key = _science_lab_nonempty_text(value, name="date_key")
+    if len(key) != 8 or any(character < "0" or character > "9" for character in key):
+        raise ValueError("date_key must contain exactly 8 ASCII digits")
+    return key
+
+
+def _science_lab_experiment_id(date_key: str, daily_sequence: int) -> str:
+    return f"MYL-{date_key}-SCI{daily_sequence:02d}"
+
+
+def _science_lab_experiment_identifier(value: object) -> str:
+    return _science_lab_nonempty_text(value, name="experiment_id")
+
+
+def _science_lab_exact_row_int(value: object, *, name: str) -> int:
+    if type(value) is not int:
+        raise RuntimeError(f"stored {name} is not an exact integer")
+    return value
+
+
+def _science_lab_exact_row_text(value: object, *, name: str) -> str:
+    if type(value) is not str or not value or value != value.strip():
+        raise RuntimeError(f"stored {name} is not a valid non-empty string")
+    return value
+
+
+def _science_lab_experiment_from_row(row) -> ScienceLabExperimentRecord:
+    parent_session_id = _science_lab_exact_row_int(
+        row["parent_session_id"], name="parent_session_id"
+    )
+    if parent_session_id <= 0:
+        raise RuntimeError("stored parent_session_id is not positive")
+
+    date_key = _science_lab_exact_row_text(row["date_key"], name="date_key")
+    if len(date_key) != 8 or any(
+        character < "0" or character > "9" for character in date_key
+    ):
+        raise RuntimeError("stored date_key is not exactly 8 ASCII digits")
+
+    daily_sequence = _science_lab_exact_row_int(
+        row["daily_sequence"], name="daily_sequence"
+    )
+    if not 1 <= daily_sequence <= 99:
+        raise RuntimeError("stored daily_sequence is outside 1 through 99")
+
+    experiment_id = _science_lab_exact_row_text(
+        row["experiment_id"], name="experiment_id"
+    )
+    if experiment_id != _science_lab_experiment_id(date_key, daily_sequence):
+        raise RuntimeError("stored experiment_id does not match its date and sequence")
+
+    status = _science_lab_exact_row_text(row["status"], name="status")
+    if status not in {"RUNNING", "COMPLETED", "INTERRUPTED"}:
+        raise RuntimeError("stored Science Lab experiment status is invalid")
+
+    started_at_utc = _science_lab_exact_row_text(
+        row["started_at_utc"], name="started_at_utc"
+    )
+    started_monotonic_ns = _science_lab_exact_row_int(
+        row["started_monotonic_ns"], name="started_monotonic_ns"
+    )
+    if started_monotonic_ns <= 0:
+        raise RuntimeError("stored started_monotonic_ns is not positive")
+
+    ended_at_value = row["ended_at_utc"]
+    ended_at_utc = (
+        None
+        if ended_at_value is None
+        else _science_lab_exact_row_text(ended_at_value, name="ended_at_utc")
+    )
+    ended_ns_value = row["ended_monotonic_ns"]
+    ended_monotonic_ns = (
+        None
+        if ended_ns_value is None
+        else _science_lab_exact_row_int(
+            ended_ns_value, name="ended_monotonic_ns"
+        )
+    )
+    end_reason_value = row["end_reason"]
+    if type(end_reason_value) is not str:
+        raise RuntimeError("stored end_reason is not text")
+    end_reason = end_reason_value
+
+    if status == "RUNNING":
+        if (
+            ended_at_utc is not None
+            or ended_monotonic_ns is not None
+            or end_reason != ""
+        ):
+            raise RuntimeError("stored RUNNING experiment has terminal fields")
+    elif status == "COMPLETED":
+        if (
+            ended_at_utc is None
+            or ended_monotonic_ns is None
+            or ended_monotonic_ns < started_monotonic_ns
+            or end_reason not in {"USER_END", "PARENT_SESSION_ENDED"}
+        ):
+            raise RuntimeError("stored COMPLETED experiment is malformed")
+    elif (
+        ended_at_utc is None
+        or ended_monotonic_ns is not None
+        or end_reason != "CRASH_RECOVERY"
+    ):
+        raise RuntimeError("stored INTERRUPTED experiment is malformed")
+
+    return ScienceLabExperimentRecord(
+        experiment_id=experiment_id,
+        parent_session_id=parent_session_id,
+        date_key=date_key,
+        daily_sequence=daily_sequence,
+        status=status,
+        started_at_utc=started_at_utc,
+        started_monotonic_ns=started_monotonic_ns,
+        ended_at_utc=ended_at_utc,
+        ended_monotonic_ns=ended_monotonic_ns,
+        end_reason=end_reason,
+        runtime_instance_id=_science_lab_exact_row_text(
+            row["runtime_instance_id"], name="runtime_instance_id"
+        ),
+        created_at_utc=_science_lab_exact_row_text(
+            row["created_at_utc"], name="created_at_utc"
+        ),
+        updated_at_utc=_science_lab_exact_row_text(
+            row["updated_at_utc"], name="updated_at_utc"
+        ),
+    )
+
+
+def read_science_lab_experiment(
+    experiment_id: str,
+) -> ScienceLabExperimentRecord | None:
+    target = _science_lab_experiment_identifier(experiment_id)
+    connection = connect_database(read_only=True)
+    try:
+        row = connection.execute(
+            "SELECT * FROM science_lab_experiments WHERE experiment_id=?",
+            (target,),
+        ).fetchone()
+    finally:
+        connection.close()
+    return None if row is None else _science_lab_experiment_from_row(row)
+
+
+def read_running_science_lab_experiment() -> ScienceLabExperimentRecord | None:
+    connection = connect_database(read_only=True)
+    try:
+        rows = connection.execute(
+            "SELECT * FROM science_lab_experiments WHERE status='RUNNING' "
+            "ORDER BY started_monotonic_ns, experiment_id"
+        ).fetchall()
+    finally:
+        connection.close()
+    if len(rows) > 1:
+        raise RuntimeError("multiple RUNNING Science Lab experiments are durable")
+    return None if not rows else _science_lab_experiment_from_row(rows[0])
+
+
+def read_science_lab_experiments_for_session(
+    parent_session_id: int,
+) -> tuple[ScienceLabExperimentRecord, ...]:
+    sid = _science_lab_session_id(parent_session_id)
+    connection = connect_database(read_only=True)
+    try:
+        rows = connection.execute(
+            "SELECT * FROM science_lab_experiments WHERE parent_session_id=? "
+            "ORDER BY started_monotonic_ns, experiment_id",
+            (sid,),
+        ).fetchall()
+    finally:
+        connection.close()
+    return tuple(_science_lab_experiment_from_row(row) for row in rows)
+
+
+def read_all_science_lab_experiments() -> tuple[ScienceLabExperimentRecord, ...]:
+    """Every durable Science Lab experiment across every parent session.
+
+    Read-only; no schema change; reuses ``_science_lab_experiment_from_row``
+    unchanged.  Ordered newest-first by ``created_at_utc`` -- a durable
+    wall-clock commit timestamp -- deliberately NOT by
+    ``started_monotonic_ns``, which is a per-process monotonic counter that
+    is not comparable across a MYELIN restart (Chapter 5 history feature,
+    Chief's 20260917 instruction).
+    """
+
+    connection = connect_database(read_only=True)
+    try:
+        rows = connection.execute(
+            "SELECT * FROM science_lab_experiments "
+            "ORDER BY created_at_utc DESC, experiment_id DESC"
+        ).fetchall()
+    finally:
+        connection.close()
+    return tuple(_science_lab_experiment_from_row(row) for row in rows)
+
+
+def read_session_closed_at_utc(session_id: int) -> str | None:
+    """The parent MYELIN session's own durable closure timestamp, if any.
+
+    Read-only.  This is the same durable field
+    ``start_science_lab_experiment`` already checks internally
+    (``sessions.closed_at_utc``) -- the authoritative record of when a
+    session ended, reused here (Chapter 5 history feature) as the source
+    of a historical experiment's session-finalization time, since the
+    original in-memory ``ScienceLabFinalizedSession.finalized_at_utc`` from
+    a past process run is never itself persisted anywhere.
+    """
+
+    sid = _science_lab_session_id(session_id)
+    connection = connect_database(read_only=True)
+    try:
+        row = connection.execute(
+            "SELECT closed_at_utc FROM sessions WHERE id=?",
+            (sid,),
+        ).fetchone()
+    finally:
+        connection.close()
+    if row is None:
+        return None
+    value = row["closed_at_utc"]
+    return None if value is None else str(value)
+
+
+def read_science_lab_sine_records(
+    session_id: int,
+) -> tuple[ScienceLabSourceRecord, ...]:
+    sid = _science_lab_session_id(session_id)
+    bootstrap_production_schema()
+    connection = connect_database(read_only=True)
+    try:
+        rows = connection.execute(
+            "SELECT id AS source_event_id, session_id, kind, "
+            "occurred_monotonic_ns, payload_json, created_at_utc "
+            "FROM sine_facts WHERE session_id=? "
+            "ORDER BY occurred_monotonic_ns, id",
+            (sid,),
+        ).fetchall()
+    finally:
+        connection.close()
+    return tuple(
+        ScienceLabSourceRecord(
+            source_system="SINE",
+            source_event_id=f"sine_facts:{int(row['source_event_id'])}",
+            session_id=int(row["session_id"]),
+            kind=str(row["kind"]),
+            occurred_monotonic_ns=int(row["occurred_monotonic_ns"]),
+            payload_json=str(row["payload_json"]),
+            created_at_utc=str(row["created_at_utc"]),
+        )
+        for row in rows
+    )
+
+
+def read_science_lab_normal_break_records(
+    session_id: int,
+) -> tuple[ScienceLabSourceRecord, ...]:
+    sid = _science_lab_session_id(session_id)
+    bootstrap_production_schema()
+    connection = connect_database(read_only=True)
+    try:
+        rows = connection.execute(
+            "SELECT event_id AS source_event_id, session_id, kind, "
+            "occurred_monotonic_ns, payload_json, created_at_utc "
+            "FROM normal_break_events WHERE session_id=? "
+            "ORDER BY occurred_monotonic_ns, event_id",
+            (sid,),
+        ).fetchall()
+    finally:
+        connection.close()
+    return tuple(
+        ScienceLabSourceRecord(
+            source_system="NORMAL_BREAK",
+            source_event_id=str(row["source_event_id"]),
+            session_id=int(row["session_id"]),
+            kind=str(row["kind"]),
+            occurred_monotonic_ns=int(row["occurred_monotonic_ns"]),
+            payload_json=str(row["payload_json"]),
+            created_at_utc=str(row["created_at_utc"]),
+        )
+        for row in rows
+    )
+
+
+def read_science_lab_study_records(
+    session_id: int,
+) -> tuple[ScienceLabSourceRecord, ...]:
+    sid = _science_lab_session_id(session_id)
+    bootstrap_production_schema()
+    connection = connect_database(read_only=True)
+    try:
+        rows = connection.execute(
+            "SELECT id AS source_event_id, session_id, action AS kind, "
+            "occurred_monotonic_ns, payload_json, created_at_utc "
+            "FROM study_events WHERE session_id=? "
+            "ORDER BY occurred_monotonic_ns, id",
+            (sid,),
+        ).fetchall()
+    finally:
+        connection.close()
+    return tuple(
+        ScienceLabSourceRecord(
+            source_system="STUDY",
+            source_event_id=f"study_events:{int(row['source_event_id'])}",
+            session_id=int(row["session_id"]),
+            kind=str(row["kind"]),
+            occurred_monotonic_ns=int(row["occurred_monotonic_ns"]),
+            payload_json=str(row["payload_json"]),
+            created_at_utc=str(row["created_at_utc"]),
+        )
+        for row in rows
+    )
+
+
+def read_science_lab_cosecant_records(
+    session_id: int,
+) -> tuple[ScienceLabSourceRecord, ...]:
+    sid = _science_lab_session_id(session_id)
+    bootstrap_production_schema()
+    connection = connect_database(read_only=True)
+    try:
+        rows = connection.execute(
+            "SELECT id AS source_event_id, session_id, kind, "
+            "occurred_monotonic_ns, payload_json, created_at_utc "
+            "FROM cosecant_events WHERE session_id=? "
+            "ORDER BY occurred_monotonic_ns, id",
+            (sid,),
+        ).fetchall()
+    finally:
+        connection.close()
+    return tuple(
+        ScienceLabSourceRecord(
+            source_system="COSECANT",
+            source_event_id=f"cosecant_events:{int(row['source_event_id'])}",
+            session_id=int(row["session_id"]),
+            kind=str(row["kind"]),
+            occurred_monotonic_ns=int(row["occurred_monotonic_ns"]),
+            payload_json=str(row["payload_json"]),
+            created_at_utc=str(row["created_at_utc"]),
+        )
+        for row in rows
+    )
+
+
+def read_science_lab_mirl_events(session_id: int):
+    """Return every durable MIRL event for exactly one parent MYELIN session.
+
+    This intentionally bypasses Live MIRL's presentation-only recent-history
+    cap while still using the canonical persistence reconstruction performed by
+    ``read_mirl_events``.  No SQL is opened by Science Lab itself.
+    """
+
+    sid = _science_lab_session_id(session_id)
+    return tuple(
+        event
+        for event in read_mirl_events()
+        if getattr(event, "session_id", None) == sid
+    )
+
+
 def read_cosine_events():
     from COSINE.cosine import CosineEvent, EventClass
 
-    bootstrap_production_schema()
     connection = connect_database(read_only=True)
     try:
         rows = connection.execute(
@@ -1611,7 +2239,6 @@ def read_mine_events():
 
     from MINE.mine import MineEvent, MineEventClass
 
-    bootstrap_production_schema()
     connection = connect_database(read_only=True)
     try:
         rows = connection.execute(
@@ -1648,7 +2275,6 @@ def read_mine_events():
 def read_mirl_events():
     from MIRL.mirl import MirlEvent, MirlEventClass, MirlEventName
 
-    bootstrap_production_schema()
     connection = connect_database(read_only=True)
     try:
         rows = connection.execute(
@@ -1691,7 +2317,17 @@ def read_mirl_events():
 @dataclass(frozen=True, slots=True)
 class ControlStationAnalyticsSnapshot:
     metric_hub: object
-    science_lab: object
+    # Distinct four-organ lifetime contract for the active Metric Hub page.
+    # The legacy MIRL-owned ``metric_hub`` field above remains unchanged for
+    # its existing report/export consumers.
+    lifetime_metric_hub: object
+    # Renamed from ``science_lab`` (Phase C evidence audit): this is MIRL's
+    # own pre-existing "Science Lab" formulas/evidence-scope projection
+    # (``mirl.science_lab`` below, from MIRL/read_model.py -- untouched),
+    # not the SCIENCE_LAB/ organ's future evidence.  Freed the name so
+    # SCIENCE_LAB/evidence.py can own ``science_lab`` without colliding
+    # with this legacy MIRL-sourced projection.
+    legacy_evidence_summary: object
     live_mirl: object
     cosine: object
     generated_at_utc: str
@@ -1801,6 +2437,38 @@ def read_trigger_identities() -> dict[str, str]:
     return identities
 
 
+def read_trigger_platform_keys() -> tuple[str, ...]:
+    """Every durable trigger's certified structured ``platform_key``, in
+    trigger order, one entry per trigger row that carries one.
+
+    Read-only, and it invents nothing: unlike ``read_trigger_identities``
+    (which falls back to ``process_name`` for a presentation label), this
+    reader returns ONLY the trigger's own recorded structured
+    ``evidence.platform_key`` -- a trigger whose evidence carries no
+    platform_key (for example a Resource Intent / study-context trigger
+    with no Blacklist platform identity) is simply absent from the result,
+    never a guess and never a zero. Built for Chapter 6's lifetime TOP
+    DISTRACTION PLATFORM count, which must count only certified structured
+    platform identity.
+    """
+
+    connection = connect_database(read_only=True)
+    try:
+        rows = connection.execute(
+            "SELECT payload_json FROM triggers ORDER BY id"
+        ).fetchall()
+    finally:
+        connection.close()
+
+    keys: list[str] = []
+    for row in rows:
+        evidence = _trigger_evidence(str(row["payload_json"] or ""))
+        platform_key = str(evidence.get("platform_key") or "").strip()
+        if platform_key:
+            keys.append(platform_key)
+    return tuple(keys)
+
+
 def read_mirl_snapshot(presentation_timezone: str = "local"):
     """One authoritative MIRL read-model snapshot over all recorded evidence.
 
@@ -1811,7 +2479,6 @@ def read_mirl_snapshot(presentation_timezone: str = "local"):
 
     from MIRL.read_model import IntegrityStatus, MirlReadAuthority, MirlReadInput
 
-    bootstrap_production_schema()
     session_count, trigger_count = _counts()
     return MirlReadAuthority().project(
         MirlReadInput(
@@ -1912,8 +2579,10 @@ def read_control_station_analytics(
     presentation_timezone: str = "local",
 ) -> ControlStationAnalyticsSnapshot:
     from COSINE.read_model import CosineReadAuthority
+    from METRIC_HUB.read_model import read_lifetime_metric_hub
     from MINE.read_model import MineReadAuthority
 
+    lifetime_metric_hub = read_lifetime_metric_hub()
     mirl = read_mirl_snapshot(presentation_timezone)
 
     class _CosineReader:
@@ -1928,7 +2597,8 @@ def read_control_station_analytics(
     mine = MineReadAuthority(event_reader=_MineReader()).project(presentation_timezone)
     return ControlStationAnalyticsSnapshot(
         metric_hub=mirl.metric_hub,
-        science_lab=mirl.science_lab,
+        lifetime_metric_hub=lifetime_metric_hub,
+        legacy_evidence_summary=mirl.science_lab,
         live_mirl=mirl.live_mirl,
         cosine=cosine,
         generated_at_utc=_utc_now(),
@@ -2029,7 +2699,7 @@ def export_analytics_sheet(*, snapshot: object, request: object) -> str:
     for section in selected:
         attr = {
             "metric-hub": "metric_hub",
-            "science-lab": "science_lab",
+            "science-lab": "legacy_evidence_summary",
             "live-mirl": "live_mirl",
             "cosine": "cosine",
         }[section]
@@ -2054,6 +2724,8 @@ __all__ = [
     "bootstrap_production_schema",
     "PROFILE_LEARNING_MODEL_VERSION",
     "ProfileLearningState",
+    "ScienceLabExperimentRecord",
+    "ScienceLabSourceRecord",
     "REPORT_ACCESS_COORDINATOR",
     "ReportAccessCoordinator",
     "ReportAccessRefusal",
@@ -2069,5 +2741,13 @@ __all__ = [
     "read_cosine_events",
     "read_mine_events",
     "read_mirl_events",
+    "read_running_science_lab_experiment",
+    "read_science_lab_experiment",
+    "read_science_lab_experiments_for_session",
+    "read_science_lab_cosecant_records",
+    "read_science_lab_mirl_events",
+    "read_science_lab_normal_break_records",
+    "read_science_lab_sine_records",
+    "read_science_lab_study_records",
     "record_emergency_followup_reason",
 ]

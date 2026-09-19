@@ -1,0 +1,62 @@
+"""Chapter structure and static content for the MYELIN Science Lab.
+
+Pure data.  No Qt, no database, no engine, no report logic belongs here --
+``lab.py`` reads these records to build the chapter drawer and the Coming
+Soon / Reserved pages.  Chapter 1's own card-by-card prose stays inside its
+builder methods in ``lab.py`` (moved verbatim from the pre-extraction
+``ScienceLabPage``); it is interleaved with widget construction closely
+enough that lifting it into pure data here would be a rewrite, not a move,
+and Phase B is extraction only.
+"""
+
+from __future__ import annotations
+
+from typing import Final
+
+#: Frozen chapter numbering (Chapter 1 dummy-UI spec section 4).  Chapter 4
+#: is intentionally reserved for future SenseHub / MYELIN Edge evidence --
+#: the gap must never be renumbered away.
+CHAPTER_DEFINITIONS: Final = (
+    {"key": "chapter_1", "number": "01", "title": "Chapter 1", "subtitle": "Purpose & Introduction", "state": "normal"},
+    {"key": "chapter_2", "number": "02", "title": "Chapter 2", "subtitle": "Parts of MYELIN", "state": "normal"},
+    {"key": "chapter_3", "number": "03", "title": "Chapter 3", "subtitle": "Data Analysis", "state": "normal"},
+    {"key": "chapter_4", "number": "04", "title": "Chapter 4", "subtitle": "Reserved for SenseHub / MYELIN Edge", "state": "reserved"},
+    {"key": "chapter_5", "number": "05", "title": "Chapter 5", "subtitle": "Results & Discussion", "state": "normal"},
+    {"key": "chapter_6", "number": "06", "title": "Chapter 6", "subtitle": "Conclusion & Future Scope", "state": "normal"},
+)
+
+#: Coming Soon page copy for chapters 2, 3, 5 and 6.
+COMING_SOON_CONTENT: Final = {
+    "chapter_2": {
+        "chapter_label": "CHAPTER 2",
+        "title": "PARTS OF MYELIN",
+        "body_text": "This chapter will explain the major parts of MYELIN and how they work together.",
+        "secondary_text": "It will describe the roles of MYELIN's observation, intervention, study, recovery, and specialised behavioural systems.",
+    },
+    "chapter_3": {
+        "chapter_label": "CHAPTER 3",
+        "title": "DATA ANALYSIS",
+        "body_text": "This chapter will present behavioural evidence collected during MYELIN sessions.",
+        "secondary_text": "Future versions will show session timelines, task-aligned periods, distraction episodes, dwell, return, relapse, and other behavioural measures.",
+    },
+    "chapter_5": {
+        "chapter_label": "CHAPTER 5",
+        "title": "RESULTS & DISCUSSION",
+        "body_text": "This chapter will present results, scientific interpretation, literature comparison, alternative explanations, and discussion.",
+        "secondary_text": "The final chapter will distinguish observed evidence from derived results and hypotheses.",
+    },
+    "chapter_6": {
+        "chapter_label": "CHAPTER 6",
+        "title": "CONCLUSION & FUTURE SCOPE",
+        "body_text": "This chapter will summarise the findings and describe future directions for MYELIN.",
+        "secondary_text": "",
+    },
+}
+
+#: Reserved page copy for Chapter 4.
+RESERVED_CHAPTER_CONTENT: Final = {
+    "chapter_label": "CHAPTER 4",
+    "title": "SENSEHUB / MYELIN EDGE",
+    "body_text": "This chapter is reserved for future hardware and physiological evidence.",
+    "note_text": "No physiological data is simulated in the current Science Lab version.",
+}

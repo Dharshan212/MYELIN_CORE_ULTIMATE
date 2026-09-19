@@ -92,9 +92,11 @@ except ModuleNotFoundError as _qt_failure:
 
 else:
     try:
-        from UI_THEMES.theme import DEFAULT_THEME, ThemeTokens
+        from UI_THEMES.theme import AMBER_ALERT_THEME, DEFAULT_THEME, RED_ALERT_THEME, ThemeTokens
     except (ImportError, ModuleNotFoundError):
+        AMBER_ALERT_THEME = None
         DEFAULT_THEME = None
+        RED_ALERT_THEME = None
         ThemeTokens = object  # type: ignore[assignment,misc]
 
     def _theme_value(tokens: object, name: str, fallback: str) -> str:
@@ -105,6 +107,22 @@ else:
         controller = getattr(owner, "theme", None)
         tokens = getattr(controller, "current_theme", None)
         return tokens or DEFAULT_THEME
+
+    def _resolve_mine_popup_tokens(effect: "MineEffect", owner: object | None) -> object:
+        """Fixed MINE intervention color family: MINE-1 is Amber, MINE-2 is Red.
+
+        This selects the popup's own construction tokens only -- it never
+        claims the shared ``ThemeController`` atmosphere, which stays owned
+        by the launcher's factual MineSnapshot-driven presentation
+        coordinator. Falls back to the current base theme if the shared
+        alert worlds are unavailable (e.g. ``UI_THEMES`` import failed).
+        """
+
+        if effect.kind is MineEffectKind.SHOW_MINE2 and RED_ALERT_THEME is not None:
+            return RED_ALERT_THEME
+        if effect.kind is MineEffectKind.SHOW_MINE1 and AMBER_ALERT_THEME is not None:
+            return AMBER_ALERT_THEME
+        return _resolve_tokens(owner)
 
     def _font(size: int, *, bold: bool = False, mono: bool = False) -> QFont:
         font = QFont("Consolas" if mono else "Segoe UI")
@@ -125,16 +143,30 @@ else:
         QFrame#mineCard {{
             background: {surface}; border: 2px solid {accent}; border-radius: 16px;
         }}
+        QFrame#mineAccentRail {{
+            background: {accent}; border: none; border-radius: 1px;
+        }}
         QLabel {{ color: {text}; background: transparent; }}
         QLabel#mineEyebrow, QLabel#mineContext, QLabel#mineFooter {{ color: {muted}; }}
         QLabel#mineHeadline, QLabel#mineStatus {{ color: {accent}; }}
+        QLabel#mineBadge {{
+            color: {accent}; background: {surface_2}; border: 1px solid {accent};
+            border-radius: 9px; padding: 3px 10px;
+        }}
         QLineEdit#mineDurationField {{
             color: {text}; background: {surface_2}; border: 2px solid {accent};
             border-radius: 10px; padding: 10px;
         }}
+        QLineEdit#mineDurationField:focus {{ border: 2px solid {text}; }}
         QPushButton {{ border-radius: 10px; padding: 12px 20px; }}
         QPushButton#minePrimary {{ color: #071019; background: {accent}; border: none; }}
+        QPushButton#minePrimary:hover {{ border: 2px solid {text}; }}
+        QPushButton#minePrimary:pressed {{ background: {muted}; }}
+        QPushButton#minePrimary:focus {{ border: 2px solid {text}; }}
         QPushButton#mineSecondary {{ color: {accent}; background: transparent; border: 2px solid {accent}; }}
+        QPushButton#mineSecondary:hover {{ background: {surface_2}; }}
+        QPushButton#mineSecondary:pressed {{ background: {surface}; }}
+        QPushButton#mineSecondary:focus {{ border: 2px solid {text}; }}
         QPushButton:disabled {{ color: {muted}; border-color: {border}; background: {surface_2}; }}
         """
 
@@ -194,10 +226,14 @@ else:
             row.addWidget(eyebrow)
             row.addStretch(1)
             self.badge = QLabel("MESSAGING", self.card)
-            self.badge.setObjectName("mineStatus")
+            self.badge.setObjectName("mineBadge")
             self.badge.setFont(_font(12, bold=True, mono=True))
             row.addWidget(self.badge)
             self.body.addLayout(row)
+            rail = QFrame(self.card)
+            rail.setObjectName("mineAccentRail")
+            rail.setFixedHeight(3)
+            self.body.addWidget(rail)
 
         def _add_headline(self, text: str) -> QLabel:
             label = QLabel(text, self.card)
@@ -665,7 +701,7 @@ else:
                     existing.submit_display_if_pending()
                     return
                 existing.force_close_from_runtime()
-            popup = popup_class(request, _resolve_tokens(self._owner_ref()))
+            popup = popup_class(request, _resolve_mine_popup_tokens(effect, self._owner_ref()))
             popup.finished.connect(
                 lambda _result=0, p=popup, s=slot_name: self._clear(s, p)
             )

@@ -8,11 +8,12 @@ from typing import Final
 from PERSISTENCE.database import connect_database
 
 
-SCHEMA_VERSION: Final = 4
+SCHEMA_VERSION: Final = 6
 MANAGED_TABLES: Final = frozenset(
     {
         "myelin_meta",
         "sessions",
+        "pie_session_time",
         "triggers",
         "sine_facts",
         "normal_break_events",
@@ -21,6 +22,7 @@ MANAGED_TABLES: Final = frozenset(
         "mine_events",
         "study_events",
         "cosecant_events",
+        "science_lab_experiments",
         "notes",
         "planner_blocks",
         "emergency_events",
@@ -43,6 +45,23 @@ CREATE TABLE IF NOT EXISTS sessions (
     closed_at_utc TEXT,
     close_reason TEXT,
     emergency INTEGER NOT NULL DEFAULT 0 CHECK (emergency IN (0, 1))
+);
+
+CREATE TABLE IF NOT EXISTS pie_session_time (
+    session_id INTEGER PRIMARY KEY REFERENCES sessions(id),
+    social_ms INTEGER NOT NULL DEFAULT 0
+        CHECK (typeof(social_ms) = 'integer' AND social_ms >= 0),
+    ott_ms INTEGER NOT NULL DEFAULT 0
+        CHECK (typeof(ott_ms) = 'integer' AND ott_ms >= 0),
+    messaging_ms INTEGER NOT NULL DEFAULT 0
+        CHECK (typeof(messaging_ms) = 'integer' AND messaging_ms >= 0),
+    focus_ms INTEGER NOT NULL DEFAULT 0
+        CHECK (typeof(focus_ms) = 'integer' AND focus_ms >= 0),
+    unclassified_ms INTEGER NOT NULL DEFAULT 0
+        CHECK (typeof(unclassified_ms) = 'integer' AND unclassified_ms >= 0),
+    revision INTEGER NOT NULL DEFAULT 0
+        CHECK (typeof(revision) = 'integer' AND revision >= 0),
+    updated_at_utc TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS triggers (
@@ -163,6 +182,65 @@ CREATE TABLE IF NOT EXISTS cosecant_events (
     UNIQUE(break_id, sequence)
 );
 
+CREATE TABLE IF NOT EXISTS science_lab_experiments (
+    experiment_id TEXT PRIMARY KEY,
+    parent_session_id INTEGER NOT NULL REFERENCES sessions(id),
+    date_key TEXT NOT NULL,
+    daily_sequence INTEGER NOT NULL CHECK (daily_sequence BETWEEN 1 AND 99),
+    status TEXT NOT NULL CHECK (
+        status IN ('RUNNING', 'COMPLETED', 'INTERRUPTED')
+    ),
+    started_at_utc TEXT NOT NULL,
+    started_monotonic_ns INTEGER NOT NULL CHECK (started_monotonic_ns > 0),
+    ended_at_utc TEXT,
+    ended_monotonic_ns INTEGER,
+    end_reason TEXT NOT NULL DEFAULT '',
+    runtime_instance_id TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+
+    UNIQUE(date_key, daily_sequence),
+
+    CHECK (
+        length(date_key) = 8
+    ),
+
+    CHECK (
+        (
+            status = 'RUNNING'
+            AND ended_at_utc IS NULL
+            AND ended_monotonic_ns IS NULL
+            AND end_reason = ''
+        )
+        OR
+        (
+            status = 'COMPLETED'
+            AND ended_at_utc IS NOT NULL
+            AND ended_monotonic_ns IS NOT NULL
+            AND ended_monotonic_ns >= started_monotonic_ns
+            AND end_reason IN ('USER_END', 'PARENT_SESSION_ENDED')
+        )
+        OR
+        (
+            status = 'INTERRUPTED'
+            AND ended_at_utc IS NOT NULL
+            AND ended_monotonic_ns IS NULL
+            AND end_reason = 'CRASH_RECOVERY'
+        )
+    )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_science_lab_one_running
+    ON science_lab_experiments(status)
+    WHERE status = 'RUNNING';
+
+CREATE INDEX IF NOT EXISTS ix_science_lab_experiments_parent_start
+    ON science_lab_experiments(
+        parent_session_id,
+        started_monotonic_ns,
+        experiment_id
+    );
+
 CREATE TABLE IF NOT EXISTS notes (
     note_id TEXT PRIMARY KEY,
     revision INTEGER NOT NULL DEFAULT 0,
@@ -239,6 +317,18 @@ _PROFILE_LEARNING_COLUMNS: Final = {
 }
 
 
+_PIE_SESSION_TIME_COLUMNS: Final = {
+    "session_id": ("INTEGER", 0, 1),
+    "social_ms": ("INTEGER", 1, 0),
+    "ott_ms": ("INTEGER", 1, 0),
+    "messaging_ms": ("INTEGER", 1, 0),
+    "focus_ms": ("INTEGER", 1, 0),
+    "unclassified_ms": ("INTEGER", 1, 0),
+    "revision": ("INTEGER", 1, 0),
+    "updated_at_utc": ("TEXT", 1, 0),
+}
+
+
 _COSINE_EVENT_COLUMNS: Final = {
     "event_id": ("TEXT", 0, 1),
     "session_id": ("INTEGER", 0, 0),
@@ -274,6 +364,23 @@ _MINE_EVENT_COLUMNS: Final = {
     "evidence_token": ("TEXT", 1, 0),
     "payload_json": ("TEXT", 1, 0),
     "schema_version": ("TEXT", 1, 0),
+}
+
+
+_SCIENCE_LAB_EXPERIMENT_COLUMNS: Final = {
+    "experiment_id": ("TEXT", 0, 1),
+    "parent_session_id": ("INTEGER", 1, 0),
+    "date_key": ("TEXT", 1, 0),
+    "daily_sequence": ("INTEGER", 1, 0),
+    "status": ("TEXT", 1, 0),
+    "started_at_utc": ("TEXT", 1, 0),
+    "started_monotonic_ns": ("INTEGER", 1, 0),
+    "ended_at_utc": ("TEXT", 0, 0),
+    "ended_monotonic_ns": ("INTEGER", 0, 0),
+    "end_reason": ("TEXT", 1, 0),
+    "runtime_instance_id": ("TEXT", 1, 0),
+    "created_at_utc": ("TEXT", 1, 0),
+    "updated_at_utc": ("TEXT", 1, 0),
 }
 
 
@@ -386,6 +493,77 @@ def _verify_mine_events(connection: sqlite3.Connection) -> None:
         raise RuntimeError("mine_events episode index is missing or malformed")
 
 
+def _verify_science_lab_experiments(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        "PRAGMA table_info(science_lab_experiments)"
+    ).fetchall()
+    observed = {
+        str(row[1]): (str(row[2]).upper(), int(row[3]), int(row[5]))
+        for row in rows
+    }
+    if observed != _SCIENCE_LAB_EXPERIMENT_COLUMNS:
+        raise RuntimeError(
+            "science_lab_experiments schema does not match MYELIN 2.0 Phase 2.2"
+        )
+
+    foreign_keys = connection.execute(
+        "PRAGMA foreign_key_list(science_lab_experiments)"
+    ).fetchall()
+    if not any(
+        str(row[2]) == "sessions"
+        and str(row[3]) == "parent_session_id"
+        and str(row[4]) == "id"
+        for row in foreign_keys
+    ):
+        raise RuntimeError(
+            "science_lab_experiments is missing its parent sessions foreign key"
+        )
+
+    index_rows = connection.execute(
+        "PRAGMA index_list(science_lab_experiments)"
+    ).fetchall()
+    if not any(
+        int(row[2]) == 1
+        and _index_columns(connection, str(row[1]))
+        == ("date_key", "daily_sequence")
+        for row in index_rows
+    ):
+        raise RuntimeError(
+            "science_lab_experiments is missing unique daily sequence protection"
+        )
+
+    indexes = {
+        str(row[1]): _index_columns(connection, str(row[1]))
+        for row in index_rows
+    }
+    if indexes.get("ix_science_lab_experiments_parent_start") != (
+        "parent_session_id",
+        "started_monotonic_ns",
+        "experiment_id",
+    ):
+        raise RuntimeError(
+            "science_lab_experiments parent session index is missing or malformed"
+        )
+
+    one_running = next(
+        (
+            row
+            for row in index_rows
+            if str(row[1]) == "ux_science_lab_one_running"
+        ),
+        None,
+    )
+    if (
+        one_running is None
+        or int(one_running[2]) != 1
+        or int(one_running[4]) != 1
+        or indexes.get("ux_science_lab_one_running") != ("status",)
+    ):
+        raise RuntimeError(
+            "science_lab_experiments one-running index is missing or malformed"
+        )
+
+
 def _verify_profile_learning_state(connection: sqlite3.Connection) -> None:
     rows = connection.execute("PRAGMA table_info(profile_learning_state)").fetchall()
     observed = {
@@ -408,6 +586,28 @@ def _verify_profile_learning_state(connection: sqlite3.Connection) -> None:
         raise RuntimeError(
             "profile_learning_state is missing its sessions provenance foreign key"
         )
+
+
+def _verify_pie_session_time(connection: sqlite3.Connection) -> None:
+    rows = connection.execute("PRAGMA table_info(pie_session_time)").fetchall()
+    observed = {
+        str(row[1]): (str(row[2]).upper(), int(row[3]), int(row[5]))
+        for row in rows
+    }
+    if observed != _PIE_SESSION_TIME_COLUMNS:
+        raise RuntimeError("pie_session_time schema does not match MYELIN 2.0")
+
+    foreign_keys = connection.execute(
+        "PRAGMA foreign_key_list(pie_session_time)"
+    ).fetchall()
+    expected_fk = any(
+        str(row[2]) == "sessions"
+        and str(row[3]) == "session_id"
+        and str(row[4]) == "id"
+        for row in foreign_keys
+    )
+    if not expected_fk:
+        raise RuntimeError("pie_session_time is missing its sessions foreign key")
 
 
 def _migrate_profile_learning_state_return_latency(connection: sqlite3.Connection) -> None:
@@ -490,8 +690,10 @@ def ensure_production_schema() -> None:
         _migrate_cosine_parent_session(connection)
         _verify_cosine_events(connection)
         _verify_mine_events(connection)
+        _verify_science_lab_experiments(connection)
         _migrate_profile_learning_state_return_latency(connection)
         _verify_profile_learning_state(connection)
+        _verify_pie_session_time(connection)
         _verify_no_interfering_triggers(connection)
         connection.execute(
             "INSERT INTO myelin_meta(key, value) VALUES('schema_version', ?) "

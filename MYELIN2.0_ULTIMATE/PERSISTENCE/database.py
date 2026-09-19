@@ -67,18 +67,19 @@ class _ReceiptRecord:
 WriteOperation = Callable[[sqlite3.Connection], TransactionResult | int | None]
 
 
-def app_data_dir() -> Path:
+def app_data_dir(*, create: bool = True) -> Path:
     if os.name == "nt":
         root = Path(os.environ.get("APPDATA", Path.home() / "AppData/Roaming"))
     else:
         root = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
     path = (root / "MYELIN").resolve()
-    path.mkdir(parents=True, exist_ok=True)
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def database_path() -> Path:
-    return app_data_dir() / DATABASE_FILENAME
+def database_path(*, create_parent: bool = True) -> Path:
+    return app_data_dir(create=create_parent) / DATABASE_FILENAME
 
 
 def project_root() -> Path:
@@ -104,7 +105,9 @@ def resource_path(relative_path: str | os.PathLike[str]) -> Path:
 
 
 def connect_database(*, read_only: bool = False) -> sqlite3.Connection:
-    path = database_path()
+    # A dashboard/read-model call must not create even the parent directory.
+    # Writers preserve the historical create-on-first-use behaviour.
+    path = database_path(create_parent=not read_only)
     if read_only:
         uri = f"file:{path.as_posix()}?mode=ro"
         connection = sqlite3.connect(

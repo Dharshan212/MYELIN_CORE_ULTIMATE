@@ -205,6 +205,12 @@ class ControlStationController(QObject):
     engine_failed = pyqtSignal(str)
     engine_status_changed = pyqtSignal(object)  # EngineStatus
     session_time_changed = pyqtSignal(int)
+    # Factual mirror of the authoritative persisted session ID (see
+    # current_session_id()).  Payload is int | None.  Emitted only when the
+    # value actually changes -- narrow and factual, per the Phase C
+    # session-identity seam: consumers (e.g. SCIENCE_LAB's coordinator)
+    # attach/detach from this, never from a live open-row DB query.
+    current_session_id_changed = pyqtSignal(object)
 
     # Append-only telemetry and replace-in-place prepared views are separate.
     telemetry_received = pyqtSignal(object)  # TelemetryEvent
@@ -239,6 +245,12 @@ class ControlStationController(QObject):
         self._status = EngineStatus.IDLE
         self._profile_type = "general"
         self._is_monitoring = False
+        # Authoritative persisted session ID, mirrored read-only from the
+        # Core Engine's own "session" telemetry (see _route_prepared_view) --
+        # never a live open-row DB query, never a direct worker reach-in.
+        # Cleared only in _finish_worker_exit, once the worker has actually
+        # exited (Phase C session-identity seam).
+        self._current_session_id: int | None = None
         self._is_shutting_down = False
         self._emergency_latched = False
         self._startup_failure_reported = False
@@ -317,6 +329,25 @@ class ControlStationController(QObject):
                 EngineStatus.EMERGENCY,
             }
         )
+
+    def current_session_id(self) -> int | None:
+        """Return the authoritative persisted session ID, or ``None``.
+
+        Read-only mirror of the Core Engine's own committed
+        ``sessions.id`` row -- sourced from the existing "session"
+        telemetry kind (terminal-reserved in ``TERMINAL_KINDS``, so it is
+        never dropped under queue pressure), not from a live
+        ``SELECT ... WHERE closed_at_utc IS NULL`` query and not from
+        reaching into the worker/monitor object directly.
+
+        ``None`` whenever no session is active, including the brief
+        ``STARTING`` window before the Core Engine's session-open commit
+        has actually returned -- callers must treat that as "not yet
+        known" and wait, never substitute a placeholder or a previous
+        session's ID.
+        """
+
+        return self._current_session_id
 
     def install_popup_dispatchers(self, app, *, owner=None) -> None:
         """Install the presentation bridges after QApplication exists.
@@ -1080,6 +1111,19 @@ class ControlStationController(QObject):
             self.emergency_completed.emit(bool(raw.get("exit_permitted", False)))
             return True
 
+        if kind == "session":
+            # Core Engine emits this kind exactly twice per run (session
+            # open, then cleanup complete), always carrying the same
+            # authoritative committed session_id.  Mirror it read-only;
+            # _finish_worker_exit clears it once the worker has actually
+            # exited.  Preserve the existing Live Telemetry row exactly as
+            # before -- this kind was never swallowed here previously.
+            raw_session_id = raw.get("session_id")
+            if isinstance(raw_session_id, int) and raw_session_id != self._current_session_id:
+                self._current_session_id = raw_session_id
+                self.current_session_id_changed.emit(raw_session_id)
+            return False
+
         return False
 
     # ------------------------------------------------------------------
@@ -1113,6 +1157,11 @@ class ControlStationController(QObject):
         self._last_active_tick = None
         self._active_seconds = 0.0
         self._worker_thread = None
+        # The worker is gone -- clean stop or not -- so there is no valid
+        # current session left to expose (Phase C session-identity seam).
+        if self._current_session_id is not None:
+            self._current_session_id = None
+            self.current_session_id_changed.emit(None)
         self._worker_timer.stop()
         self._telemetry_timer.stop()
         self._elapsed_timer.stop()

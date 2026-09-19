@@ -1,0 +1,1107 @@
+"""Science Lab display / UI authority.
+
+``ScienceLabWorkspace`` owns the entire local chapter interface: the LAB
+CHAPTERS drawer (expanded rows and the collapsed compact rail), the chapter
+stack, Chapter 1's presentation, and the Coming Soon / Reserved pages.
+Chapter selection and drawer collapse/expand are presentation-only -- no
+engine call, no database write, no telemetry subscription.
+
+This module must NOT import CONTROL_STATION.analytics, CORE_ENGINE, SINE,
+MINE, COSINE, MIRL, COSECANT, PERSISTENCE, or sqlite3.  It is hosted BY
+Control Station (see ``CONTROL_STATION/analytics.py``'s thin
+``ScienceLabPage``), not the other way around -- that one-directional
+composition is what keeps this extraction free of a circular import.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+
+from PyQt6.QtCore import QSize, Qt, QTimer
+from PyQt6.QtWidgets import (
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
+from UI_THEMES.theme import make_font
+
+from .chapter3_view import Chapter3TimelineView
+from .chapter5_view import Chapter5ResultsView
+from .chapter6_view import Chapter6ConclusionView
+from .chapters import CHAPTER_DEFINITIONS, RESERVED_CHAPTER_CONTENT
+from .schematics import ChapterTwoOrganViewer
+
+
+class _ChapterStack(QStackedWidget):
+    """A stack that sizes to its CURRENT page only.
+
+    QStackedWidget's documented default sizes itself to its LARGEST page, so
+    a short Coming Soon page would otherwise inherit Chapter 1's much taller
+    content height inside the shared scroll area and end up vertically
+    centred far outside the visible scroll viewport.  Each Science Lab
+    chapter must size on its own merits.
+    """
+
+    def sizeHint(self):  # noqa: N802 -- Qt override
+        current = self.currentWidget()
+        return current.sizeHint() if current is not None else super().sizeHint()
+
+    def minimumSizeHint(self):  # noqa: N802 -- Qt override
+        current = self.currentWidget()
+        return current.minimumSizeHint() if current is not None else super().minimumSizeHint()
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 -- Qt override
+        current = self.currentWidget()
+        return current.hasHeightForWidth() if current is not None else super().hasHeightForWidth()
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 -- Qt override
+        current = self.currentWidget()
+        if current is not None and current.hasHeightForWidth():
+            return current.heightForWidth(width)
+        return super().heightForWidth(width)
+
+
+class _ChapterButton(QPushButton):
+    """A push-button whose sizeHint honours its own installed layout.
+
+    Verified root cause of the real-launcher chapter-row clipping: plain
+    ``QPushButton.sizeHint()`` computes from ``QStyle::sizeFromContents``
+    using the button's own text/icon metrics -- it does NOT consult an
+    installed custom layout.  Measured on the real Windows launcher with
+    Segoe UI: a chapter row's own layout wanted ``(115, 74)``, but the bare
+    QPushButton reported ``(55, 32)``, so Qt allocated it only 32px and the
+    title/subtitle rows inside were crushed to a couple of visible pixels.
+    """
+
+    def sizeHint(self) -> QSize:  # noqa: N802 -- Qt override
+        hint = super().sizeHint()
+        layout = self.layout()
+        if layout is None:
+            return hint
+        layout_hint = layout.sizeHint()
+        return QSize(
+            max(hint.width(), layout_hint.width()),
+            max(hint.height(), layout_hint.height()),
+        )
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 -- Qt override
+        hint = super().minimumSizeHint()
+        layout = self.layout()
+        if layout is None:
+            return hint
+        layout_min = layout.minimumSize()
+        return QSize(
+            max(hint.width(), layout_min.width()),
+            max(hint.height(), layout_min.height()),
+        )
+
+
+class ScienceLabWorkspace(QWidget):
+    """The local Science Lab chapter interface.
+
+    Chapter 1 is real dummy content (Purpose & Introduction).  Chapters 2,
+    3, 5 and 6 have real presentation content of their own; Chapter 4 is a
+    reserved placeholder for future SenseHub / MYELIN Edge evidence.
+    """
+
+    # Expanded/collapsed drawer widths.  Expanded was widened from the
+    # original 236px (see the drawer-fix fixture): 236px cramped a
+    # two-line "Reserved for SenseHub / MYELIN Edge" subtitle against the
+    # chevron/lock column.  260px is the narrowest width that keeps every
+    # chapter subtitle on two lines without crowding the Chapter 1
+    # viewport, verified against the app's 1024px minimum window width.
+    _DRAWER_WIDTH_EXPANDED = 260
+    _DRAWER_WIDTH_COLLAPSED = 64
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._chapter_buttons: dict[str, QPushButton] = {}
+        self._chapter_rail_buttons: dict[str, QPushButton] = {}
+        self._chapter_index: dict[str, int] = {}
+        self._current_chapter_key = "chapter_1"
+        self._drawer_expanded = True
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        chapters_row = QHBoxLayout()
+        chapters_row.setSpacing(0)
+        root.addLayout(chapters_row, 1)
+
+        self._drawer = self._build_chapter_drawer()
+        chapters_row.addWidget(self._drawer)
+
+        self._stack = _ChapterStack()
+        # AlignTop: without it, Qt's QHBoxLayout cross-axis default is to
+        # vertically CENTER a widget whose height it cannot grow (`_stack`
+        # is height-fixed by `_sync_stack_height`) within the row's tallest
+        # sibling -- here, the chapter drawer, which is far taller than a
+        # short chapter/topic's own content. That leaves a large empty gap
+        # above the chapter content, growing/shrinking with how much
+        # shorter the current chapter is than the drawer. Confirmed by
+        # direct geometry probe: with the drawer at 1078px and a short
+        # Chapter 6 topic's stack fixed at 703px, the stack rendered at
+        # y=187 -- exactly (1078-703)/2, i.e. centered, not top-aligned.
+        # This was previously masked because the stack's height used to be
+        # frozen near whichever chapter/topic was tallest, leaving little
+        # leftover space to center within; fixing the height-freeze bug
+        # above (topic_changed) made this pre-existing centering visible
+        # as new "empty space" for every short topic.
+        chapters_row.addWidget(self._stack, 1, Qt.AlignmentFlag.AlignTop)
+
+        self._register_chapter("chapter_1", self._build_chapter_one())
+        chapter_two = ChapterTwoOrganViewer()
+        chapter_two.organ_changed.connect(lambda: QTimer.singleShot(0, self._sync_stack_height))
+        self._register_chapter("chapter_2", chapter_two)
+        self._chapter3_view = Chapter3TimelineView()
+        self._register_chapter("chapter_3", self._chapter3_view)
+        self._chapter5_view = Chapter5ResultsView()
+        self._register_chapter("chapter_5", self._chapter5_view)
+        self._chapter6_view = Chapter6ConclusionView()
+        # Same reason as chapter_two.organ_changed above: this workspace's
+        # own _stack is height-fixed once, when a chapter is first
+        # selected, and never re-queried afterward on its own. Chapter 6's
+        # internal topic switch changes its own content height (e.g. the
+        # short EVIDENCE topic vs. the long Mi topic) without ever
+        # reselecting the chapter itself, so without this connection the
+        # outer stack stayed frozen at whichever topic was visible when
+        # Chapter 6 was first opened -- leaving large dead blank space
+        # below a shorter topic and unreachable content below a taller one.
+        self._chapter6_view.topic_changed.connect(lambda: QTimer.singleShot(0, self._sync_stack_height))
+        self._register_chapter("chapter_6", self._chapter6_view)
+        self._register_chapter("chapter_4", self._build_reserved_page())
+
+        self.select_chapter("chapter_1")
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def select_chapter(self, key: str) -> None:
+        """Switch the visible chapter.  Presentation-only: no engine call,
+        no database write, no telemetry subscription."""
+
+        index = self._chapter_index.get(key)
+        if index is None:
+            return
+        self._current_chapter_key = key
+        self._stack.setCurrentIndex(index)
+        for chapter_key, button in (*self._chapter_buttons.items(), *self._chapter_rail_buttons.items()):
+            if chapter_key == key:
+                state = "active"
+            elif chapter_key == "chapter_4":
+                state = "reserved"
+            else:
+                state = "normal"
+            button.setProperty("chapterState", state)
+            # Qt's stylesheet cache is per-widget: unpolishing/polishing
+            # only the button itself never re-evaluates a descendant
+            # selector like ``[chapterState="active"] QLabel#labChapterTitle``
+            # for the number/title/chevron QLabels inside it, so each child
+            # must be unpolished/repolished too -- otherwise a label keeps
+            # whatever color it last resolved to (this is why Chapter 1's
+            # title stayed cyan forever after the initial ``select_chapter
+            # ("chapter_1")`` call, while a newly-selected chapter's title
+            # never turned cyan at all).
+            button.style().unpolish(button)
+            button.style().polish(button)
+            for label in button.findChildren(QLabel):
+                label.style().unpolish(label)
+                label.style().polish(label)
+        self._reset_ancestor_scroll()
+        # QStackedWidget documented default: size to the LARGEST page, so a
+        # short Coming Soon page would otherwise inherit Chapter 1's much
+        # taller content height inside the shared scroll area and render
+        # centred far outside the visible viewport.  Pin the stack's own
+        # height to what the current page actually needs.  Deferred one
+        # event-loop turn because the stack's real width (needed for
+        # word-wrapped heightForWidth) is not yet valid immediately after
+        # setCurrentIndex.
+        QTimer.singleShot(0, self._sync_stack_height)
+
+    def current_chapter_key(self) -> str:
+        return self._current_chapter_key
+
+    @property
+    def chapter3_view(self) -> Chapter3TimelineView:
+        """Return the retained Chapter 3 presentation surface."""
+
+        return self._chapter3_view
+
+    @property
+    def chapter5_view(self) -> Chapter5ResultsView:
+        """Return the retained Chapter 5 result-consumption surface."""
+
+        return self._chapter5_view
+
+    @property
+    def chapter6_view(self) -> Chapter6ConclusionView:
+        """Return the retained Chapter 6 conclusion & future scope surface."""
+
+        return self._chapter6_view
+
+    def set_drawer_expanded(self, expanded: bool) -> None:
+        """Expand or collapse the LAB CHAPTERS drawer.  Presentation-only;
+        the selected chapter survives either state."""
+
+        self._drawer_expanded = expanded
+        self._drawer_head_text.setVisible(expanded)
+        self._drawer_chapters_container.setVisible(expanded)
+        self._drawer_footer.setVisible(expanded)
+        self._drawer_rail_container.setVisible(not expanded)
+        self._drawer.setFixedWidth(
+            self._DRAWER_WIDTH_EXPANDED if expanded else self._DRAWER_WIDTH_COLLAPSED
+        )
+        self._drawer_collapse_button.setText("‹" if expanded else "›")
+
+    # ------------------------------------------------------------------
+    # Chapter navigation shell
+    # ------------------------------------------------------------------
+
+    def _register_chapter(self, key: str, widget: QWidget) -> None:
+        self._chapter_index[key] = self._stack.addWidget(widget)
+
+    def _reset_ancestor_scroll(self) -> None:
+        """Scroll the enclosing QScrollArea (owned by the Control Station
+        host, not this workspace) back to the top on chapter change.
+
+        Walked generically by type rather than by the host's
+        ``analyticsScroll`` object name, so this workspace never needs to
+        import or know about CONTROL_STATION.analytics.
+        """
+
+        widget = self.parentWidget()
+        while widget is not None:
+            if isinstance(widget, QScrollArea):
+                widget.verticalScrollBar().setValue(0)
+                return
+            widget = widget.parentWidget()
+
+    def _sync_stack_height(self) -> None:
+        current = self._stack.currentWidget()
+        if current is None:
+            return
+        width = self._stack.width()
+        if width <= 0:
+            width = self._stack.sizeHint().width()
+        if width > 0 and current.hasHeightForWidth():
+            height = current.heightForWidth(width)
+        else:
+            height = current.sizeHint().height()
+        self._stack.setFixedHeight(max(height, 1))
+
+    def _toggle_drawer(self) -> None:
+        self.set_drawer_expanded(not self._drawer_expanded)
+
+    def _build_chapter_drawer(self) -> QFrame:
+        drawer = QFrame()
+        drawer.setObjectName("labChaptersDrawer")
+        drawer.setFixedWidth(self._DRAWER_WIDTH_EXPANDED)
+        layout = QVBoxLayout(drawer)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        head = QWidget()
+        head.setObjectName("labChaptersDrawerHead")
+        head_layout = QHBoxLayout(head)
+        head_layout.setContentsMargins(16, 14, 12, 14)
+        self._drawer_head_text = QWidget()
+        head_text = QVBoxLayout(self._drawer_head_text)
+        head_text.setContentsMargins(0, 0, 0, 0)
+        head_text.setSpacing(2)
+        title = QLabel("LAB CHAPTERS")
+        title.setObjectName("labChaptersDrawerTitle")
+        title.setFont(make_font(12, 700, spacing=1.2))
+        subtitle = QLabel("EXPLORE · LEARN · PROGRESS")
+        subtitle.setObjectName("labChaptersDrawerSubtitle")
+        subtitle.setFont(make_font(9, 600, spacing=0.8))
+        subtitle.setWordWrap(True)
+        self._allow_shrink(subtitle)
+        head_text.addWidget(title)
+        head_text.addWidget(subtitle)
+        head_layout.addWidget(self._drawer_head_text, 1)
+        self._drawer_collapse_button = QPushButton("‹")
+        self._drawer_collapse_button.setObjectName("labChaptersCollapseButton")
+        self._drawer_collapse_button.setFixedSize(26, 26)
+        self._drawer_collapse_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._drawer_collapse_button.clicked.connect(self._toggle_drawer)
+        head_layout.addWidget(self._drawer_collapse_button, alignment=Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(head)
+
+        # Expanded rows (full title/subtitle/chevron) and the collapsed
+        # compact rail are both built up front and kept in permanent sync
+        # by select_chapter -- only one is ever visible, toggled by
+        # set_drawer_expanded, so the active chapter survives collapse/
+        # expand without rebuilding anything or touching the stack/engine.
+        self._drawer_chapters_container = QWidget()
+        items_layout = QVBoxLayout(self._drawer_chapters_container)
+        items_layout.setContentsMargins(12, 12, 12, 12)
+        items_layout.setSpacing(10)
+        for definition in CHAPTER_DEFINITIONS:
+            button = self._build_chapter_button(definition)
+            items_layout.addWidget(button)
+            self._chapter_buttons[definition["key"]] = button
+        items_layout.addStretch(1)
+        layout.addWidget(self._drawer_chapters_container, 1)
+
+        self._drawer_rail_container = QWidget()
+        self._drawer_rail_container.setObjectName("labChaptersRail")
+        rail_layout = QVBoxLayout(self._drawer_rail_container)
+        rail_layout.setContentsMargins(10, 12, 10, 12)
+        rail_layout.setSpacing(8)
+        for definition in CHAPTER_DEFINITIONS:
+            rail_button = self._build_chapter_rail_button(definition)
+            rail_layout.addWidget(rail_button)
+            self._chapter_rail_buttons[definition["key"]] = rail_button
+        rail_layout.addStretch(1)
+        rail_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self._drawer_rail_container.setVisible(False)
+        layout.addWidget(self._drawer_rail_container, 1)
+
+        self._drawer_footer = QLabel('"Small insights lead to brighter tomorrows." — MYELIN Science Lab')
+        self._drawer_footer.setObjectName("labChaptersDrawerFooter")
+        self._drawer_footer.setFont(make_font(9, 500, italic=True))
+        self._drawer_footer.setWordWrap(True)
+        self._allow_shrink(self._drawer_footer)
+        self._drawer_footer.setContentsMargins(14, 8, 14, 12)
+        layout.addWidget(self._drawer_footer)
+
+        return drawer
+
+    def _build_chapter_rail_button(self, definition: Mapping[str, str]) -> QPushButton:
+        """The collapsed-drawer counterpart of ``_build_chapter_button``.
+
+        The drawer-fix fixture rejected the earlier collapse behaviour
+        (hiding the whole chapter list, leaving an almost-empty rail with
+        clipped header/footer fragments still trying to render in 54px).
+        This is a real compact chapter selector: one small square per
+        chapter, always clickable, tooltipped with the full title.
+        """
+
+        button = _ChapterButton()
+        button.setObjectName("labChapterRailButton")
+        button.setProperty("chapterState", "reserved" if definition["state"] == "reserved" else "normal")
+        button.setFixedSize(40, 36)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setToolTip(f"{definition['title']} — {definition['subtitle']}")
+        button.clicked.connect(lambda _checked=False, key=definition["key"]: self.select_chapter(key))
+
+        layout = QVBoxLayout(button)
+        layout.setContentsMargins(2, 2, 2, 2)
+        label = QLabel("\U0001f512" if definition["state"] == "reserved" else definition["number"])
+        label.setObjectName("labChapterRailNumber")
+        label.setFont(make_font(11 if definition["state"] == "reserved" else 12, 700))
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        layout.addWidget(label)
+
+        return button
+
+    def _build_chapter_button(self, definition: Mapping[str, str]) -> QPushButton:
+        button = _ChapterButton()
+        button.setObjectName("labChapterButton")
+        button.setProperty("chapterState", "reserved" if definition["state"] == "reserved" else "normal")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.clicked.connect(lambda _checked=False, key=definition["key"]: self.select_chapter(key))
+
+        layout = QVBoxLayout(button)
+        layout.setContentsMargins(14, 12, 12, 12)
+        layout.setSpacing(4)
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
+        number = QLabel(definition["number"])
+        number.setObjectName("labChapterNumber")
+        number.setFont(make_font(10.5, 700))
+        number.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        title = QLabel(definition["title"])
+        title.setObjectName("labChapterTitle")
+        title.setFont(make_font(12, 700))
+        title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        top_row.addWidget(number)
+        top_row.addWidget(title, 1)
+        if definition["state"] == "reserved":
+            lock = QLabel("\U0001f512")
+            lock.setObjectName("labChapterLock")
+            lock.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            top_row.addWidget(lock)
+        else:
+            chevron = QLabel("›")
+            chevron.setObjectName("labChapterChevron")
+            chevron.setFont(make_font(13, 700))
+            chevron.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            top_row.addWidget(chevron)
+        layout.addLayout(top_row)
+
+        subtitle = QLabel(definition["subtitle"])
+        subtitle.setObjectName("labChapterSubtitle")
+        subtitle.setFont(make_font(10, 400))
+        subtitle.setWordWrap(True)
+        self._allow_shrink(subtitle)
+        subtitle.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        layout.addWidget(subtitle)
+
+        if definition["state"] == "reserved":
+            tag = QLabel("RESERVED")
+            tag.setObjectName("labChapterReservedTag")
+            tag.setFont(make_font(8.5, 700, spacing=0.8))
+            tag.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            layout.addWidget(tag, 0, Qt.AlignmentFlag.AlignLeft)
+
+        return button
+
+    # ------------------------------------------------------------------
+    # Shared content-card helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _allow_shrink(widget: QWidget) -> None:
+        """Let a word-wrapped label -- or a card built from several of
+        them -- shrink below its natural width.
+
+        Qt's ``QLabel.minimumSizeHint()`` does not shrink to the longest
+        word when ``wordWrap`` is on; it keeps pulling toward the
+        unconstrained sizeHint, and a container's own minimum is the sum of
+        its children's, so that drags every ancestor layout's minimum width
+        up with it.  Marking the horizontal policy ``Ignored`` tells
+        ancestor layouts to leave this widget out of their minimum-width
+        arithmetic -- it still receives whatever width the layout allocates
+        it and its labels still wrap normally at paint time.
+        """
+
+        policy = widget.sizePolicy()
+        policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+        widget.setSizePolicy(policy)
+
+    def _paragraph(self, text: str, *, role: str | None = None, size: float = 12.5) -> QLabel:
+        widget = QLabel(text)
+        widget.setWordWrap(True)
+        self._allow_shrink(widget)
+        widget.setFont(make_font(size, 400))
+        if role:
+            widget.setProperty("role", role)
+        return widget
+
+    def _bullet_list(self, items: Sequence[str]) -> QWidget:
+        holder = QWidget()
+        layout = QVBoxLayout(holder)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+        for item in items:
+            row = QLabel(f"•  {item}")
+            row.setWordWrap(True)
+            self._allow_shrink(row)
+            row.setProperty("role", "muted")
+            row.setFont(make_font(11.5, 400))
+            layout.addWidget(row)
+        return holder
+
+    def _flow_node(self, title: str, description: str) -> QFrame:
+        node = QFrame()
+        node.setObjectName("statBox")
+        self._allow_shrink(node)
+        layout = QVBoxLayout(node)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(4)
+        heading = QLabel(title)
+        heading.setProperty("role", "cyan")
+        heading.setFont(make_font(12.5, 700))
+        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        heading.setWordWrap(True)
+        self._allow_shrink(heading)
+        body = QLabel(description)
+        body.setProperty("role", "muted")
+        body.setWordWrap(True)
+        self._allow_shrink(body)
+        body.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        body.setFont(make_font(10.5, 400))
+        layout.addWidget(heading)
+        layout.addWidget(body)
+        return node
+
+    def _content_card(self, number: str, title: str) -> tuple[QFrame, QVBoxLayout]:
+        card = QFrame()
+        card.setObjectName("card")
+        self._allow_shrink(card)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        badge_frame = QFrame()
+        badge_frame.setObjectName("chapterCardBadge")
+        badge_frame.setFixedSize(28, 28)
+        badge_layout = QVBoxLayout(badge_frame)
+        badge_layout.setContentsMargins(0, 0, 0, 0)
+        badge_label = QLabel(number)
+        badge_label.setObjectName("chapterCardBadgeText")
+        badge_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        badge_label.setFont(make_font(11, 700))
+        badge_layout.addWidget(badge_label)
+        heading = QLabel(title)
+        heading.setWordWrap(True)
+        self._allow_shrink(heading)
+        heading.setFont(make_font(13.5, 700))
+        header.addWidget(badge_frame)
+        header.addWidget(heading, 1)
+        layout.addLayout(header)
+        return card, layout
+
+    def _boundary_column(
+        self,
+        heading_text: str,
+        frame_object_name: str,
+        heading_object_name: str,
+        items: Sequence[str],
+        *,
+        prefix: str,
+    ) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName(frame_object_name)
+        self._allow_shrink(frame)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(4)
+        heading = QLabel(heading_text)
+        heading.setObjectName(heading_object_name)
+        heading.setFont(make_font(10.5, 700, spacing=0.8))
+        layout.addWidget(heading)
+        for item in items:
+            row = QLabel(f"{prefix}  {item}")
+            row.setWordWrap(True)
+            self._allow_shrink(row)
+            row.setFont(make_font(11, 400))
+            layout.addWidget(row)
+        return frame
+
+    # ------------------------------------------------------------------
+    # Chapter 1 -- Why MYELIN Exists / Purpose & Introduction
+    # ------------------------------------------------------------------
+
+    def _build_chapter_one(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(16)
+
+        layout.addWidget(self._build_chapter_one_hero())
+        layout.addWidget(self._build_chapter_one_flow())
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(14)
+        cards = (
+            self._card_what_is_myelin(),
+            self._card_problem(),
+            self._card_screen_time(),
+            self._card_return_matters(),
+            self._card_effort_hypothesis(),
+            self._card_hci_view(),
+            self._card_neural_view(),
+            self._card_measurement_boundary(),
+            self._card_why_science_lab(),
+        )
+        for index, card in enumerate(cards):
+            grid.addWidget(card, index // 2, index % 2)
+        layout.addLayout(grid)
+
+        layout.addWidget(self._card_central_question())
+        layout.addWidget(self._build_chapter_one_evidence_section())
+        layout.addWidget(self._build_chapter_one_closing())
+        # QStackedWidget always stretches its current page to fill the
+        # stack's own (content-driven) height exactly; with no trailing
+        # stretch here, any small rounding surplus between that forced
+        # height and the cards' summed natural height was being
+        # distributed across the cards themselves -- most visible in the
+        # smallest ones (Central Research Question, the closing card).
+        # This absorbs it instead, so every card keeps its own
+        # content-driven height.
+        layout.addStretch(1)
+
+        return page
+
+    def _build_chapter_one_hero(self) -> QFrame:
+        hero = QFrame()
+        hero.setObjectName("card")
+        self._allow_shrink(hero)
+        layout = QVBoxLayout(hero)
+        layout.setContentsMargins(26, 24, 26, 24)
+        layout.setSpacing(6)
+
+        eyebrow = QLabel("CHAPTER 1")
+        eyebrow.setProperty("role", "cyan")
+        eyebrow.setFont(make_font(11, 700, spacing=1.6))
+        layout.addWidget(eyebrow)
+
+        title = QLabel("WHY MYELIN EXISTS")
+        title.setFont(make_font(26, 800, spacing=0.6))
+        title.setWordWrap(True)
+        self._allow_shrink(title)
+        layout.addWidget(title)
+
+        subtitle = QLabel("Purpose & Introduction")
+        subtitle.setProperty("role", "muted")
+        subtitle.setFont(make_font(14, 500))
+        layout.addWidget(subtitle)
+        layout.addSpacing(4)
+
+        definition = self._paragraph(
+            "MYELIN is a behavioural research and productivity system that "
+            "observes how a person works, becomes distracted, and returns "
+            "to an intended task.",
+            size=13.5,
+        )
+        layout.addWidget(definition)
+
+        anchor = self._paragraph(
+            "MYELIN was built not simply to measure how long a person "
+            "becomes distracted, but to study what happens to an intended "
+            "task when attention leaves it, where behaviour goes, how long "
+            "it remains away, and how successfully the person returns.",
+            role="muted",
+        )
+        layout.addWidget(anchor)
+
+        return hero
+
+    def _build_chapter_one_flow(self) -> QFrame:
+        wrap = QFrame()
+        wrap.setObjectName("card")
+        self._allow_shrink(wrap)
+        outer = QVBoxLayout(wrap)
+        outer.setContentsMargins(20, 18, 20, 18)
+        outer.setSpacing(8)
+
+        heading = QLabel("THE CENTRAL BEHAVIOURAL FLOW")
+        heading.setProperty("role", "cyan")
+        heading.setFont(make_font(10.5, 700, spacing=1.4))
+        outer.addWidget(heading)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        nodes = (
+            ("Intent", "A person intends to work."),
+            ("Drift", "Behaviour moves away from the intended task."),
+            ("Absorption", "Another activity becomes the active context."),
+            ("Return", "The person comes back to the task."),
+            ("Re-engagement", "The task becomes stable enough to guide behaviour again."),
+        )
+        for index, (title, description) in enumerate(nodes):
+            if index:
+                arrow = QLabel("→")
+                arrow.setProperty("role", "muted")
+                arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                row.addWidget(arrow)
+            row.addWidget(self._flow_node(title, description), 1)
+        outer.addLayout(row)
+        return wrap
+
+    def _card_what_is_myelin(self) -> QFrame:
+        card, layout = self._content_card("01", "What is MYELIN?")
+        layout.addWidget(self._paragraph(
+            "MYELIN studies the behavioural sequence around focus, "
+            "distraction, return, and recovery: what a person was doing "
+            "before a distraction, how long the detour lasted, whether the "
+            "person returned, and whether that return was sustained."
+        ))
+        layout.addWidget(self._paragraph(
+            "A screen-time counter may say Instagram = 14 minutes. MYELIN "
+            "asks what happened to the intended task around those 14 "
+            "minutes.",
+            role="muted",
+        ))
+        return card
+
+    def _card_problem(self) -> QFrame:
+        card, layout = self._content_card("02", "What problem is MYELIN solving?")
+        layout.addWidget(self._paragraph(
+            "A person may genuinely intend to work, drift away, stay away "
+            "for some time, and return in a state that is not equal to the "
+            "state before the interruption."
+        ))
+        layout.addWidget(self._paragraph(
+            "MYELIN is interested in the boundary between intention, "
+            "behavioural divergence, distraction, return, and recovery.",
+            role="muted",
+        ))
+        return card
+
+    def _card_screen_time(self) -> QFrame:
+        card, layout = self._content_card("03", "Why is screen time not enough?")
+        layout.addWidget(self._paragraph(
+            "Screen time shows where time went. MYELIN studies what "
+            "happened to the intended task before, during, and after the "
+            "distraction."
+        ))
+        layout.addWidget(self._paragraph(
+            "Distraction time is not necessarily equal to distraction cost.",
+            role="muted",
+        ))
+        return card
+
+    def _card_return_matters(self) -> QFrame:
+        card, layout = self._content_card("04", "Why does return matter?")
+        layout.addWidget(self._paragraph(
+            "Returning to the task is not always the same as successfully "
+            "re-engaging with the task."
+        ))
+        flow = self._paragraph(
+            "Initial focus block → Distraction → Return → Post-return focus",
+            role="muted",
+            size=11.5,
+        )
+        layout.addWidget(flow)
+        layout.addWidget(self._paragraph(
+            "Return is the person coming back to the task context. "
+            "Re-engagement is the task becoming behaviourally stable again.",
+            role="muted",
+        ))
+        return card
+
+    def _card_effort_hypothesis(self) -> QFrame:
+        card, layout = self._content_card("05", "MYELIN Re-engagement Effort Hypothesis")
+
+        box = QFrame()
+        box.setObjectName("chapterEquationBox")
+        box_layout = QVBoxLayout(box)
+        box_layout.setContentsMargins(14, 12, 14, 12)
+        equation = QLabel("E<sub>return</sub> = E<sub>0</sub> + kF")
+        equation.setTextFormat(Qt.TextFormat.RichText)
+        equation.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        equation.setFont(make_font(17, 700))
+        box_layout.addWidget(equation)
+        layout.addWidget(box)
+
+        layout.addWidget(self._paragraph(
+            "As behavioural friction increases, the effort required to "
+            "regain stable task engagement may increase.",
+            role="muted",
+        ))
+        disclaimer = QLabel("Conceptual MYELIN hypothesis — not a proven biological law.")
+        disclaimer.setObjectName("chapterEquationDisclaimer")
+        disclaimer.setWordWrap(True)
+        self._allow_shrink(disclaimer)
+        disclaimer.setFont(make_font(10.5, 600, italic=True))
+        layout.addWidget(disclaimer)
+        return card
+
+    def _card_hci_view(self) -> QFrame:
+        card, layout = self._content_card("06", "HCI View")
+        layout.addWidget(self._paragraph(
+            "Human–Computer Interaction studies the relationship "
+            "between the person, their intention, the interface, and their "
+            "behaviour."
+        ))
+        layout.addWidget(self._bullet_list((
+            "person + intention + interface + behaviour",
+            "interruption and task switching",
+            "context-aware support",
+            "user autonomy",
+        )))
+        return card
+
+    def _card_neural_view(self) -> QFrame:
+        card, layout = self._content_card("07", "Neural Engineering View")
+        layout.addWidget(self._paragraph(
+            "MYELIN currently operates mainly on the behavioural side of "
+            "the human–technology relationship."
+        ))
+        layout.addWidget(self._bullet_list((
+            "measurable behaviour",
+            "possible cognitive mechanisms",
+            "re-engagement difficulty",
+            "behaviour first, biology interpreted carefully",
+        )))
+        return card
+
+    def _card_measurement_boundary(self) -> QFrame:
+        card, layout = self._content_card("08", "What can MYELIN measure?")
+        columns = QHBoxLayout()
+        columns.setSpacing(10)
+        columns.addWidget(self._boundary_column(
+            "CAN OBSERVE",
+            "chapterBoundaryCan",
+            "chapterBoundaryHeadingCan",
+            (
+                "task-aligned time",
+                "off-task dwell",
+                "application transitions",
+                "return latency",
+                "verified return",
+                "relapse",
+                "post-return persistence",
+            ),
+            prefix="✓",
+        ))
+        columns.addWidget(self._boundary_column(
+            "CANNOT CLAIM DIRECTLY",
+            "chapterBoundaryCannot",
+            "chapterBoundaryHeadingCannot",
+            (
+                "dopamine level",
+                "brain activity",
+                "motivation",
+                "boredom",
+                "stress",
+                "fatigue",
+            ),
+            prefix="✕",
+        ))
+        layout.addLayout(columns)
+        return card
+
+    def _card_why_science_lab(self) -> QFrame:
+        card, layout = self._content_card("09", "Why does Science Lab exist?")
+        layout.addWidget(self._paragraph(
+            "Science Lab is MYELIN's silent evidence layer. It watches "
+            "behaviour, records evidence, and helps reconstruct what "
+            "happened in research detail."
+        ))
+        principle = QLabel("Watchman first. Scientist second.")
+        principle.setProperty("role", "cyan")
+        principle.setFont(make_font(11.5, 700))
+        layout.addWidget(principle)
+        return card
+
+    def _card_central_question(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("chapterCentralQuestion")
+        self._allow_shrink(frame)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(8)
+        eyebrow = QLabel("10 · CENTRAL RESEARCH QUESTION")
+        eyebrow.setProperty("role", "cyan")
+        eyebrow.setFont(make_font(11, 700, spacing=1.2))
+        layout.addWidget(eyebrow)
+        question = QLabel(
+            "How does a person maintain, lose, and recover alignment with "
+            "an intended task while interacting with a dynamic digital "
+            "environment?"
+        )
+        question.setWordWrap(True)
+        self._allow_shrink(question)
+        question.setFont(make_font(16, 700))
+        layout.addWidget(question)
+        return frame
+
+    def _build_chapter_one_evidence_section(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("card")
+        self._allow_shrink(frame)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(10)
+
+        heading = QLabel("WHAT DOES SCIENCE ALREADY TELL US?")
+        heading.setProperty("role", "cyan")
+        heading.setFont(make_font(12, 700, spacing=1.2))
+        layout.addWidget(heading)
+
+        evidence = (
+            ("Sustained attention", "Focus is not perfectly stable. Research shows that sustained attention can fluctuate even while a person continues the same task."),
+            ("Drift", "Attention can leave the current task in different ways. Internal mind-wandering and external distraction should not be treated as the same neural event."),
+            ("Absorption", "Another activity can become the active behavioural context. Reward, salience, rapid context changes, and low-friction continuation may contribute to sustained engagement."),
+            ("Return", "Closing the competing activity does not guarantee immediate restoration of the previous working context."),
+            ("Re-engagement", "Returning may be followed by a shorter or less stable focus period. MYELIN can observe the behavioural pattern, but it cannot automatically determine why it happened."),
+        )
+        for title, body in evidence:
+            row_title = QLabel(title)
+            row_title.setFont(make_font(12, 700))
+            row_body = self._paragraph(body, role="muted", size=11.5)
+            layout.addWidget(row_title)
+            layout.addWidget(row_body)
+
+        roots_heading = QLabel("SCIENTIFIC ROOTS")
+        roots_heading.setProperty("role", "cyan")
+        roots_heading.setFont(make_font(12, 700, spacing=1.2))
+        layout.addWidget(roots_heading)
+
+        roots_row = QHBoxLayout()
+        roots_row.setSpacing(8)
+        roots = (
+            ("Ebbinghaus", "Time-dependent decay as mathematical inspiration."),
+            ("Weber / Fechner", "Psychophysical scaling as inspiration for intervention salience."),
+            ("Gloria Mark", "Real-world interruption and work-resumption research."),
+            ("JITAI", "Adaptive support based on changing context and receptivity."),
+        )
+        for title, body in roots:
+            roots_row.addWidget(self._flow_node(title, body), 1)
+        layout.addLayout(roots_row)
+
+        rule = self._paragraph(
+            "MYELIN measures behaviour. Science helps interpret possible "
+            "mechanisms. The two must not be confused.",
+            role="muted",
+        )
+        layout.addWidget(rule)
+
+        return frame
+
+    def _build_chapter_one_closing(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("card")
+        self._allow_shrink(frame)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(10)
+
+        closing = self._paragraph(
+            "MYELIN does not need to read the brain to study the "
+            "behavioural structure around attention. It can observe where "
+            "activity goes, how long it remains away from an intended "
+            "task, and how successfully behaviour returns. Science Lab "
+            "exists to preserve that evidence and examine it with the "
+            "caution expected in research."
+        )
+        layout.addWidget(closing)
+
+        next_row = QLabel("NEXT: Chapter 2 — Parts of MYELIN · Coming Soon")
+        next_row.setProperty("role", "cyan")
+        next_row.setFont(make_font(11.5, 700))
+        layout.addWidget(next_row)
+
+        footer = self._paragraph(
+            "Chapter 1 defines the problem, the evidence boundary, and the "
+            "purpose of Science Lab.",
+            role="muted",
+            size=10.5,
+        )
+        layout.addWidget(footer)
+
+        return frame
+
+    # ------------------------------------------------------------------
+    # Coming Soon / Reserved templates (Chapter 6, and Chapter 4)
+    # ------------------------------------------------------------------
+
+    def _build_coming_soon_page(
+        self,
+        chapter_label: str,
+        title: str,
+        body_text: str,
+        secondary_text: str = "",
+    ) -> QWidget:
+        page = QWidget()
+        page.setObjectName("comingSoonPage")
+        outer = QVBoxLayout(page)
+        outer.addStretch(1)
+
+        card = QFrame()
+        card.setObjectName("comingSoonCard")
+        card.setMinimumWidth(0)
+        card.setMaximumWidth(560)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(38, 34, 38, 34)
+        card_layout.setSpacing(8)
+
+        eyebrow = QLabel(chapter_label)
+        eyebrow.setProperty("role", "cyan")
+        eyebrow.setFont(make_font(11, 700, spacing=1.4))
+        eyebrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(eyebrow)
+
+        heading = QLabel(title)
+        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        heading.setWordWrap(True)
+        self._allow_shrink(heading)
+        heading.setFont(make_font(20, 800, spacing=1.0))
+        card_layout.addWidget(heading)
+        card_layout.addSpacing(10)
+
+        badge_row = QHBoxLayout()
+        badge_row.addStretch(1)
+        badge = QLabel("COMING SOON")
+        badge.setObjectName("comingSoonPageBadge")
+        badge.setFont(make_font(10, 700, spacing=1.6))
+        badge_row.addWidget(badge)
+        badge_row.addStretch(1)
+        card_layout.addLayout(badge_row)
+        card_layout.addSpacing(14)
+
+        body = self._paragraph(body_text, role="muted", size=12.5)
+        body.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(body)
+
+        if secondary_text:
+            secondary = self._paragraph(secondary_text, role="muted", size=11.5)
+            secondary.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            card_layout.addWidget(secondary)
+
+        centre = QHBoxLayout()
+        centre.addStretch(1)
+        centre.addWidget(card)
+        centre.addStretch(1)
+        outer.addLayout(centre)
+        outer.addStretch(1)
+        return page
+
+    def _build_reserved_page(self) -> QWidget:
+        content = RESERVED_CHAPTER_CONTENT
+        page = QWidget()
+        page.setObjectName("comingSoonPage")
+        outer = QVBoxLayout(page)
+        outer.addStretch(1)
+
+        card = QFrame()
+        card.setObjectName("comingSoonCard")
+        card.setMinimumWidth(0)
+        card.setMaximumWidth(560)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(38, 34, 38, 34)
+        card_layout.setSpacing(8)
+
+        eyebrow = QLabel(content["chapter_label"])
+        eyebrow.setProperty("role", "muted")
+        eyebrow.setFont(make_font(11, 700, spacing=1.4))
+        eyebrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(eyebrow)
+
+        lock = QLabel("\U0001f512")
+        lock.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lock.setFont(make_font(24, 400))
+        card_layout.addWidget(lock)
+
+        heading = QLabel(content["title"])
+        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        heading.setWordWrap(True)
+        self._allow_shrink(heading)
+        heading.setFont(make_font(18, 800, spacing=1.0))
+        card_layout.addWidget(heading)
+        card_layout.addSpacing(10)
+
+        badge_row = QHBoxLayout()
+        badge_row.addStretch(1)
+        badge = QLabel("RESERVED")
+        badge.setObjectName("chapterReservedBadge")
+        badge.setFont(make_font(10, 700, spacing=1.6))
+        badge_row.addWidget(badge)
+        badge_row.addStretch(1)
+        card_layout.addLayout(badge_row)
+        card_layout.addSpacing(14)
+
+        body = self._paragraph(content["body_text"], role="muted", size=12.5)
+        body.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(body)
+
+        note = self._paragraph(content["note_text"], role="muted", size=11)
+        note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(note)
+
+        centre = QHBoxLayout()
+        centre.addStretch(1)
+        centre.addWidget(card)
+        centre.addStretch(1)
+        outer.addLayout(centre)
+        outer.addStretch(1)
+        return page

@@ -26,6 +26,16 @@ RADIUS_SM: Final = 8
 RADIUS_MD: Final = 14
 RADIUS_LG: Final = 22
 
+# Fixed Chapter 3 normalised-stage colours (Chief-approved, common
+# behavioural episode bar spec section 7/9; frozen by the Phase-2 spec
+# section 43).  Module-level so both this file's QSS builder and
+# SCIENCE_LAB.chapter3_view (metric-card accents) share one source of
+# truth instead of retyping the hex twice.  Theme-invariant like the
+# organ accents (cosine_accent/cosecant_accent) below -- they never vary
+# per base-theme world.
+STAGE_BLUE: Final = "#3B82F6"
+STAGE_PURPLE: Final = "#A855F7"
+
 
 @dataclass(frozen=True, slots=True)
 class ThemeTokens:
@@ -408,6 +418,20 @@ def build_application_stylesheet(tokens: ThemeTokens | None = None) -> str:
         t.green_dim,
         t.violet,
     )
+    # Fixed COSINE organ identity (Chapter 2 Phase 3) -- a blue-violet
+    # distinct from SINE's world cyan and MINE's violet, theme-invariant
+    # like SINE/MINE's own fixed accents.
+    cosine_accent = "#7C9CFF"
+    # Fixed COSECANT organ identity (Chapter 2 Phase 4) -- a calm
+    # green/teal, matching Python's _CosecantSymbol/_Node accent hex
+    # exactly so the icon stroke and the frame border agree.
+    cosecant_accent = "#39D98A"
+    # Off-task Dwell and Return need colours the existing palette does not
+    # already carry (cyan is claimed by Episode Closure; violet is reserved
+    # for the brand-mark gradient only) -- STAGE_BLUE/STAGE_PURPLE above are
+    # the module-level, shared-with-Python-widgets source of truth.
+    stage_blue = STAGE_BLUE
+    stage_purple = STAGE_PURPLE
 
     return f"""
 /* ---------- base ---------- */
@@ -651,6 +675,45 @@ QPushButton {{
 }}
 QPushButton:hover {{ border-color: {cyan_dim}; }}
 
+/* ---------- analytics dashboard header (Metric Hub / Science Lab / Live
+   MIRL / COSINE) -- DashboardPage's shared title/subtitle/status/refresh
+   row.  Previously unstyled: plain QLabel/QPushButton defaults, no
+   hierarchy between title and subtitle, no button affordance on Refresh. */
+QLabel#analyticsPageTitle {{
+    color: {cyan};
+    font-size: 19px;
+    font-weight: 700;
+}}
+QLabel#analyticsPageSubtitle {{
+    color: {muted};
+    font-size: 12px;
+    font-weight: 400;
+}}
+QLabel#analyticsStatus {{
+    color: {muted};
+    background: {alpha(muted, 0.14)};
+    border: 1px solid {alpha(muted, 0.40)};
+    border-radius: 999px;
+    padding: 5px 14px;
+    font-size: 11px;
+    font-weight: 700;
+}}
+QPushButton#analyticsRefreshButton {{
+    background: {mix(cyan, 12, surface)};
+    color: {cyan};
+    border: 1px solid {alpha(cyan, 0.50)};
+    border-radius: {RADIUS_SM}px;
+    padding: 8px 18px;
+    font-size: 11px;
+    font-weight: 700;
+}}
+QPushButton#analyticsRefreshButton:hover {{ background: {mix(cyan, 20, surface)}; }}
+QPushButton#analyticsRefreshButton:disabled {{
+    background: {soft};
+    color: {mix(muted, 45, soft)};
+    border: 1px solid {border};
+}}
+
 /* ---------- navigation drawer (mockup .sidebar) ---------- */
 /* The drawer is the mockup's off-canvas ``.sidebar``: --surface-soft, a
    single right border, a divided head and grouped rows.  Row colour is
@@ -720,6 +783,853 @@ QWidget#sidebarFoot {{
     border-top: 1px solid {border};
 }}
 QLabel#sidebarFootNote {{ color: {mix(muted, 62, soft)}; background: transparent; }}
+
+/* ---------- Science Lab chapters (local LAB CHAPTERS drawer) -- a
+   page-local navigation drawer, deliberately separate from the global
+   sidebar above: chapter selection is presentation-only and must never be
+   confused with primary MYELIN navigation. ---------- */
+QFrame#labChaptersDrawer {{
+    background: {soft};
+    border: none;
+    border-right: 1px solid {border};
+}}
+QWidget#labChaptersDrawerHead {{
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid {border};
+}}
+QLabel#labChaptersDrawerTitle {{ color: {cyan}; background: transparent; }}
+QLabel#labChaptersDrawerSubtitle {{ color: {muted}; background: transparent; }}
+QLabel#labChaptersDrawerFooter {{ color: {mix(muted, 70, soft)}; background: transparent; }}
+QPushButton#labChaptersCollapseButton {{
+    background: transparent; color: {muted};
+    border: 1px solid {border}; border-radius: 13px;
+}}
+QPushButton#labChaptersCollapseButton:hover {{ color: {cyan}; border-color: {cyan_dim}; }}
+
+QPushButton#labChapterButton {{
+    background: {surface};
+    border: 1px solid {border};
+    border-radius: {RADIUS_MD}px;
+    text-align: left;
+}}
+QPushButton#labChapterButton:hover {{ border-color: {cyan_dim}; }}
+QPushButton#labChapterButton[chapterState="active"] {{
+    background: {mix(cyan, 10, surface)};
+    border: 1px solid {cyan};
+}}
+QPushButton#labChapterButton[chapterState="reserved"] {{
+    background: {mix(muted, 5, soft)};
+    border: 1px solid {mix(border, 70, soft)};
+}}
+QPushButton#labChapterButton QLabel#labChapterNumber {{ color: {muted}; background: transparent; }}
+QPushButton#labChapterButton QLabel#labChapterTitle {{ color: {text}; background: transparent; }}
+QPushButton#labChapterButton QLabel#labChapterSubtitle {{ color: {muted}; background: transparent; }}
+QPushButton#labChapterButton QLabel#labChapterChevron {{ color: {muted}; background: transparent; }}
+QPushButton#labChapterButton QLabel#labChapterLock {{ color: {mix(muted, 60, soft)}; background: transparent; }}
+QPushButton#labChapterButton QLabel#labChapterReservedTag {{
+    color: {mix(muted, 58, soft)};
+    background: transparent;
+    border: 1px solid {mix(border, 70, soft)};
+    border-radius: 999px;
+    padding: 1px 8px;
+}}
+QPushButton#labChapterButton[chapterState="active"] QLabel#labChapterNumber,
+QPushButton#labChapterButton[chapterState="active"] QLabel#labChapterTitle,
+QPushButton#labChapterButton[chapterState="active"] QLabel#labChapterChevron {{
+    color: {cyan};
+}}
+
+/* Collapsed-drawer compact rail -- a real chapter selector, not an empty
+   stripe: one small square per chapter, same active/reserved language as
+   the expanded row buttons above. */
+QWidget#labChaptersRail {{ background: transparent; }}
+QPushButton#labChapterRailButton {{
+    background: {surface};
+    border: 1px solid {border};
+    border-radius: {RADIUS_SM}px;
+}}
+QPushButton#labChapterRailButton:hover {{ border-color: {cyan_dim}; }}
+QPushButton#labChapterRailButton[chapterState="active"] {{
+    background: {mix(cyan, 10, surface)};
+    border: 1px solid {cyan};
+}}
+QPushButton#labChapterRailButton[chapterState="reserved"] {{
+    background: {mix(muted, 5, soft)};
+    border: 1px solid {mix(border, 70, soft)};
+}}
+QPushButton#labChapterRailButton QLabel#labChapterRailNumber {{ color: {muted}; background: transparent; }}
+QPushButton#labChapterRailButton[chapterState="active"] QLabel#labChapterRailNumber {{ color: {cyan}; }}
+QPushButton#labChapterRailButton[chapterState="reserved"] QLabel#labChapterRailNumber {{ color: {mix(muted, 60, soft)}; }}
+
+/* ---------- Chapter 1 content (number badge, equation box, evidence
+   boundary, central question) ---------- */
+QFrame#chapterCardBadge {{
+    background: {alpha(cyan, 0.16)};
+    border: 1px solid {alpha(cyan, 0.45)};
+    border-radius: 14px;
+}}
+QLabel#chapterCardBadgeText {{ color: {cyan}; background: transparent; }}
+QFrame#chapterEquationBox {{
+    background: {mix(cyan, 8, surface)};
+    border: 1px solid {alpha(cyan, 0.35)};
+    border-radius: {RADIUS_MD}px;
+}}
+QLabel#chapterEquationDisclaimer {{ color: {muted}; background: transparent; }}
+QFrame#chapterBoundaryCan {{
+    background: {alpha(green, 0.08)};
+    border: 1px solid {alpha(green, 0.30)};
+    border-radius: {RADIUS_MD}px;
+}}
+QFrame#chapterBoundaryCannot {{
+    background: {alpha(red, 0.08)};
+    border: 1px solid {alpha(red, 0.30)};
+    border-radius: {RADIUS_MD}px;
+}}
+QLabel#chapterBoundaryHeadingCan {{ color: {green}; background: transparent; }}
+QLabel#chapterBoundaryHeadingCannot {{ color: {red}; background: transparent; }}
+QFrame#chapterCentralQuestion {{
+    background: {mix(cyan, 12, surface)};
+    border: 1px solid {cyan_dim};
+    border-radius: {RADIUS_LG}px;
+}}
+QLabel#chapterReservedBadge {{
+    color: {mix(muted, 58, soft)};
+    background: transparent;
+    border: 1px solid {mix(border, 70, soft)};
+    border-radius: 999px;
+    padding: 6px 16px;
+}}
+
+/* ---------- Chapter 2 -- Parts of MYELIN (organ selector + living
+   schematics).  Chapter-2-scoped selectors only, per the Chapter 2
+   Phase 1 spec -- no broad QFrame/QPushButton/QLabel rules. ---------- */
+QFrame#chapter2OrganSelector {{
+    background: {soft};
+    border: 1px solid {border};
+    border-radius: {RADIUS_MD}px;
+}}
+QPushButton#chapter2OrganButton {{
+    background: {surface};
+    color: {muted};
+    border: 1px solid {border};
+    border-radius: {RADIUS_SM}px;
+    padding: 10px 12px;
+}}
+QPushButton#chapter2OrganButton:hover {{ border-color: {cyan_dim}; color: {text}; }}
+QPushButton#chapter2OrganButton:checked {{
+    background: {mix(cyan, 10, surface)};
+    border: 1px solid {cyan};
+    color: {cyan};
+}}
+
+QFrame#chapter2SchematicCard {{
+    background: {surface};
+    border: 1px solid {mix(cyan, 14, border)};
+    border-radius: {RADIUS_LG}px;
+}}
+
+QLabel#chapter2DemoBadge {{
+    color: {cyan};
+    background: {alpha(cyan, 0.12)};
+    border: 1px solid {alpha(cyan, 0.35)};
+    border-radius: 999px;
+    padding: 4px 12px;
+}}
+
+/* One schematic node (User / Monitor / Evidence / SINE / MIRL / Break /
+   Welcome Back).  [nodeActive="true"] is the same dynamic-property +
+   repolish convention labChapterButton's [chapterState] already uses. */
+QFrame#chapter2Node {{
+    background: {soft};
+    border: 1px solid {border};
+    border-radius: {RADIUS_MD}px;
+}}
+QFrame#chapter2Node[nodeActive="true"] {{
+    background: {mix(cyan, 8, soft)};
+    border: 1px solid {cyan_dim};
+}}
+QFrame#chapter2SineNode {{
+    background: {soft};
+    border: 1px solid {border};
+    border-radius: {RADIUS_MD}px;
+}}
+QFrame#chapter2SineNode[nodeActive="true"] {{
+    background: {mix(cyan, 8, soft)};
+    border: 1px solid {cyan};
+}}
+QFrame#chapter2MineNode {{
+    background: {soft};
+    border: 1px solid {border};
+    border-radius: {RADIUS_MD}px;
+}}
+QFrame#chapter2MineNode[nodeActive="true"] {{
+    background: {mix(violet, 8, soft)};
+    border: 1px solid {violet};
+}}
+QFrame#chapter2CosineNode {{
+    background: {soft};
+    border: 1px solid {border};
+    border-radius: {RADIUS_MD}px;
+}}
+QFrame#chapter2CosineNode[nodeActive="true"] {{
+    background: {mix(cosine_accent, 8, soft)};
+    border: 1px solid {cosine_accent};
+}}
+QFrame#chapter2CosecantNode {{
+    background: {soft};
+    border: 1px solid {border};
+    border-radius: {RADIUS_MD}px;
+}}
+QFrame#chapter2CosecantNode[nodeActive="true"] {{
+    background: {mix(cosecant_accent, 8, soft)};
+    border: 1px solid {cosecant_accent};
+}}
+
+/* Deterministic moving-arrow connector.  [connectorActive="true"] marks
+   the single "hot" chevron; _Connector.pulse_once() walks this property
+   across the row/column on a plain QTimer -- no continuous redraw. */
+QFrame#chapter2Connector QLabel {{
+    color: {mix(muted, 55, soft)};
+    background: transparent;
+}}
+QFrame#chapter2Connector QLabel[connectorActive="true"] {{
+    color: {cyan};
+}}
+
+/* Miniature explanatory SINE popup -- a separate widget, never the real
+   SINE.popup.SinePopupWindow.  [popupGlow="true"] is toggled a few times
+   by a bounded QTimer (see _MiniPopup._advance_glow), then cleared --
+   never a continuous flash. */
+QFrame#chapter2PopupDemo {{
+    background: {mix(cyan, 6, surface)};
+    border: 1px solid {alpha(cyan, 0.35)};
+    border-radius: {RADIUS_LG}px;
+}}
+QFrame#chapter2PopupDemo[popupGlow="true"] {{
+    border: 1px solid {cyan};
+}}
+QFrame#chapter2PopupDemo[popupGlow="true"][popupVariant="critical"] {{
+    border: 1px solid {red};
+}}
+QLabel#chapter2StageBadge {{
+    color: {cyan};
+    background: {alpha(cyan, 0.14)};
+    border: 1px solid {alpha(cyan, 0.40)};
+    border-radius: 999px;
+    padding: 3px 10px;
+}}
+QLabel#chapter2StageBadge[accent="#F5A623"] {{
+    color: {amber};
+    background: {alpha(amber, 0.14)};
+    border: 1px solid {alpha(amber, 0.40)};
+}}
+QLabel#chapter2StageBadge[accent="#FF4D6D"] {{
+    color: {red};
+    background: {alpha(red, 0.14)};
+    border: 1px solid {alpha(red, 0.40)};
+}}
+QLabel#chapter2StageBadge[accent="#39D98A"] {{
+    color: {green};
+    background: {alpha(green, 0.14)};
+    border: 1px solid {alpha(green, 0.40)};
+}}
+
+QPushButton#chapter2DemoButton {{
+    background: {soft};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: {RADIUS_SM}px;
+    padding: 7px 14px;
+}}
+QPushButton#chapter2DemoButton:hover {{ border-color: {cyan_dim}; color: {cyan}; }}
+QPushButton#chapter2DemoButton:pressed {{ background: {mix(cyan, 14, soft)}; }}
+QPushButton#chapter2DemoButton:checked {{
+    background: {mix(cyan, 16, soft)};
+    border: 1px solid {cyan_dim};
+    color: {cyan};
+}}
+QPushButton#chapter2DemoButton:disabled {{
+    background: {soft};
+    color: {mix(muted, 45, soft)};
+    border: 1px solid {mix(border, 60, soft)};
+}}
+
+QLabel#chapter2TimingLabel {{
+    color: {muted};
+    background: {alpha(muted, 0.10)};
+    border: 1px solid {alpha(muted, 0.30)};
+    border-radius: 999px;
+    padding: 3px 10px;
+}}
+
+QFrame#chapter2InfoStrip {{
+    background: {soft};
+    border: 1px solid {border};
+    border-radius: {RADIUS_MD}px;
+}}
+
+/* ---------- Chapter 3 -- Data Analysis (common behavioural episode bar +
+   separate break lane).  DUMMY-FIRST demonstration only, per the Chapter 3
+   spec (2026-09-12): chapter3-scoped selectors only, no broad QFrame/
+   QPushButton/QLabel rules.  Stage colours are Chief-approved fixed
+   semantics (blue/red/purple/green/cyan) -- they never vary with the
+   active-organ chip; only which annotations are shown beneath the bar
+   changes per organ. ---------- */
+QLabel#chapter3DemoBadge {{
+    color: {cyan};
+    background: {alpha(cyan, 0.12)};
+    border: 1px solid {alpha(cyan, 0.35)};
+    border-radius: 999px;
+    padding: 4px 12px;
+}}
+
+QFrame#chapter3OrganSelector {{
+    background: {soft};
+    border: 1px solid {border};
+    border-radius: {RADIUS_MD}px;
+}}
+QPushButton#chapter3OrganButton {{
+    background: {surface};
+    color: {muted};
+    border: 1px solid {border};
+    border-radius: {RADIUS_SM}px;
+    padding: 8px 12px;
+}}
+QPushButton#chapter3OrganButton:hover {{ border-color: {cyan_dim}; color: {text}; }}
+QPushButton#chapter3OrganButton:checked {{
+    background: {mix(cyan, 10, surface)};
+    border: 1px solid {cyan};
+    color: {cyan};
+}}
+
+QFrame#chapter3TimelineCard, QFrame#chapter3MetricsPanel {{
+    background: {surface};
+    border: 1px solid {border};
+    border-radius: {RADIUS_LG}px;
+}}
+
+/* One segment of the common episode bar.  [segmentState="active"] is the
+   current leading edge (full-strength fill, no perpetual animation --
+   "calm before flashy"); the bare rule is "historical" -- a completed
+   segment, same hue, calmer than the active edge (spec section 10).
+   [segmentState="pending"] is shared across every stage identity: a
+   not-yet-reached segment must never borrow a semantic colour it has not
+   earned. */
+QFrame#chapter3StageOffTaskDwell {{
+    background: {alpha(stage_blue, 0.35)};
+    border: 1px solid {alpha(stage_blue, 0.55)};
+    border-top-left-radius: {RADIUS_MD}px;
+    border-bottom-left-radius: {RADIUS_MD}px;
+}}
+QFrame#chapter3StageOffTaskDwell[segmentState="active"] {{
+    background: {stage_blue};
+    border: 2px solid {mix(stage_blue, 55, "#FFFFFF")};
+}}
+QFrame#chapter3StageTrigger {{
+    background: {alpha(red, 0.35)};
+    border: 1px solid {alpha(red, 0.55)};
+}}
+QFrame#chapter3StageTrigger[segmentState="active"] {{
+    background: {red};
+    border: 2px solid {mix(red, 55, "#FFFFFF")};
+}}
+QFrame#chapter3StageReturn {{
+    background: {alpha(stage_purple, 0.35)};
+    border: 1px solid {alpha(stage_purple, 0.55)};
+}}
+QFrame#chapter3StageReturn[segmentState="active"] {{
+    background: {stage_purple};
+    border: 2px solid {mix(stage_purple, 55, "#FFFFFF")};
+}}
+QFrame#chapter3StageVerifiedReturn {{
+    background: {alpha(green, 0.35)};
+    border: 1px solid {alpha(green, 0.55)};
+}}
+QFrame#chapter3StageVerifiedReturn[segmentState="active"] {{
+    background: {green};
+    border: 2px solid {mix(green, 55, "#FFFFFF")};
+}}
+QFrame#chapter3StageEpisodeClosure {{
+    background: {alpha(cyan, 0.35)};
+    border: 1px solid {alpha(cyan, 0.55)};
+    border-top-right-radius: {RADIUS_MD}px;
+    border-bottom-right-radius: {RADIUS_MD}px;
+}}
+QFrame#chapter3StageEpisodeClosure[segmentState="active"] {{
+    background: {cyan};
+    border: 2px solid {mix(cyan, 55, "#FFFFFF")};
+}}
+QFrame#chapter3StageOffTaskDwell[segmentState="pending"],
+QFrame#chapter3StageTrigger[segmentState="pending"],
+QFrame#chapter3StageReturn[segmentState="pending"],
+QFrame#chapter3StageVerifiedReturn[segmentState="pending"],
+QFrame#chapter3StageEpisodeClosure[segmentState="pending"] {{
+    background: {mix(muted, 12, soft)};
+    border: 1px solid {mix(border, 60, soft)};
+}}
+QLabel#chapter3StageLabel {{ color: {text}; background: transparent; }}
+QLabel#chapter3StageLabel[segmentState="pending"] {{ color: {muted}; }}
+
+/* Separate break lane -- never a colour segment inside the upper bar
+   (spec section 12/14): dashed amber frame keeps it visually distinct
+   from the upper bar's solid stage segments even before colour is read. */
+QFrame#chapter3BreakLane {{
+    background: {alpha(amber, 0.10)};
+    border: 1px dashed {alpha(amber, 0.45)};
+    border-radius: {RADIUS_MD}px;
+}}
+QFrame#chapter3BreakFill {{
+    background: {amber};
+    border-radius: {RADIUS_SM}px;
+}}
+QFrame#chapter3BreakConnector {{ background: {alpha(amber, 0.55)}; }}
+QLabel#chapter3BreakBadge {{
+    color: {amber};
+    background: {alpha(amber, 0.16)};
+    border: 1px solid {alpha(amber, 0.45)};
+    border-radius: 999px;
+    padding: 4px 12px;
+}}
+
+QPushButton#chapter3DemoButton {{
+    background: {soft};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: {RADIUS_SM}px;
+    padding: 7px 14px;
+}}
+QPushButton#chapter3DemoButton:hover {{ border-color: {cyan_dim}; color: {cyan}; }}
+QPushButton#chapter3DemoButton:pressed {{ background: {mix(cyan, 14, soft)}; }}
+QPushButton#chapter3DemoButton:disabled {{
+    background: {soft};
+    color: {mix(muted, 45, soft)};
+    border: 1px solid {mix(border, 60, soft)};
+}}
+
+QLabel#chapter3TickLabel {{ color: {muted}; background: transparent; }}
+
+/* ---------- Chapter 3 Phase 2 -- Key Metrics panel (spec 2026-09-12
+   section 42): a compact research measurement board, never a fitness
+   dashboard or a productivity grade.  Cards stay visually coherent --
+   mostly common cyan-neutral styling, with only a tiny icon-stroke accent
+   (spec section 44) connecting a few cards back to the Phase-1 timeline's
+   protected stage colours.  No card is styled red/green as a moral
+   judgment call (spec section 86). ---------- */
+QLabel#chapter3MetricsHeader {{ background: transparent; }}
+
+QFrame#chapter3MetricCard {{
+    background: {soft};
+    border: 1px solid {alpha(cyan, 0.20)};
+    border-radius: {RADIUS_MD}px;
+}}
+QWidget#chapter3MetricIcon {{ background: transparent; }}
+QLabel#chapter3MetricTitle {{ color: {muted}; background: transparent; }}
+QLabel#chapter3MetricValue {{ color: {text}; background: transparent; }}
+QLabel#chapter3MetricQualifier {{ color: {muted}; background: transparent; }}
+
+QLabel#chapter3MetricTypeBadge {{
+    color: {muted};
+    background: {alpha(muted, 0.12)};
+    border: 1px solid {alpha(muted, 0.30)};
+    border-radius: 999px;
+    padding: 2px 8px;
+}}
+
+/* Evidence-status badge -- reserved for later wiring (spec sections 11,
+   32, 55); Phase 2 never sets a status, so this stays hidden by default.
+   [statusTone] mirrors the same muted/cyan/green/amber vocabulary used
+   elsewhere (e.g. Study's state pill) rather than inventing new colours. */
+QLabel#chapter3MetricStatusBadge {{
+    color: {muted};
+    background: {alpha(muted, 0.12)};
+    border: 1px solid {alpha(muted, 0.30)};
+    border-radius: 999px;
+    padding: 2px 8px;
+}}
+QLabel#chapter3MetricStatusBadge[statusTone="partial"] {{
+    color: {amber};
+    background: {alpha(amber, 0.14)};
+    border: 1px solid {alpha(amber, 0.40)};
+}}
+QLabel#chapter3MetricStatusBadge[statusTone="unavailable"] {{
+    color: {muted};
+    background: {alpha(muted, 0.10)};
+    border: 1px solid {alpha(muted, 0.30)};
+}}
+QLabel#chapter3MetricStatusBadge[statusTone="final"] {{
+    color: {cyan};
+    background: {alpha(cyan, 0.12)};
+    border: 1px solid {alpha(cyan, 0.35)};
+}}
+QLabel#chapter3MetricStatusBadge[statusTone="running"] {{
+    color: {green};
+    background: {alpha(green, 0.14)};
+    border: 1px solid {alpha(green, 0.40)};
+}}
+
+/* ---------- Chapter 3 Phase 3 -- Live Evidence Feed (spec 2026-09-12
+   section 97): a chronological human story, not four organ logs.  Dot
+   colours reuse the exact Phase-1 stage tokens (STAGE_BLUE/STAGE_PURPLE
+   plus red/green/cyan/amber) -- no new colour system (section 50). */
+QFrame#chapter3EvidencePanel {{
+    background: {surface};
+    border: 1px solid {border};
+    border-radius: {RADIUS_LG}px;
+}}
+QLabel#chapter3EvidenceHeader {{ background: transparent; }}
+
+/* Neutral "no data yet" status -- distinct from the cyan DEMONSTRATION/
+   DUMMY LAYOUT badges: this is an honest absence, not a labelled demo. */
+QLabel#chapter3EvidenceStatus {{
+    color: {muted};
+    background: {alpha(muted, 0.12)};
+    border: 1px solid {alpha(muted, 0.32)};
+    border-radius: 999px;
+    padding: 4px 12px;
+}}
+
+QWidget#chapter3EvidenceIcon {{ background: transparent; }}
+
+/* One event row's dot.  [stageKind] mirrors the Phase-1 stage keys plus
+   "break" and a "neutral" fallback for events that are not yet one of the
+   six semantic stages (spec section 17). */
+QFrame#chapter3EvidenceDot {{
+    background: {mix(muted, 55, soft)};
+    border: 1px solid {mix(muted, 70, soft)};
+    border-radius: 5px;
+}}
+QFrame#chapter3EvidenceDot[stageKind="off_task_dwell"] {{
+    background: {stage_blue}; border: 1px solid {mix(stage_blue, 70, "#FFFFFF")};
+}}
+QFrame#chapter3EvidenceDot[stageKind="trigger"] {{
+    background: {red}; border: 1px solid {mix(red, 70, "#FFFFFF")};
+}}
+QFrame#chapter3EvidenceDot[stageKind="return"] {{
+    background: {stage_purple}; border: 1px solid {mix(stage_purple, 70, "#FFFFFF")};
+}}
+QFrame#chapter3EvidenceDot[stageKind="verified_return"] {{
+    background: {green}; border: 1px solid {mix(green, 70, "#FFFFFF")};
+}}
+QFrame#chapter3EvidenceDot[stageKind="episode_closure"] {{
+    background: {cyan}; border: 1px solid {mix(cyan, 70, "#FFFFFF")};
+}}
+QFrame#chapter3EvidenceDot[stageKind="break"] {{
+    background: {amber}; border-radius: 3px; border: 1px solid {mix(amber, 70, "#FFFFFF")};
+}}
+QFrame#chapter3EvidenceRail {{ background: {mix(border, 70, soft)}; }}
+
+QLabel#chapter3EvidenceTime {{ color: {muted}; background: transparent; }}
+QLabel#chapter3EvidenceTitle {{ color: {text}; background: transparent; }}
+QLabel#chapter3EvidenceDetail {{ color: {muted}; background: transparent; }}
+
+QLabel#chapter3EvidenceSourceChip {{
+    color: {muted};
+    background: transparent;
+    border: 1px solid {alpha(muted, 0.40)};
+    border-radius: 999px;
+    padding: 1px 8px;
+}}
+QLabel#chapter3EvidenceTypeBadge {{
+    color: {muted};
+    background: {alpha(muted, 0.10)};
+    border: 1px solid {alpha(muted, 0.28)};
+    border-radius: 999px;
+    padding: 1px 8px;
+}}
+
+QFrame#chapter3EvidenceEmptyState {{ background: transparent; }}
+QLabel#chapter3EvidenceEmptyTitle {{ color: {text}; background: transparent; }}
+QLabel#chapter3EvidenceEmptyBody {{ color: {muted}; background: transparent; }}
+
+/* Developer-preview-only banner (spec sections 7, 28); never present in
+   the production dummy page. */
+QLabel#chapter3EvidenceDemoBadge {{
+    color: {amber};
+    background: {alpha(amber, 0.14)};
+    border: 1px solid {alpha(amber, 0.40)};
+    border-radius: 999px;
+    padding: 4px 12px;
+}}
+
+/* ---------- Chapter 3 Phase 4 -- Derived Findings / Source Coverage /
+   Limitations (spec 2026-09-12 section 133).  Chapter-3-scoped selectors
+   only.  DERIVED accent is restrained cyan/neutral (spec section 89) --
+   never green ("good finding") or red ("bad finding").  Coverage statuses
+   reuse the existing green/muted/amber vocabulary (spec section 90); an
+   UNAVAILABLE row is a research limitation, not an application error, so
+   it never gets the red token. ---------- */
+QFrame#chapter3FindingsPanel, QFrame#chapter3CoveragePanel, QFrame#chapter3LimitationsPanel {{
+    background: {surface};
+    border: 1px solid {border};
+    border-radius: {RADIUS_LG}px;
+}}
+QLabel#chapter3FindingsHeader, QLabel#chapter3CoverageHeader, QLabel#chapter3LimitationsHeader {{
+    background: transparent;
+}}
+QLabel#chapter3FindingsStatus, QLabel#chapter3CoverageStatus {{
+    color: {muted};
+    background: {alpha(muted, 0.12)};
+    border: 1px solid {alpha(muted, 0.32)};
+    border-radius: 999px;
+    padding: 4px 12px;
+}}
+QWidget#chapter3FindingsIcon, QWidget#chapter3CoverageIcon, QWidget#chapter3LimitationsIcon {{
+    background: transparent;
+}}
+
+/* One derived-finding card. */
+QFrame#chapter3FindingCard {{
+    background: {soft};
+    border: 1px solid {border};
+    border-radius: {RADIUS_MD}px;
+}}
+QLabel#chapter3FindingIndex {{ color: {muted}; background: transparent; }}
+QLabel#chapter3FindingTitle {{ color: {muted}; background: transparent; }}
+QLabel#chapter3FindingText {{ color: {text}; background: transparent; }}
+QLabel#chapter3FindingBadge {{
+    color: {cyan};
+    background: {alpha(cyan, 0.12)};
+    border: 1px solid {alpha(cyan, 0.35)};
+    border-radius: 999px;
+    padding: 1px 8px;
+}}
+QFrame#chapter3FindingsEmptyState {{ background: transparent; }}
+QLabel#chapter3FindingsEmptyBody {{ color: {muted}; background: transparent; }}
+
+/* Developer-preview-only banner; never present in the production page. */
+QLabel#chapter3FindingsDemoBadge, QLabel#chapter3CoverageDemoBadge {{
+    color: {amber};
+    background: {alpha(amber, 0.14)};
+    border: 1px solid {alpha(amber, 0.40)};
+    border-radius: 999px;
+    padding: 4px 12px;
+}}
+
+/* One source-coverage row.  [statusKind] mirrors the canonical Science
+   Lab vocabulary exactly: available / no_evidence / unavailable / pending
+   (pending is this dummy page's honest "--" default -- never fabricated
+   as one of the three real statuses). */
+QFrame#chapter3CoverageRow {{
+    background: {soft};
+    border: 1px solid {border};
+    border-radius: {RADIUS_SM}px;
+}}
+QLabel#chapter3CoverageSource {{ color: {text}; background: transparent; }}
+QLabel#chapter3CoverageReason {{ color: {muted}; background: transparent; }}
+QLabel#chapter3CoverageBadge {{
+    color: {muted};
+    background: {alpha(muted, 0.12)};
+    border: 1px solid {alpha(muted, 0.32)};
+    border-radius: 999px;
+    padding: 1px 10px;
+}}
+QLabel#chapter3CoverageBadge[statusKind="available"] {{
+    color: {green};
+    background: {alpha(green, 0.14)};
+    border: 1px solid {alpha(green, 0.40)};
+}}
+QLabel#chapter3CoverageBadge[statusKind="unavailable"] {{
+    color: {amber};
+    background: {alpha(amber, 0.14)};
+    border: 1px solid {alpha(amber, 0.40)};
+}}
+QFrame#chapter3CoverageLegend {{ background: transparent; }}
+QLabel#chapter3CoverageLegendTitle {{ color: {muted}; background: transparent; }}
+QLabel#chapter3CoverageLegendBody {{ color: {muted}; background: transparent; }}
+
+/* One limitation block.  [limitationKind="boundary"] is the permanent,
+   static scientific boundary (calm/cyan information tone); ["evidence"]
+   is the dynamic, per-experiment gap placeholder (amber, spec section
+   91) -- never styled as an error/crash. */
+QFrame#chapter3LimitationItem {{
+    background: {soft};
+    border: 1px solid {border};
+    border-radius: {RADIUS_MD}px;
+}}
+QFrame#chapter3LimitationItem[limitationKind="boundary"] {{
+    border-left: 3px solid {alpha(cyan, 0.55)};
+}}
+QFrame#chapter3LimitationItem[limitationKind="evidence"] {{
+    border-left: 3px solid {alpha(amber, 0.55)};
+}}
+QLabel#chapter3LimitationTitle {{ color: {muted}; background: transparent; }}
+QLabel#chapter3LimitationBody {{ color: {text}; background: transparent; }}
+
+/* ---------- Chapter 3 Phase 5 -- Science Experiment strip (spec
+   2026-09-12 section 37).  Chapter-3-scoped selectors only.  Disabled is
+   the only production control state (spec section 10) -- the
+   :disabled rule must stay readable in every theme, never grey-on-grey. */
+QFrame#chapter3ExperimentStrip {{
+    background: {surface};
+    border: 1px solid {border};
+    border-radius: {RADIUS_LG}px;
+}}
+QLabel#chapter3ExperimentHeader {{ background: transparent; }}
+QLabel#chapter3ExperimentSubtitle {{ color: {muted}; background: transparent; }}
+
+QFrame#chapter3ExperimentField {{
+    background: {soft};
+    border: 1px solid {border};
+    border-radius: {RADIUS_SM}px;
+}}
+QLabel#chapter3ExperimentFieldLabel {{ color: {muted}; background: transparent; }}
+QLabel#chapter3ExperimentFieldValue {{ color: {text}; background: transparent; }}
+
+QPushButton#chapter3ExperimentStart,
+QPushButton#chapter3ExperimentEnd,
+QPushButton#chapter3ExperimentRefresh {{
+    background: {soft};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: {RADIUS_SM}px;
+    padding: 8px 14px;
+}}
+QPushButton#chapter3ExperimentStart:enabled,
+QPushButton#chapter3ExperimentEnd:enabled,
+QPushButton#chapter3ExperimentRefresh:enabled {{
+    border-color: {cyan_dim};
+    color: {cyan};
+}}
+QPushButton#chapter3ExperimentStart:disabled,
+QPushButton#chapter3ExperimentEnd:disabled,
+QPushButton#chapter3ExperimentRefresh:disabled {{
+    background: {soft};
+    color: {mix(muted, 55, soft)};
+    border: 1px solid {mix(border, 70, soft)};
+}}
+
+/* Always-visible dummy/demo banner -- text switches between the
+   production "DUMMY CONTROLS" wording and the isolated-preview-only
+   "DEMO STATE" wording (spec sections 9, 18); never both false at once. */
+QLabel#chapter3ExperimentDummyBadge {{
+    color: {muted};
+    background: {alpha(muted, 0.12)};
+    border: 1px solid {alpha(muted, 0.32)};
+    border-radius: 999px;
+    padding: 4px 12px;
+}}
+QLabel#chapter3ExperimentDummyBadge[demoActive="true"] {{
+    color: {amber};
+    background: {alpha(amber, 0.14)};
+    border: 1px solid {alpha(amber, 0.40)};
+}}
+
+/* ---------- Chapter 3 -> Chapter 5 transfer (spec 2026-09-12) -- Whole-
+   MYELIN Analysis summary + Transfer Results action.  Chapter-3-scoped
+   selectors only, matching every other Chapter 3 block above.  Whole-
+   MYELIN Analysis reuses the plain surface/border card look; Transfer
+   Results gets the same restrained cyan emphasis already used for
+   Chapter 3's other calls to action (DEMO badges, coverage headers) --
+   never a new colour. ---------- */
+QFrame#chapter3WholeMyelinPanel {{
+    background: {surface};
+    border: 1px solid {border};
+    border-radius: {RADIUS_LG}px;
+}}
+QLabel#chapter3WholeMyelinHeader {{ background: transparent; }}
+QLabel#chapter3WholeMyelinStatus {{
+    color: {muted};
+    background: {alpha(muted, 0.12)};
+    border: 1px solid {alpha(muted, 0.32)};
+    border-radius: 999px;
+    padding: 4px 12px;
+}}
+QFrame#chapter3WholeMyelinRow {{
+    background: {soft};
+    border: 1px solid {border};
+    border-radius: {RADIUS_SM}px;
+}}
+QLabel#chapter3WholeMyelinOrgan {{ color: {text}; background: transparent; }}
+QLabel#chapter3WholeMyelinMeasure {{ color: {muted}; background: transparent; }}
+QLabel#chapter3WholeMyelinValue {{ color: {muted}; background: transparent; }}
+QFrame#chapter3WholeMyelinFooter {{
+    background: transparent;
+    border-top: 1px solid {border};
+}}
+QLabel#chapter3WholeMyelinFooterKey {{ color: {muted}; background: transparent; }}
+QLabel#chapter3WholeMyelinFooterValue {{ color: {text}; background: transparent; }}
+
+QFrame#chapter3TransferCard {{
+    background: {mix(cyan, 6, surface)};
+    border: 1px solid {alpha(cyan, 0.35)};
+    border-radius: {RADIUS_LG}px;
+}}
+QLabel#chapter3TransferRelationship {{ background: transparent; }}
+QLabel#chapter3TransferTitle {{ color: {text}; background: transparent; }}
+QLabel#chapter3TransferHelper {{ color: {muted}; background: transparent; }}
+QPushButton#chapter3TransferButton {{
+    background: {soft};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: {RADIUS_SM}px;
+    padding: 10px 18px;
+}}
+QPushButton#chapter3TransferButton:enabled {{
+    border-color: {cyan_dim};
+    color: {cyan};
+}}
+QPushButton#chapter3TransferButton:disabled {{
+    background: {soft};
+    color: {mix(muted, 55, soft)};
+    border: 1px solid {mix(border, 70, soft)};
+}}
+
+/* ---------- Chapter 5 -- Results & Discussion (Chapter 3 -> Chapter 5
+   transfer spec 2026-09-12, section 7).  Chapter-5-scoped selectors only,
+   same policy as Chapter 3.  The seven section cards deliberately reuse
+   the existing generic #card / #chapterCardBadge language every other
+   Science Lab chapter card already uses -- no second card style. ---------- */
+QLabel#chapter5Eyebrow {{ background: transparent; }}
+QLabel#chapter5Heading {{ color: {text}; background: transparent; }}
+QLabel#chapter5Subtitle {{ color: {muted}; background: transparent; }}
+
+QLabel#chapter5ExportHelper {{ color: {muted}; background: transparent; }}
+QPushButton#chapter5ExportButton {{
+    background: {soft};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: {RADIUS_SM}px;
+    padding: 10px 18px;
+}}
+QPushButton#chapter5ExportButton:enabled {{
+    border-color: {cyan_dim};
+    color: {cyan};
+}}
+QPushButton#chapter5ExportButton:disabled {{
+    background: {soft};
+    color: {mix(muted, 55, soft)};
+    border: 1px solid {mix(border, 70, soft)};
+}}
+
+QFrame#chapter5SourceStrip {{
+    background: {surface};
+    border: 1px solid {border};
+    border-radius: {RADIUS_MD}px;
+}}
+QLabel#chapter5SourceLabel {{ background: transparent; }}
+QLabel#chapter5SourceBody {{ color: {muted}; background: transparent; }}
+QLabel#chapter5ColumnLabel {{ color: {muted}; background: transparent; }}
+QLabel#chapter5StatusValue {{ color: {text}; background: transparent; }}
+QLabel#chapter5DependencyValue {{ color: {cyan}; background: transparent; }}
+QLabel#chapter5DependencySub {{ color: {muted}; background: transparent; }}
+
+QLabel#chapter5SectionChevron {{ color: {muted}; background: transparent; }}
+QLabel#chapter5SectionDash {{ color: {alpha(cyan, 0.55)}; background: transparent; }}
+QLabel#chapter5SectionTag {{
+    color: {muted};
+    background: {alpha(muted, 0.10)};
+    border: 1px solid {alpha(muted, 0.28)};
+    border-radius: 999px;
+    padding: 1px 10px;
+}}
+
+QFrame#chapter5BoundaryNote {{
+    background: {mix(cyan, 6, surface)};
+    border: 1px solid {alpha(cyan, 0.30)};
+    border-radius: {RADIUS_MD}px;
+}}
+QLabel#chapter5BoundaryTitle {{ background: transparent; }}
 
 /* ---------- Study Mode (mockup #page-study-mode) ---------- */
 QWidget#studyModePage {{ background: {base}; }}

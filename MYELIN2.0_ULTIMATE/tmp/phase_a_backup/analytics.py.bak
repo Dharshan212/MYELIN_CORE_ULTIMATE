@@ -1,0 +1,2175 @@
+"""Read-only analytics surfaces for the MYELIN Control Station.
+
+This file owns the presentation shell for:
+
+* Metric Hub;
+* Science Lab;
+* Live MIRL;
+* COSINE;
+* durable MINE history; and
+* the Analytics Sheet composer.
+
+Important boundary
+------------------
+Analytics displays immutable projections supplied by authoritative read
+models.  It never opens SQLite, reconstructs an episode, calculates recovery,
+decides a COSINE outcome, advances SINE, or changes live engine state.
+
+There is one shared, event-driven refresh lane.  Opening a dashboard or
+pressing Refresh requests one complete authoritative bundle.  Overlapping
+requests are coalesced and no lifetime polling loop is created.
+"""
+
+from __future__ import annotations
+
+import queue
+import threading
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date
+from typing import Final
+
+from PyQt6.QtCore import QDate, QObject, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtWidgets import (
+    QAbstractItemView,
+    QCheckBox,
+    QDateEdit,
+    QDialog,
+    QDialogButtonBox,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from .lifecycle import SurfaceKind
+from time_projection import (
+    TimezoneProjectionError,
+    civil_day_window_utc,
+    project_utc_timestamp,
+    selected_civil_date,
+    timezone_tag,
+)
+from UI_THEMES.theme import make_font
+
+
+POLL_INTERVAL_MS: Final = 120
+
+#: How long analytics shutdown waits for an already-accepted worker.  Analytics
+#: workers READ persistence, and the launcher releases its share of the SQLite
+#: lane immediately after ``analytics.shutdown()`` returns, so an unjoined
+#: worker would still be inside a database that is going away.  The wait is
+#: deliberately BOUNDED: a GUI shutdown must never hang on a stuck reader, so a
+#: worker that overruns is reported truthfully instead of waited on forever
+#: (C12-C).
+ANALYTICS_SHUTDOWN_TIMEOUT_SECONDS: Final = 2.0
+MAX_ERROR_LENGTH: Final = 220
+
+PAGE_CONTROL: Final = "control"
+PAGE_METRIC_HUB: Final = "metric-hub"
+PAGE_SCIENCE_LAB: Final = "science-lab"
+PAGE_LIVE_MIRL: Final = "live-mirl"
+PAGE_COSINE: Final = "cosine"
+PAGE_MINE: Final = "mine"
+
+PROJECTION_NAMES: Final = {
+    PAGE_METRIC_HUB: "metric_hub",
+    PAGE_SCIENCE_LAB: "science_lab",
+    PAGE_LIVE_MIRL: "live_mirl",
+    PAGE_COSINE: "cosine",
+    PAGE_MINE: "mine",
+}
+
+#: Science Lab chapter shell -- frozen numbering (Chapter 1 dummy-UI spec
+#: section 4).  Chapter 4 is intentionally reserved for future SenseHub /
+#: MYELIN Edge evidence; the gap must never be renumbered away.
+CHAPTER_DEFINITIONS: Final = (
+    {"key": "chapter_1", "number": "01", "title": "Chapter 1", "subtitle": "Purpose & Introduction", "state": "normal"},
+    {"key": "chapter_2", "number": "02", "title": "Chapter 2", "subtitle": "Parts of MYELIN", "state": "normal"},
+    {"key": "chapter_3", "number": "03", "title": "Chapter 3", "subtitle": "Data Analysis", "state": "normal"},
+    {"key": "chapter_4", "number": "04", "title": "Chapter 4", "subtitle": "Reserved for SenseHub / MYELIN Edge", "state": "reserved"},
+    {"key": "chapter_5", "number": "05", "title": "Chapter 5", "subtitle": "Results & Discussion", "state": "normal"},
+    {"key": "chapter_6", "number": "06", "title": "Chapter 6", "subtitle": "Conclusion & Future Scope", "state": "normal"},
+)
+
+#: Telemetry kinds that must trigger a Today Health re-read. ``trigger`` only
+#: fires after durable admission (CORE_ENGINE/monitor.py emits it post-COMMIT);
+#: ``sine_verified_return`` is a REFRESH SIGNAL only -- the Returns count
+#: itself always comes from a persisted EPISODE_CLOSED/RETURNED fact, never
+#: from this telemetry kind.
+TODAY_HEALTH_TELEMETRY_KINDS: Final = frozenset({"trigger", "sine_verified_return"})
+
+
+def _field(value: object, name: str, default=None):
+    """Read one prepared field without interpreting its meaning."""
+
+    if isinstance(value, Mapping):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def _projection(bundle: object, name: str):
+    """Select one named projection from the authoritative root bundle."""
+
+    return _field(bundle, name)
+
+
+def _safe_text(value: object, empty: str = "—", limit: int = 500) -> str:
+    if value is None:
+        return empty
+    cleaned = " ".join(str(value).split())
+    return cleaned[:limit] if cleaned else empty
+
+
+def _display_number(value: object, *, suffix: str = "") -> str:
+    """Format an already-calculated number; never derive a new metric."""
+
+    if value is None or type(value) is bool:
+        return "—"
+    if isinstance(value, int):
+        return f"{value:,}{suffix}"
+    if isinstance(value, float):
+        return f"{value:,.2f}{suffix}"
+    return _safe_text(value)
+
+
+def _display_seconds(value: object) -> str:
+    return "—" if value is None else f"{_display_number(value)} s"
+
+
+def _display_projected_timestamp(value: object, presentation_timezone: str) -> str:
+    try:
+        moment = project_utc_timestamp(value, presentation_timezone)
+    except TimezoneProjectionError:
+        return _safe_text(value)
+    return (
+        f"{moment.strftime('%d %b %Y · %H:%M:%S')} "
+        f"[{timezone_tag(moment, presentation_timezone)}]"
+    )
+
+
+def _bounded_error(error: BaseException) -> str:
+    text = " ".join(f"{type(error).__name__}: {error}".split())
+    return text[:MAX_ERROR_LENGTH]
+
+
+def _publish_latest(target: queue.Queue, item: object) -> None:
+    """Keep only the newest undelivered worker result."""
+
+    try:
+        target.put_nowait(item)
+        return
+    except queue.Full:
+        pass
+    try:
+        target.get_nowait()
+    except queue.Empty:
+        pass
+    try:
+        target.put_nowait(item)
+    except queue.Full:
+        pass
+
+
+def _default_snapshot_provider(presentation_timezone: str = "local") -> object:
+    """Call the one persistence-owned analytics projection entry point.
+
+    INSTRUCTION: the future PERSISTENCE owner must return immutable prepared
+    projections named metric_hub, science_lab, live_mirl and cosine.  Any
+    database access or scientific calculation belongs behind that boundary.
+    """
+
+    from PERSISTENCE.storage import read_control_station_analytics
+
+    return read_control_station_analytics(presentation_timezone)
+
+
+def _local_day_window_utc(local_date, *, zone=None):
+    """Resolve one local civil day's [start, end) boundary pair in UTC.
+
+    Each boundary is resolved INDEPENDENTLY from its own naive local
+    midnight -- never by taking one already-resolved instant and adding 24
+    hours to it.  A fixed-offset ``datetime.now().astimezone()`` snapshot
+    carries only today's UTC offset, so adding a day to it silently reuses
+    that offset for tomorrow too; if the OS-local zone crosses a DST
+    transition inside this civil day, that produces a wrong, always-24-hour
+    window instead of the true (possibly 23h or 25h) local day.
+
+    Calling ``.astimezone()`` on a NAIVE datetime instead asks the platform
+    to resolve local-to-UTC for that exact calendar date, so each boundary
+    gets its own correct offset. ``zone`` exists only so a test can inject
+    an explicit ``ZoneInfo`` and prove the DST-crossing case deterministically
+    without depending on the host machine's configured timezone; production
+    always leaves it ``None`` and lets the OS resolve both instants.
+    """
+
+    from datetime import datetime, timedelta, time as time_of_day, timezone
+
+    start_naive = datetime.combine(local_date, time_of_day.min)
+    end_naive = datetime.combine(local_date + timedelta(days=1), time_of_day.min)
+    if zone is None:
+        start_utc = start_naive.astimezone(timezone.utc)
+        end_utc = end_naive.astimezone(timezone.utc)
+    else:
+        start_utc = start_naive.replace(tzinfo=zone).astimezone(timezone.utc)
+        end_utc = end_naive.replace(tzinfo=zone).astimezone(timezone.utc)
+    return start_utc, end_utc
+
+
+def _default_today_session_health_provider(
+    presentation_timezone: str = "local",
+    *,
+    now_utc=None,
+) -> object:
+    """Read Today through the explicit selected-timezone civil window."""
+
+    from PERSISTENCE.session_health import read_today_session_health
+
+    today = selected_civil_date(presentation_timezone, now_utc=now_utc)
+    window_start_utc, window_end_utc = civil_day_window_utc(
+        today, presentation_timezone
+    )
+
+    def _as_utc_text(moment) -> str:
+        return moment.isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+    return read_today_session_health(
+        local_date_iso=today.isoformat(),
+        window_start_utc=_as_utc_text(window_start_utc),
+        window_end_utc=_as_utc_text(window_end_utc),
+    )
+
+
+def _default_export_provider(snapshot: object, request: "AnalyticsSheetRequest") -> str:
+    """Delegate document generation to the reporting authority."""
+
+    from PERSISTENCE.storage import export_analytics_sheet
+
+    return str(export_analytics_sheet(snapshot=snapshot, request=request))
+
+
+@dataclass(frozen=True, slots=True)
+class AnalyticsSheetRequest:
+    """Validated user selection; it contains no calculated analytics."""
+
+    range_start: date
+    range_end: date
+    include_metric_hub: bool
+    include_science_lab: bool
+    include_live_mirl: bool
+    include_cosine: bool
+
+    def selected_sections(self) -> tuple[str, ...]:
+        selected: list[str] = []
+        if self.include_metric_hub:
+            selected.append(PAGE_METRIC_HUB)
+        if self.include_science_lab:
+            selected.append(PAGE_SCIENCE_LAB)
+        if self.include_live_mirl:
+            selected.append(PAGE_LIVE_MIRL)
+        if self.include_cosine:
+            selected.append(PAGE_COSINE)
+        return tuple(selected)
+
+
+class SharedDashboardRefresh(QObject):
+    """One non-blocking projection reader shared by all analytics pages."""
+
+    bundle_ready = pyqtSignal(object)
+    refresh_failed = pyqtSignal(str)
+    refreshing_changed = pyqtSignal(bool)
+
+    def __init__(
+        self,
+        provider: Callable[[], object],
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._provider = provider
+        self._results: queue.Queue = queue.Queue(maxsize=1)
+        self._generation = 0
+        self._in_flight = False
+        self._pending = False
+        self._closed = False
+        self._worker: threading.Thread | None = None
+
+        self._poll = QTimer(self)
+        self._poll.setInterval(POLL_INTERVAL_MS)
+        self._poll.timeout.connect(self._take_result)
+
+    @property
+    def is_refreshing(self) -> bool:
+        return self._in_flight
+
+    def request_refresh(self) -> bool:
+        """Start one worker or coalesce into one later refresh."""
+
+        if self._closed:
+            return False
+        if self._in_flight:
+            # Invalidate the accepted worker immediately.  Its result may
+            # still arrive, but a newer request (notably a timezone change)
+            # must never render that older projection before the coalesced
+            # replacement starts.
+            self._generation += 1
+            self._pending = True
+            return True
+
+        self._generation += 1
+        generation = self._generation
+        self._in_flight = True
+        self.refreshing_changed.emit(True)
+
+        def read() -> None:
+            try:
+                bundle = self._provider()
+                if bundle is None:
+                    raise RuntimeError("analytics read model returned no bundle")
+            except Exception as error:  # worker failure must not touch Qt
+                _publish_latest(
+                    self._results,
+                    (generation, None, _bounded_error(error)),
+                )
+            else:
+                _publish_latest(self._results, (generation, bundle, None))
+
+        self._worker = threading.Thread(
+            target=read,
+            name="MyelinAnalyticsRefresh",
+            daemon=True,
+        )
+        self._worker.start()
+        if not self._poll.isActive():
+            self._poll.start()
+        return True
+
+    def shutdown(
+        self,
+        *,
+        timeout: float = ANALYTICS_SHUTDOWN_TIMEOUT_SECONDS,
+    ) -> bool:
+        """Reject new work, stop delivery, then wait BOUNDED for the reader.
+
+        Returns whether the accepted worker actually finished.  ``False`` means
+        a reader overran the budget and is still touching persistence -- the
+        caller is told the truth rather than being blocked indefinitely.
+        """
+
+        self._closed = True
+        self._pending = False
+        self._poll.stop()
+        worker = self._worker
+        if worker is None or not worker.is_alive():
+            self._worker = None
+            return True
+        worker.join(max(0.0, float(timeout)))
+        if worker.is_alive():
+            return False
+        self._worker = None
+        return True
+
+    def _take_result(self) -> None:
+        if self._closed:
+            self._poll.stop()
+            return
+        try:
+            generation, bundle, error = self._results.get_nowait()
+        except queue.Empty:
+            return
+
+        self._poll.stop()
+        self._in_flight = False
+        self.refreshing_changed.emit(False)
+        if generation == self._generation:
+            if error is None:
+                self.bundle_ready.emit(bundle)
+            else:
+                self.refresh_failed.emit(error)
+
+        if self._pending and not self._closed:
+            self._pending = False
+            self.request_refresh()
+
+
+def _clear_layout(layout) -> None:
+    while layout.count():
+        item = layout.takeAt(0)
+        widget = item.widget()
+        child_layout = item.layout()
+        if widget is not None:
+            widget.deleteLater()
+        elif child_layout is not None:
+            _clear_layout(child_layout)
+
+
+def _make_card(title: str, value: str = "—", note: str = "") -> QFrame:
+    card = QFrame()
+    card.setObjectName("analyticsCard")
+    layout = QVBoxLayout(card)
+    layout.setContentsMargins(18, 16, 18, 16)
+    layout.setSpacing(5)
+    heading = QLabel(title.upper())
+    heading.setObjectName("analyticsCardTitle")
+    number = QLabel(value)
+    number.setObjectName("analyticsCardValue")
+    number.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    layout.addWidget(heading)
+    layout.addWidget(number)
+    if note:
+        detail = QLabel(note)
+        detail.setObjectName("analyticsCardNote")
+        detail.setWordWrap(True)
+        layout.addWidget(detail)
+    return card
+
+
+def _empty_card(message: str) -> QFrame:
+    return _make_card("STATUS", "NO DATA", message)
+
+
+def _table(headers: Sequence[str]) -> QTableWidget:
+    table = QTableWidget(0, len(headers))
+    table.setObjectName("analyticsTable")
+    table.setHorizontalHeaderLabels(list(headers))
+    table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+    table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+    table.setAlternatingRowColors(True)
+    table.verticalHeader().setVisible(False)
+    table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+    return table
+
+
+def _replace_rows(table: QTableWidget, rows: Sequence[Sequence[object]]) -> None:
+    table.setRowCount(len(rows))
+    for row_index, row in enumerate(rows):
+        for column_index, value in enumerate(row):
+            table.setItem(
+                row_index,
+                column_index,
+                QTableWidgetItem(_safe_text(value)),
+            )
+
+
+class DashboardPage(QWidget):
+    """Common readable shell; subclasses only map prepared fields to widgets."""
+
+    refresh_requested = pyqtSignal()
+
+    def __init__(self, title: str, subtitle: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("analyticsPage")
+        self._last_projection = None
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        scroll = QScrollArea()
+        scroll.setObjectName("analyticsScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        body = QWidget()
+        self.body = QVBoxLayout(body)
+        self.body.setContentsMargins(30, 26, 30, 36)
+        self.body.setSpacing(18)
+        scroll.setWidget(body)
+        root.addWidget(scroll)
+
+        header = QHBoxLayout()
+        text = QVBoxLayout()
+        heading = QLabel(title)
+        heading.setObjectName("analyticsPageTitle")
+        description = QLabel(subtitle)
+        description.setObjectName("analyticsPageSubtitle")
+        description.setWordWrap(True)
+        self.status = QLabel("NOT LOADED")
+        self.status.setObjectName("analyticsStatus")
+        text.addWidget(heading)
+        text.addWidget(description)
+        header.addLayout(text, 1)
+        self.refresh_button = QPushButton("REFRESH")
+        self.refresh_button.setObjectName("analyticsRefreshButton")
+        self.refresh_button.clicked.connect(self.refresh_requested.emit)
+        header.addWidget(self.status, alignment=Qt.AlignmentFlag.AlignTop)
+        header.addWidget(self.refresh_button, alignment=Qt.AlignmentFlag.AlignTop)
+        self.body.addLayout(header)
+
+        self.cards = QGridLayout()
+        self.cards.setHorizontalSpacing(14)
+        self.cards.setVerticalSpacing(14)
+        self.body.addLayout(self.cards)
+
+    @property
+    def last_projection(self):
+        return self._last_projection
+
+    def set_refreshing(self, refreshing: bool) -> None:
+        self.refresh_button.setEnabled(not refreshing)
+        if refreshing:
+            self.status.setText("REFRESHING")
+
+    def show_refresh_failure(self) -> None:
+        # Preserve the last honest snapshot instead of replacing it with a
+        # plausible empty state after a transient read failure.
+        self.status.setText(
+            "REFRESH FAILED" if self._last_projection is not None else "UNAVAILABLE"
+        )
+
+    def render_projection(self, projection: object) -> None:
+        self._last_projection = projection
+        self.status.setText("AUTHORITATIVE DATA")
+
+    def _replace_cards(self, values: Sequence[tuple[str, str, str]]) -> None:
+        _clear_layout(self.cards)
+        for index, (title, value, note) in enumerate(values):
+            self.cards.addWidget(_make_card(title, value, note), index // 3, index % 3)
+
+
+class MetricHubPage(DashboardPage):
+    """Metric Hub formatter; all rates and counts arrive pre-calculated."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(
+            "METRIC HUB",
+            "Operational overview and MIRL evidence populations",
+            parent,
+        )
+        self.details = _table(("Population", "Status", "Value", "Evidence"))
+        self.body.addWidget(self.details)
+        self.body.addStretch(1)
+
+    def render_projection(self, projection: object) -> None:
+        super().render_projection(projection)
+        available = bool(_field(projection, "available", False))
+        self.status.setText("ONLINE" if available else "NO EVIDENCE")
+        if not available:
+            self._replace_cards(
+                (("Status", "NO DATA", _safe_text(_field(projection, "status_message"))),)
+            )
+            _replace_rows(self.details, ())
+            return
+
+        self._replace_cards(
+            (
+                ("Sessions", _display_number(_field(projection, "total_session_count")), "Recorded sessions"),
+                ("Operational triggers", _display_number(_field(projection, "total_trigger_count")), "Committed trigger evidence"),
+                ("Native MIRL episodes", _display_number(_field(projection, "native_episode_count")), "Native population only"),
+                ("Stable recovery rate", _display_number(_field(projection, "verified_stable_recovery_rate_percent"), suffix="%"), "Prepared native metric"),
+                ("Episode closure rate", _display_number(_field(projection, "episode_closure_rate_percent"), suffix="%"), "Prepared native metric"),
+                ("Mean stable recovery", _display_seconds(_field(projection, "average_stable_recovery_latency_seconds")), "Prepared latency"),
+                ("Legacy observations", _display_number(_field(projection, "legacy_observation_count")), "Kept separate from native MIRL"),
+                ("Legacy resolved return", _display_number(_field(projection, "legacy_resolved_return_rate_percent"), suffix="%"), "Legacy population only"),
+                ("Exclusions", _display_number(_field(projection, "exclusion_count")), _safe_text(_field(projection, "evidence_scope_label"))),
+            )
+        )
+        rows = []
+        for detail in tuple(_field(projection, "read_model_detail_rows", ()) or ()):
+            rows.append(
+                (
+                    _field(detail, "population", _field(detail, "label")),
+                    _field(detail, "status"),
+                    _field(detail, "value"),
+                    _field(detail, "evidence", _field(detail, "detail")),
+                )
+            )
+        _replace_rows(self.details, rows)
+
+
+class _ChapterStack(QStackedWidget):
+    """A stack that sizes to its CURRENT page only.
+
+    QStackedWidget's documented default sizes itself to its LARGEST page, so
+    a short Coming Soon page would otherwise inherit Chapter 1's much taller
+    content height and end up vertically centred far outside the visible
+    scroll viewport.  Each Science Lab chapter must size on its own merits.
+    """
+
+    def sizeHint(self):  # noqa: N802 -- Qt override
+        current = self.currentWidget()
+        return current.sizeHint() if current is not None else super().sizeHint()
+
+    def minimumSizeHint(self):  # noqa: N802 -- Qt override
+        current = self.currentWidget()
+        return current.minimumSizeHint() if current is not None else super().minimumSizeHint()
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 -- Qt override
+        current = self.currentWidget()
+        return current.hasHeightForWidth() if current is not None else super().hasHeightForWidth()
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 -- Qt override
+        current = self.currentWidget()
+        if current is not None and current.hasHeightForWidth():
+            return current.heightForWidth(width)
+        return super().heightForWidth(width)
+
+
+class _ChapterButton(QPushButton):
+    """A push-button whose sizeHint honours its own installed layout.
+
+    Verified root cause of the real-launcher chapter-row clipping: plain
+    ``QPushButton.sizeHint()`` computes from ``QStyle::sizeFromContents``
+    using the button's own text/icon metrics -- it does NOT consult an
+    installed custom layout.  Measured on the real Windows launcher with
+    Segoe UI: a chapter row's own layout wanted ``(115, 74)``, but the bare
+    QPushButton reported ``(55, 32)``, so Qt allocated it only 32px and the
+    title/subtitle rows inside were crushed to a couple of visible pixels.
+    """
+
+    def sizeHint(self) -> QSize:  # noqa: N802 -- Qt override
+        hint = super().sizeHint()
+        layout = self.layout()
+        if layout is None:
+            return hint
+        layout_hint = layout.sizeHint()
+        return QSize(
+            max(hint.width(), layout_hint.width()),
+            max(hint.height(), layout_hint.height()),
+        )
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 -- Qt override
+        hint = super().minimumSizeHint()
+        layout = self.layout()
+        if layout is None:
+            return hint
+        layout_min = layout.minimumSize()
+        return QSize(
+            max(hint.width(), layout_min.width()),
+            max(hint.height(), layout_min.height()),
+        )
+
+
+class ScienceLabPage(DashboardPage):
+    """Science Lab: a chapter-based scientific presentation shell.
+
+    Chapter 1 is real dummy content (Purpose & Introduction).  Chapters 2, 3,
+    5 and 6 are static Coming Soon placeholders; Chapter 4 is a reserved
+    placeholder for future SenseHub / MYELIN Edge evidence.  Chapter
+    selection is presentation-only: it starts no engine call, opens no
+    database write, and subscribes to no telemetry (Chapter 1 dummy-UI spec
+    sections 1, 42, 66).
+
+    The page still honours the DashboardPage / render_projection contract so
+    AnalyticsController's refresh lane keeps working.  The previously
+    visible evidence table and limitation note are kept current by every
+    refresh; they are simply no longer the default view (spec section 91:
+    replace the presentation, never delete the evidence seam).
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(
+            "MYELIN SCIENCE LAB",
+            "Human Behaviour × Technology × Deeper Insights",
+            parent,
+        )
+        self._chapter_buttons: dict[str, QPushButton] = {}
+        self._chapter_rail_buttons: dict[str, QPushButton] = {}
+        self._chapter_index: dict[str, int] = {}
+        self._drawer_expanded = True
+
+        chapters_row = QHBoxLayout()
+        chapters_row.setSpacing(0)
+        self.body.addLayout(chapters_row, 1)
+
+        self._drawer = self._build_chapter_drawer()
+        chapters_row.addWidget(self._drawer)
+
+        self._stack = _ChapterStack()
+        chapters_row.addWidget(self._stack, 1)
+
+        self._register_chapter("chapter_1", self._build_chapter_one())
+        self._register_chapter(
+            "chapter_2",
+            self._build_coming_soon_page(
+                "CHAPTER 2",
+                "PARTS OF MYELIN",
+                "This chapter will explain the major parts of MYELIN and how they work together.",
+                "It will describe the roles of MYELIN's observation, intervention, study, recovery, and specialised behavioural systems.",
+            ),
+        )
+        self._register_chapter(
+            "chapter_3",
+            self._build_coming_soon_page(
+                "CHAPTER 3",
+                "DATA ANALYSIS",
+                "This chapter will present behavioural evidence collected during MYELIN sessions.",
+                "Future versions will show session timelines, task-aligned periods, distraction episodes, dwell, return, relapse, and other behavioural measures.",
+            ),
+        )
+        self._register_chapter("chapter_4", self._build_reserved_page())
+        self._register_chapter(
+            "chapter_5",
+            self._build_coming_soon_page(
+                "CHAPTER 5",
+                "RESULTS & DISCUSSION",
+                "This chapter will present results, scientific interpretation, literature comparison, alternative explanations, and discussion.",
+                "The final chapter will distinguish observed evidence from derived results and hypotheses.",
+            ),
+        )
+        self._register_chapter(
+            "chapter_6",
+            self._build_coming_soon_page(
+                "CHAPTER 6",
+                "CONCLUSION & FUTURE SCOPE",
+                "This chapter will summarise the findings and describe future directions for MYELIN.",
+                "",
+            ),
+        )
+
+        # Legacy evidence widgets: kept alive and kept current by
+        # render_projection below, but not part of the default chapter view
+        # (spec section 91 -- hide the legacy panel, never delete the seam).
+        self.metrics = _table(("Metric", "Value", "Formula", "Population", "Limit / exclusion"))
+        self.metrics.setParent(self)
+        self.metrics.hide()
+        self.limitation = QLabel("Scientific evidence limitation: —")
+        self.limitation.setObjectName("analyticsEvidenceNote")
+        self.limitation.setWordWrap(True)
+        self.limitation.setParent(self)
+        self.limitation.hide()
+
+        self._select_chapter("chapter_1")
+
+    # ------------------------------------------------------------------
+    # Chapter navigation shell
+    # ------------------------------------------------------------------
+
+    def _register_chapter(self, key: str, widget: QWidget) -> None:
+        self._chapter_index[key] = self._stack.addWidget(widget)
+
+    def _select_chapter(self, key: str) -> None:
+        index = self._chapter_index.get(key)
+        if index is None:
+            return
+        self._stack.setCurrentIndex(index)
+        for chapter_key, button in (*self._chapter_buttons.items(), *self._chapter_rail_buttons.items()):
+            if chapter_key == key:
+                state = "active"
+            elif chapter_key == "chapter_4":
+                state = "reserved"
+            else:
+                state = "normal"
+            button.setProperty("chapterState", state)
+            button.style().unpolish(button)
+            button.style().polish(button)
+        scroll_area = self.findChild(QScrollArea, "analyticsScroll")
+        if scroll_area is not None:
+            scroll_area.verticalScrollBar().setValue(0)
+        # QStackedWidget documented default: size to the LARGEST page, so a
+        # short Coming Soon page would otherwise inherit Chapter 1's much
+        # taller content height inside the shared scroll area and render
+        # centred far outside the visible viewport.  Pin the stack's own
+        # height to what the current page actually needs.  Deferred one
+        # event-loop turn because the stack's real width (needed for
+        # word-wrapped heightForWidth) is not yet valid immediately after
+        # setCurrentIndex.
+        QTimer.singleShot(0, self._sync_stack_height)
+
+    def _sync_stack_height(self) -> None:
+        current = self._stack.currentWidget()
+        if current is None:
+            return
+        width = self._stack.width()
+        if width <= 0:
+            width = self._stack.sizeHint().width()
+        if width > 0 and current.hasHeightForWidth():
+            height = current.heightForWidth(width)
+        else:
+            height = current.sizeHint().height()
+        self._stack.setFixedHeight(max(height, 1))
+
+    # Expanded/collapsed drawer widths.  Expanded was widened from the
+    # original 236px (see the drawer-fix fixture): 236px cramped a
+    # two-line "Reserved for SenseHub / MYELIN Edge" subtitle against the
+    # chevron/lock column.  260px is the narrowest width that keeps every
+    # chapter subtitle on two lines without crowding the Chapter 1
+    # viewport, verified against the app's 1024px minimum window width.
+    _DRAWER_WIDTH_EXPANDED = 260
+    _DRAWER_WIDTH_COLLAPSED = 64
+
+    def _toggle_drawer(self) -> None:
+        self._drawer_expanded = not self._drawer_expanded
+        self._drawer_head_text.setVisible(self._drawer_expanded)
+        self._drawer_chapters_container.setVisible(self._drawer_expanded)
+        self._drawer_footer.setVisible(self._drawer_expanded)
+        self._drawer_rail_container.setVisible(not self._drawer_expanded)
+        self._drawer.setFixedWidth(
+            self._DRAWER_WIDTH_EXPANDED if self._drawer_expanded else self._DRAWER_WIDTH_COLLAPSED
+        )
+        self._drawer_collapse_button.setText("‹" if self._drawer_expanded else "›")
+
+    def _build_chapter_drawer(self) -> QFrame:
+        drawer = QFrame()
+        drawer.setObjectName("labChaptersDrawer")
+        drawer.setFixedWidth(self._DRAWER_WIDTH_EXPANDED)
+        layout = QVBoxLayout(drawer)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        head = QWidget()
+        head.setObjectName("labChaptersDrawerHead")
+        head_layout = QHBoxLayout(head)
+        head_layout.setContentsMargins(16, 14, 12, 14)
+        self._drawer_head_text = QWidget()
+        head_text = QVBoxLayout(self._drawer_head_text)
+        head_text.setContentsMargins(0, 0, 0, 0)
+        head_text.setSpacing(2)
+        title = QLabel("LAB CHAPTERS")
+        title.setObjectName("labChaptersDrawerTitle")
+        title.setFont(make_font(12, 700, spacing=1.2))
+        subtitle = QLabel("EXPLORE · LEARN · PROGRESS")
+        subtitle.setObjectName("labChaptersDrawerSubtitle")
+        subtitle.setFont(make_font(9, 600, spacing=0.8))
+        subtitle.setWordWrap(True)
+        self._allow_shrink(subtitle)
+        head_text.addWidget(title)
+        head_text.addWidget(subtitle)
+        head_layout.addWidget(self._drawer_head_text, 1)
+        self._drawer_collapse_button = QPushButton("‹")
+        self._drawer_collapse_button.setObjectName("labChaptersCollapseButton")
+        self._drawer_collapse_button.setFixedSize(26, 26)
+        self._drawer_collapse_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._drawer_collapse_button.clicked.connect(self._toggle_drawer)
+        head_layout.addWidget(self._drawer_collapse_button, alignment=Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(head)
+
+        # Expanded rows (full title/subtitle/chevron) and the collapsed
+        # compact rail are both built up front and kept in permanent sync
+        # by _select_chapter -- only one is ever visible, toggled by
+        # _toggle_drawer, so the active chapter survives collapse/expand
+        # without rebuilding anything or touching the stack/engine.
+        self._drawer_chapters_container = QWidget()
+        items_layout = QVBoxLayout(self._drawer_chapters_container)
+        items_layout.setContentsMargins(12, 12, 12, 12)
+        items_layout.setSpacing(10)
+        for definition in CHAPTER_DEFINITIONS:
+            button = self._build_chapter_button(definition)
+            items_layout.addWidget(button)
+            self._chapter_buttons[definition["key"]] = button
+        items_layout.addStretch(1)
+        layout.addWidget(self._drawer_chapters_container, 1)
+
+        self._drawer_rail_container = QWidget()
+        self._drawer_rail_container.setObjectName("labChaptersRail")
+        rail_layout = QVBoxLayout(self._drawer_rail_container)
+        rail_layout.setContentsMargins(10, 12, 10, 12)
+        rail_layout.setSpacing(8)
+        for definition in CHAPTER_DEFINITIONS:
+            rail_button = self._build_chapter_rail_button(definition)
+            rail_layout.addWidget(rail_button)
+            self._chapter_rail_buttons[definition["key"]] = rail_button
+        rail_layout.addStretch(1)
+        rail_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self._drawer_rail_container.setVisible(False)
+        layout.addWidget(self._drawer_rail_container, 1)
+
+        self._drawer_footer = QLabel('"Small insights lead to brighter tomorrows." — MYELIN Science Lab')
+        self._drawer_footer.setObjectName("labChaptersDrawerFooter")
+        self._drawer_footer.setFont(make_font(9, 500, italic=True))
+        self._drawer_footer.setWordWrap(True)
+        self._allow_shrink(self._drawer_footer)
+        self._drawer_footer.setContentsMargins(14, 8, 14, 12)
+        layout.addWidget(self._drawer_footer)
+
+        return drawer
+
+    def _build_chapter_rail_button(self, definition: Mapping[str, str]) -> QPushButton:
+        """The collapsed-drawer counterpart of ``_build_chapter_button``.
+
+        The drawer-fix fixture rejected the earlier collapse behaviour
+        (hiding the whole chapter list, leaving an almost-empty rail with
+        clipped header/footer fragments still trying to render in 54px).
+        This is a real compact chapter selector: one small square per
+        chapter, always clickable, tooltipped with the full title.
+        """
+
+        button = _ChapterButton()
+        button.setObjectName("labChapterRailButton")
+        button.setProperty("chapterState", "reserved" if definition["state"] == "reserved" else "normal")
+        button.setFixedSize(40, 36)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setToolTip(f"{definition['title']} — {definition['subtitle']}")
+        button.clicked.connect(lambda _checked=False, key=definition["key"]: self._select_chapter(key))
+
+        layout = QVBoxLayout(button)
+        layout.setContentsMargins(2, 2, 2, 2)
+        label = QLabel("\U0001f512" if definition["state"] == "reserved" else definition["number"])
+        label.setObjectName("labChapterRailNumber")
+        label.setFont(make_font(11 if definition["state"] == "reserved" else 12, 700))
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        layout.addWidget(label)
+
+        return button
+
+    def _build_chapter_button(self, definition: Mapping[str, str]) -> QPushButton:
+        button = _ChapterButton()
+        button.setObjectName("labChapterButton")
+        button.setProperty("chapterState", "reserved" if definition["state"] == "reserved" else "normal")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.clicked.connect(lambda _checked=False, key=definition["key"]: self._select_chapter(key))
+
+        layout = QVBoxLayout(button)
+        layout.setContentsMargins(14, 12, 12, 12)
+        layout.setSpacing(4)
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
+        number = QLabel(definition["number"])
+        number.setObjectName("labChapterNumber")
+        number.setFont(make_font(10.5, 700))
+        number.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        title = QLabel(definition["title"])
+        title.setObjectName("labChapterTitle")
+        title.setFont(make_font(12, 700))
+        title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        top_row.addWidget(number)
+        top_row.addWidget(title, 1)
+        if definition["state"] == "reserved":
+            lock = QLabel("\U0001f512")
+            lock.setObjectName("labChapterLock")
+            lock.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            top_row.addWidget(lock)
+        else:
+            chevron = QLabel("›")
+            chevron.setObjectName("labChapterChevron")
+            chevron.setFont(make_font(13, 700))
+            chevron.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            top_row.addWidget(chevron)
+        layout.addLayout(top_row)
+
+        subtitle = QLabel(definition["subtitle"])
+        subtitle.setObjectName("labChapterSubtitle")
+        subtitle.setFont(make_font(10, 400))
+        subtitle.setWordWrap(True)
+        self._allow_shrink(subtitle)
+        subtitle.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        layout.addWidget(subtitle)
+
+        if definition["state"] == "reserved":
+            tag = QLabel("RESERVED")
+            tag.setObjectName("labChapterReservedTag")
+            tag.setFont(make_font(8.5, 700, spacing=0.8))
+            tag.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            layout.addWidget(tag, 0, Qt.AlignmentFlag.AlignLeft)
+
+        return button
+
+    # ------------------------------------------------------------------
+    # Shared content-card helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _allow_shrink(widget: QWidget) -> None:
+        """Let a word-wrapped label -- or a card built from several of
+        them -- shrink below its natural width.
+
+        Qt's ``QLabel.minimumSizeHint()`` does not shrink to the longest
+        word when ``wordWrap`` is on; it keeps pulling toward the
+        unconstrained sizeHint, and a container's own minimum is the sum of
+        its children's, so that drags every ancestor layout's minimum width
+        up with it.  Marking the horizontal policy ``Ignored`` tells
+        ancestor layouts to leave this widget out of their minimum-width
+        arithmetic -- it still receives whatever width the layout allocates
+        it and its labels still wrap normally at paint time.
+        """
+
+        policy = widget.sizePolicy()
+        policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+        widget.setSizePolicy(policy)
+
+    def _paragraph(self, text: str, *, role: str | None = None, size: float = 12.5) -> QLabel:
+        widget = QLabel(text)
+        widget.setWordWrap(True)
+        self._allow_shrink(widget)
+        widget.setFont(make_font(size, 400))
+        if role:
+            widget.setProperty("role", role)
+        return widget
+
+    def _bullet_list(self, items: Sequence[str]) -> QWidget:
+        holder = QWidget()
+        layout = QVBoxLayout(holder)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+        for item in items:
+            row = QLabel(f"•  {item}")
+            row.setWordWrap(True)
+            self._allow_shrink(row)
+            row.setProperty("role", "muted")
+            row.setFont(make_font(11.5, 400))
+            layout.addWidget(row)
+        return holder
+
+    def _flow_node(self, title: str, description: str) -> QFrame:
+        node = QFrame()
+        node.setObjectName("statBox")
+        self._allow_shrink(node)
+        layout = QVBoxLayout(node)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(4)
+        heading = QLabel(title)
+        heading.setProperty("role", "cyan")
+        heading.setFont(make_font(12.5, 700))
+        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        heading.setWordWrap(True)
+        self._allow_shrink(heading)
+        body = QLabel(description)
+        body.setProperty("role", "muted")
+        body.setWordWrap(True)
+        self._allow_shrink(body)
+        body.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        body.setFont(make_font(10.5, 400))
+        layout.addWidget(heading)
+        layout.addWidget(body)
+        return node
+
+    def _content_card(self, number: str, title: str) -> tuple[QFrame, QVBoxLayout]:
+        card = QFrame()
+        card.setObjectName("card")
+        self._allow_shrink(card)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        badge_frame = QFrame()
+        badge_frame.setObjectName("chapterCardBadge")
+        badge_frame.setFixedSize(28, 28)
+        badge_layout = QVBoxLayout(badge_frame)
+        badge_layout.setContentsMargins(0, 0, 0, 0)
+        badge_label = QLabel(number)
+        badge_label.setObjectName("chapterCardBadgeText")
+        badge_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        badge_label.setFont(make_font(11, 700))
+        badge_layout.addWidget(badge_label)
+        heading = QLabel(title)
+        heading.setWordWrap(True)
+        self._allow_shrink(heading)
+        heading.setFont(make_font(13.5, 700))
+        header.addWidget(badge_frame)
+        header.addWidget(heading, 1)
+        layout.addLayout(header)
+        return card, layout
+
+    def _boundary_column(
+        self,
+        heading_text: str,
+        frame_object_name: str,
+        heading_object_name: str,
+        items: Sequence[str],
+        *,
+        prefix: str,
+    ) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName(frame_object_name)
+        self._allow_shrink(frame)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(4)
+        heading = QLabel(heading_text)
+        heading.setObjectName(heading_object_name)
+        heading.setFont(make_font(10.5, 700, spacing=0.8))
+        layout.addWidget(heading)
+        for item in items:
+            row = QLabel(f"{prefix}  {item}")
+            row.setWordWrap(True)
+            self._allow_shrink(row)
+            row.setFont(make_font(11, 400))
+            layout.addWidget(row)
+        return frame
+
+    # ------------------------------------------------------------------
+    # Chapter 1 -- Why MYELIN Exists / Purpose & Introduction
+    # ------------------------------------------------------------------
+
+    def _build_chapter_one(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(16)
+
+        layout.addWidget(self._build_chapter_one_hero())
+        layout.addWidget(self._build_chapter_one_flow())
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(14)
+        cards = (
+            self._card_what_is_myelin(),
+            self._card_problem(),
+            self._card_screen_time(),
+            self._card_return_matters(),
+            self._card_effort_hypothesis(),
+            self._card_hci_view(),
+            self._card_neural_view(),
+            self._card_measurement_boundary(),
+            self._card_why_science_lab(),
+        )
+        for index, card in enumerate(cards):
+            grid.addWidget(card, index // 2, index % 2)
+        layout.addLayout(grid)
+
+        layout.addWidget(self._card_central_question())
+        layout.addWidget(self._build_chapter_one_evidence_section())
+        layout.addWidget(self._build_chapter_one_closing())
+
+        return page
+
+    def _build_chapter_one_hero(self) -> QFrame:
+        hero = QFrame()
+        hero.setObjectName("card")
+        self._allow_shrink(hero)
+        layout = QVBoxLayout(hero)
+        layout.setContentsMargins(26, 24, 26, 24)
+        layout.setSpacing(6)
+
+        eyebrow = QLabel("CHAPTER 1")
+        eyebrow.setProperty("role", "cyan")
+        eyebrow.setFont(make_font(11, 700, spacing=1.6))
+        layout.addWidget(eyebrow)
+
+        title = QLabel("WHY MYELIN EXISTS")
+        title.setFont(make_font(26, 800, spacing=0.6))
+        title.setWordWrap(True)
+        self._allow_shrink(title)
+        layout.addWidget(title)
+
+        subtitle = QLabel("Purpose & Introduction")
+        subtitle.setProperty("role", "muted")
+        subtitle.setFont(make_font(14, 500))
+        layout.addWidget(subtitle)
+        layout.addSpacing(4)
+
+        definition = self._paragraph(
+            "MYELIN is a behavioural research and productivity system that "
+            "observes how a person works, becomes distracted, and returns "
+            "to an intended task.",
+            size=13.5,
+        )
+        layout.addWidget(definition)
+
+        anchor = self._paragraph(
+            "MYELIN was built not simply to measure how long a person "
+            "becomes distracted, but to study what happens to an intended "
+            "task when attention leaves it, where behaviour goes, how long "
+            "it remains away, and how successfully the person returns.",
+            role="muted",
+        )
+        layout.addWidget(anchor)
+
+        return hero
+
+    def _build_chapter_one_flow(self) -> QFrame:
+        wrap = QFrame()
+        wrap.setObjectName("card")
+        self._allow_shrink(wrap)
+        outer = QVBoxLayout(wrap)
+        outer.setContentsMargins(20, 18, 20, 18)
+        outer.setSpacing(8)
+
+        heading = QLabel("THE CENTRAL BEHAVIOURAL FLOW")
+        heading.setProperty("role", "cyan")
+        heading.setFont(make_font(10.5, 700, spacing=1.4))
+        outer.addWidget(heading)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        nodes = (
+            ("Intent", "A person intends to work."),
+            ("Drift", "Behaviour moves away from the intended task."),
+            ("Absorption", "Another activity becomes the active context."),
+            ("Return", "The person comes back to the task."),
+            ("Re-engagement", "The task becomes stable enough to guide behaviour again."),
+        )
+        for index, (title, description) in enumerate(nodes):
+            if index:
+                arrow = QLabel("→")
+                arrow.setProperty("role", "muted")
+                arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                row.addWidget(arrow)
+            row.addWidget(self._flow_node(title, description), 1)
+        outer.addLayout(row)
+        return wrap
+
+    def _card_what_is_myelin(self) -> QFrame:
+        card, layout = self._content_card("01", "What is MYELIN?")
+        layout.addWidget(self._paragraph(
+            "MYELIN studies the behavioural sequence around focus, "
+            "distraction, return, and recovery: what a person was doing "
+            "before a distraction, how long the detour lasted, whether the "
+            "person returned, and whether that return was sustained."
+        ))
+        layout.addWidget(self._paragraph(
+            "A screen-time counter may say Instagram = 14 minutes. MYELIN "
+            "asks what happened to the intended task around those 14 "
+            "minutes.",
+            role="muted",
+        ))
+        return card
+
+    def _card_problem(self) -> QFrame:
+        card, layout = self._content_card("02", "What problem is MYELIN solving?")
+        layout.addWidget(self._paragraph(
+            "A person may genuinely intend to work, drift away, stay away "
+            "for some time, and return in a state that is not equal to the "
+            "state before the interruption."
+        ))
+        layout.addWidget(self._paragraph(
+            "MYELIN is interested in the boundary between intention, "
+            "behavioural divergence, distraction, return, and recovery.",
+            role="muted",
+        ))
+        return card
+
+    def _card_screen_time(self) -> QFrame:
+        card, layout = self._content_card("03", "Why is screen time not enough?")
+        layout.addWidget(self._paragraph(
+            "Screen time shows where time went. MYELIN studies what "
+            "happened to the intended task before, during, and after the "
+            "distraction."
+        ))
+        layout.addWidget(self._paragraph(
+            "Distraction time is not necessarily equal to distraction cost.",
+            role="muted",
+        ))
+        return card
+
+    def _card_return_matters(self) -> QFrame:
+        card, layout = self._content_card("04", "Why does return matter?")
+        layout.addWidget(self._paragraph(
+            "Returning to the task is not always the same as successfully "
+            "re-engaging with the task."
+        ))
+        flow = self._paragraph(
+            "Initial focus block → Distraction → Return → Post-return focus",
+            role="muted",
+            size=11.5,
+        )
+        layout.addWidget(flow)
+        layout.addWidget(self._paragraph(
+            "Return is the person coming back to the task context. "
+            "Re-engagement is the task becoming behaviourally stable again.",
+            role="muted",
+        ))
+        return card
+
+    def _card_effort_hypothesis(self) -> QFrame:
+        card, layout = self._content_card("05", "MYELIN Re-engagement Effort Hypothesis")
+
+        box = QFrame()
+        box.setObjectName("chapterEquationBox")
+        box_layout = QVBoxLayout(box)
+        box_layout.setContentsMargins(14, 12, 14, 12)
+        equation = QLabel("E<sub>return</sub> = E<sub>0</sub> + kF")
+        equation.setTextFormat(Qt.TextFormat.RichText)
+        equation.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        equation.setFont(make_font(17, 700))
+        box_layout.addWidget(equation)
+        layout.addWidget(box)
+
+        layout.addWidget(self._paragraph(
+            "As behavioural friction increases, the effort required to "
+            "regain stable task engagement may increase.",
+            role="muted",
+        ))
+        disclaimer = QLabel("Conceptual MYELIN hypothesis — not a proven biological law.")
+        disclaimer.setObjectName("chapterEquationDisclaimer")
+        disclaimer.setWordWrap(True)
+        self._allow_shrink(disclaimer)
+        disclaimer.setFont(make_font(10.5, 600, italic=True))
+        layout.addWidget(disclaimer)
+        return card
+
+    def _card_hci_view(self) -> QFrame:
+        card, layout = self._content_card("06", "HCI View")
+        layout.addWidget(self._paragraph(
+            "Human–Computer Interaction studies the relationship "
+            "between the person, their intention, the interface, and their "
+            "behaviour."
+        ))
+        layout.addWidget(self._bullet_list((
+            "person + intention + interface + behaviour",
+            "interruption and task switching",
+            "context-aware support",
+            "user autonomy",
+        )))
+        return card
+
+    def _card_neural_view(self) -> QFrame:
+        card, layout = self._content_card("07", "Neural Engineering View")
+        layout.addWidget(self._paragraph(
+            "MYELIN currently operates mainly on the behavioural side of "
+            "the human–technology relationship."
+        ))
+        layout.addWidget(self._bullet_list((
+            "measurable behaviour",
+            "possible cognitive mechanisms",
+            "re-engagement difficulty",
+            "behaviour first, biology interpreted carefully",
+        )))
+        return card
+
+    def _card_measurement_boundary(self) -> QFrame:
+        card, layout = self._content_card("08", "What can MYELIN measure?")
+        columns = QHBoxLayout()
+        columns.setSpacing(10)
+        columns.addWidget(self._boundary_column(
+            "CAN OBSERVE",
+            "chapterBoundaryCan",
+            "chapterBoundaryHeadingCan",
+            (
+                "task-aligned time",
+                "off-task dwell",
+                "application transitions",
+                "return latency",
+                "verified return",
+                "relapse",
+                "post-return persistence",
+            ),
+            prefix="✓",
+        ))
+        columns.addWidget(self._boundary_column(
+            "CANNOT CLAIM DIRECTLY",
+            "chapterBoundaryCannot",
+            "chapterBoundaryHeadingCannot",
+            (
+                "dopamine level",
+                "brain activity",
+                "motivation",
+                "boredom",
+                "stress",
+                "fatigue",
+            ),
+            prefix="✕",
+        ))
+        layout.addLayout(columns)
+        return card
+
+    def _card_why_science_lab(self) -> QFrame:
+        card, layout = self._content_card("09", "Why does Science Lab exist?")
+        layout.addWidget(self._paragraph(
+            "Science Lab is MYELIN's silent evidence layer. It watches "
+            "behaviour, records evidence, and helps reconstruct what "
+            "happened in research detail."
+        ))
+        principle = QLabel("Watchman first. Scientist second.")
+        principle.setProperty("role", "cyan")
+        principle.setFont(make_font(11.5, 700))
+        layout.addWidget(principle)
+        return card
+
+    def _card_central_question(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("chapterCentralQuestion")
+        self._allow_shrink(frame)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(8)
+        eyebrow = QLabel("10 · CENTRAL RESEARCH QUESTION")
+        eyebrow.setProperty("role", "cyan")
+        eyebrow.setFont(make_font(11, 700, spacing=1.2))
+        layout.addWidget(eyebrow)
+        question = QLabel(
+            "How does a person maintain, lose, and recover alignment with "
+            "an intended task while interacting with a dynamic digital "
+            "environment?"
+        )
+        question.setWordWrap(True)
+        self._allow_shrink(question)
+        question.setFont(make_font(16, 700))
+        layout.addWidget(question)
+        return frame
+
+    def _build_chapter_one_evidence_section(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("card")
+        self._allow_shrink(frame)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(10)
+
+        heading = QLabel("WHAT DOES SCIENCE ALREADY TELL US?")
+        heading.setProperty("role", "cyan")
+        heading.setFont(make_font(12, 700, spacing=1.2))
+        layout.addWidget(heading)
+
+        evidence = (
+            ("Sustained attention", "Focus is not perfectly stable. Research shows that sustained attention can fluctuate even while a person continues the same task."),
+            ("Drift", "Attention can leave the current task in different ways. Internal mind-wandering and external distraction should not be treated as the same neural event."),
+            ("Absorption", "Another activity can become the active behavioural context. Reward, salience, rapid context changes, and low-friction continuation may contribute to sustained engagement."),
+            ("Return", "Closing the competing activity does not guarantee immediate restoration of the previous working context."),
+            ("Re-engagement", "Returning may be followed by a shorter or less stable focus period. MYELIN can observe the behavioural pattern, but it cannot automatically determine why it happened."),
+        )
+        for title, body in evidence:
+            row_title = QLabel(title)
+            row_title.setFont(make_font(12, 700))
+            row_body = self._paragraph(body, role="muted", size=11.5)
+            layout.addWidget(row_title)
+            layout.addWidget(row_body)
+
+        roots_heading = QLabel("SCIENTIFIC ROOTS")
+        roots_heading.setProperty("role", "cyan")
+        roots_heading.setFont(make_font(12, 700, spacing=1.2))
+        layout.addWidget(roots_heading)
+
+        roots_row = QHBoxLayout()
+        roots_row.setSpacing(8)
+        roots = (
+            ("Ebbinghaus", "Time-dependent decay as mathematical inspiration."),
+            ("Weber / Fechner", "Psychophysical scaling as inspiration for intervention salience."),
+            ("Gloria Mark", "Real-world interruption and work-resumption research."),
+            ("JITAI", "Adaptive support based on changing context and receptivity."),
+        )
+        for title, body in roots:
+            roots_row.addWidget(self._flow_node(title, body), 1)
+        layout.addLayout(roots_row)
+
+        rule = self._paragraph(
+            "MYELIN measures behaviour. Science helps interpret possible "
+            "mechanisms. The two must not be confused.",
+            role="muted",
+        )
+        layout.addWidget(rule)
+
+        return frame
+
+    def _build_chapter_one_closing(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("card")
+        self._allow_shrink(frame)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(10)
+
+        closing = self._paragraph(
+            "MYELIN does not need to read the brain to study the "
+            "behavioural structure around attention. It can observe where "
+            "activity goes, how long it remains away from an intended "
+            "task, and how successfully behaviour returns. Science Lab "
+            "exists to preserve that evidence and examine it with the "
+            "caution expected in research."
+        )
+        layout.addWidget(closing)
+
+        next_row = QLabel("NEXT: Chapter 2 — Parts of MYELIN · Coming Soon")
+        next_row.setProperty("role", "cyan")
+        next_row.setFont(make_font(11.5, 700))
+        layout.addWidget(next_row)
+
+        footer = self._paragraph(
+            "Chapter 1 defines the problem, the evidence boundary, and the "
+            "purpose of Science Lab.",
+            role="muted",
+            size=10.5,
+        )
+        layout.addWidget(footer)
+
+        return frame
+
+    # ------------------------------------------------------------------
+    # Coming Soon / Reserved templates (Chapters 2, 3, 5, 6, and 4)
+    # ------------------------------------------------------------------
+
+    def _build_coming_soon_page(
+        self,
+        chapter_label: str,
+        title: str,
+        body_text: str,
+        secondary_text: str = "",
+    ) -> QWidget:
+        page = QWidget()
+        page.setObjectName("comingSoonPage")
+        outer = QVBoxLayout(page)
+        outer.addStretch(1)
+
+        card = QFrame()
+        card.setObjectName("comingSoonCard")
+        card.setMinimumWidth(0)
+        card.setMaximumWidth(560)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(38, 34, 38, 34)
+        card_layout.setSpacing(8)
+
+        eyebrow = QLabel(chapter_label)
+        eyebrow.setProperty("role", "cyan")
+        eyebrow.setFont(make_font(11, 700, spacing=1.4))
+        eyebrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(eyebrow)
+
+        heading = QLabel(title)
+        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        heading.setWordWrap(True)
+        self._allow_shrink(heading)
+        heading.setFont(make_font(20, 800, spacing=1.0))
+        card_layout.addWidget(heading)
+        card_layout.addSpacing(10)
+
+        badge_row = QHBoxLayout()
+        badge_row.addStretch(1)
+        badge = QLabel("COMING SOON")
+        badge.setObjectName("comingSoonPageBadge")
+        badge.setFont(make_font(10, 700, spacing=1.6))
+        badge_row.addWidget(badge)
+        badge_row.addStretch(1)
+        card_layout.addLayout(badge_row)
+        card_layout.addSpacing(14)
+
+        body = self._paragraph(body_text, role="muted", size=12.5)
+        body.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(body)
+
+        if secondary_text:
+            secondary = self._paragraph(secondary_text, role="muted", size=11.5)
+            secondary.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            card_layout.addWidget(secondary)
+
+        centre = QHBoxLayout()
+        centre.addStretch(1)
+        centre.addWidget(card)
+        centre.addStretch(1)
+        outer.addLayout(centre)
+        outer.addStretch(1)
+        return page
+
+    def _build_reserved_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("comingSoonPage")
+        outer = QVBoxLayout(page)
+        outer.addStretch(1)
+
+        card = QFrame()
+        card.setObjectName("comingSoonCard")
+        card.setMinimumWidth(0)
+        card.setMaximumWidth(560)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(38, 34, 38, 34)
+        card_layout.setSpacing(8)
+
+        eyebrow = QLabel("CHAPTER 4")
+        eyebrow.setProperty("role", "muted")
+        eyebrow.setFont(make_font(11, 700, spacing=1.4))
+        eyebrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(eyebrow)
+
+        lock = QLabel("\U0001f512")
+        lock.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lock.setFont(make_font(24, 400))
+        card_layout.addWidget(lock)
+
+        heading = QLabel("SENSEHUB / MYELIN EDGE")
+        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        heading.setWordWrap(True)
+        self._allow_shrink(heading)
+        heading.setFont(make_font(18, 800, spacing=1.0))
+        card_layout.addWidget(heading)
+        card_layout.addSpacing(10)
+
+        badge_row = QHBoxLayout()
+        badge_row.addStretch(1)
+        badge = QLabel("RESERVED")
+        badge.setObjectName("chapterReservedBadge")
+        badge.setFont(make_font(10, 700, spacing=1.6))
+        badge_row.addWidget(badge)
+        badge_row.addStretch(1)
+        card_layout.addLayout(badge_row)
+        card_layout.addSpacing(14)
+
+        body = self._paragraph(
+            "This chapter is reserved for future hardware and "
+            "physiological evidence.",
+            role="muted",
+            size=12.5,
+        )
+        body.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(body)
+
+        note = self._paragraph(
+            "No physiological data is simulated in the current Science Lab "
+            "version.",
+            role="muted",
+            size=11,
+        )
+        note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(note)
+
+        centre = QHBoxLayout()
+        centre.addStretch(1)
+        centre.addWidget(card)
+        centre.addStretch(1)
+        outer.addLayout(centre)
+        outer.addStretch(1)
+        return page
+
+    # ------------------------------------------------------------------
+    # Live evidence wiring (kept current, hidden by default -- spec 91)
+    # ------------------------------------------------------------------
+
+    def render_projection(self, projection: object) -> None:
+        super().render_projection(projection)
+        available = bool(_field(projection, "available", False))
+        self.status.setText("ONLINE" if available else "NO EVIDENCE")
+        limitation = _safe_text(
+            _field(projection, "scientific_evidence_limitation"),
+            "No scientific evidence statement supplied",
+            1_500,
+        )
+        self.limitation.setText(f"Scientific evidence limitation: {limitation}")
+        if not available:
+            _replace_rows(self.metrics, ())
+            return
+
+        rows = []
+        for metric in tuple(_field(projection, "metrics", ()) or ()):
+            exclusions = _field(metric, "exclusions", ()) or ()
+            note = _field(metric, "na_reason") or "; ".join(map(str, exclusions))
+            rows.append(
+                (
+                    _field(metric, "metric_name"),
+                    f"{_display_number(_field(metric, 'value'))} {_safe_text(_field(metric, 'unit'), '')}".strip(),
+                    _field(metric, "formula"),
+                    _field(metric, "evidence_population"),
+                    note,
+                )
+            )
+        _replace_rows(self.metrics, rows)
+
+
+class LiveMirlPage(DashboardPage):
+    """Live MIRL displays stored episode and event projections unchanged."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(
+            "LIVE MIRL",
+            "Recorded intervention journeys and recovery evidence",
+            parent,
+        )
+        self.episodes = _table(("Episode", "Status", "Outcome", "Started", "Attempts", "Relapses"))
+        self.events = _table(("Sequence", "Time", "Event", "Class", "Reference"))
+        self.body.addWidget(self.episodes)
+        self.body.addWidget(self.events)
+        self.body.addStretch(1)
+
+    def render_projection(self, projection: object) -> None:
+        super().render_projection(projection)
+        presentation_timezone = str(
+            _field(projection, "presentation_timezone", "local") or "local"
+        )
+        available = bool(_field(projection, "available", False))
+        active = tuple(_field(projection, "active_episodes", ()) or ())
+        closed = tuple(_field(projection, "recently_closed_episodes", ()) or ())
+        self.status.setText("EPISODE ACTIVE" if active else ("ONLINE" if available else "NO EVIDENCE"))
+        metadata = _field(projection, "metadata")
+        self._replace_cards(
+            (
+                ("Active episodes", _display_number(len(active)), "Count of supplied active rows"),
+                ("Recently closed", _display_number(len(closed)), "Count of supplied recent rows"),
+                ("Evidence exclusions", _display_number(_field(metadata, "exclusion_count")), "Authoritative exclusions"),
+            )
+        )
+        episode_rows = []
+        for episode in (*active, *closed):
+            episode_rows.append(
+                (
+                    _field(episode, "short_display_id", _field(episode, "episode_id")),
+                    _field(episode, "episode_status"),
+                    _field(episode, "final_outcome", "IN PROGRESS"),
+                    _display_projected_timestamp(
+                        _field(episode, "started_at"), presentation_timezone
+                    ),
+                    _field(episode, "recovery_attempt_count"),
+                    _field(episode, "relapse_count"),
+                )
+            )
+        _replace_rows(self.episodes, episode_rows)
+
+        focus = active[0] if active else (closed[0] if closed else None)
+        timeline_rows = []
+        for event in tuple(_field(focus, "timeline", ()) or ()):
+            timeline_rows.append(
+                (
+                    _field(event, "episode_seq"),
+                    _display_projected_timestamp(
+                        _field(event, "occurred_at"), presentation_timezone
+                    ),
+                    _field(event, "event_name"),
+                    _field(event, "observed_or_derived"),
+                    _field(event, "reference", _field(event, "reason_or_outcome_code")),
+                )
+            )
+        _replace_rows(self.events, timeline_rows)
+
+
+class CosinePage(DashboardPage):
+    """COSINE displays its independent, authoritative analysis snapshot."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(
+            "COSINE — STREAMING OVERVIEW",
+            "Choice-Oriented Streaming Insight and Navigation Engine",
+            parent,
+        )
+        self.platforms = _table(("Platform", "Check-ins", "Returned", "Finished", "Continued", "Foreground"))
+        self.events = _table(("Time", "Platform", "Event", "Content"))
+        self.body.addWidget(self.platforms)
+        self.body.addWidget(self.events)
+        self.body.addStretch(1)
+
+    def render_projection(self, projection: object) -> None:
+        super().render_projection(projection)
+        quality = _field(projection, "data_quality")
+        available = bool(_field(quality, "available", False))
+        current = _field(projection, "current")
+        overview = _field(projection, "overview")
+        self.status.setText(_safe_text(_field(current, "status_label"), "ONLINE" if available else "NO EVIDENCE"))
+        self._replace_cards(
+            (
+                ("Streaming check-ins", _display_number(_field(overview, "streaming_checkins")), "Displayed check-ins"),
+                ("Returned to focus", _display_number(_field(overview, "returned_to_focus")), "Confirmed COSINE outcomes"),
+                ("Chose to finish", _display_number(_field(overview, "chose_to_finish")), "Confirmed choice"),
+                ("Continued watching", _display_number(_field(overview, "continued_watching")), "Confirmed or timed-out outcome"),
+                ("Usual return time", _display_seconds(_field(overview, "usual_return_time_seconds")), "Prepared COSINE statistic"),
+                ("Current platform", _safe_text(_field(current, "platform_display_name")), _safe_text(_field(current, "content_title"))),
+            )
+        )
+        platform_rows = []
+        for platform in tuple(_field(projection, "platform_summaries", ()) or ())[:3]:
+            platform_rows.append(
+                (
+                    _field(platform, "display_name"),
+                    _field(platform, "displayed_checkins"),
+                    _field(platform, "returned_to_focus"),
+                    _field(platform, "chose_to_finish"),
+                    _field(platform, "continued_watching"),
+                    _display_seconds(_field(platform, "active_foreground_ott_seconds")),
+                )
+            )
+        _replace_rows(self.platforms, platform_rows)
+
+        event_rows = []
+        for event in tuple(_field(projection, "latest_events", ()) or ()):
+            event_rows.append(
+                (
+                    _field(event, "occurred_at_utc"),
+                    _field(event, "platform_display_name"),
+                    _field(event, "event_key"),
+                    _field(event, "text"),
+                )
+            )
+        _replace_rows(self.events, event_rows)
+
+
+class AnalyticsSheetDialog(QDialog):
+    """User-facing report selection surface; it calculates no evidence."""
+
+    export_requested = pyqtSignal(object)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("analyticsSheetDialog")
+        self.setWindowTitle("MYELIN Analytics Sheet")
+        self.setModal(False)
+        self.resize(620, 620)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(28, 26, 28, 26)
+        root.setSpacing(16)
+        title = QLabel("ANALYTICS SHEET")
+        title.setObjectName("analyticsPageTitle")
+        description = QLabel(
+            "Choose which authoritative dashboard projections should appear "
+            "in the exported sheet."
+        )
+        description.setObjectName("analyticsPageSubtitle")
+        description.setWordWrap(True)
+        root.addWidget(title)
+        root.addWidget(description)
+
+        dates = QGridLayout()
+        dates.addWidget(QLabel("FROM"), 0, 0)
+        dates.addWidget(QLabel("TO"), 0, 1)
+        self.start_date = QDateEdit(QDate.currentDate().addMonths(-1))
+        self.end_date = QDateEdit(QDate.currentDate())
+        for editor in (self.start_date, self.end_date):
+            editor.setCalendarPopup(True)
+            editor.setDisplayFormat("dd MMM yyyy")
+        dates.addWidget(self.start_date, 1, 0)
+        dates.addWidget(self.end_date, 1, 1)
+        root.addLayout(dates)
+
+        self.sections = {
+            PAGE_METRIC_HUB: QCheckBox("Metric Hub"),
+            PAGE_SCIENCE_LAB: QCheckBox("Science Lab"),
+            PAGE_LIVE_MIRL: QCheckBox("Live MIRL"),
+            PAGE_COSINE: QCheckBox("COSINE"),
+        }
+        for checkbox in self.sections.values():
+            checkbox.setChecked(True)
+            root.addWidget(checkbox)
+
+        self.message = QLabel("Ready")
+        self.message.setObjectName("analyticsEvidenceNote")
+        self.message.setWordWrap(True)
+        root.addWidget(self.message)
+        root.addStretch(1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        self.export_button = buttons.addButton(
+            "EXPORT PDF",
+            QDialogButtonBox.ButtonRole.AcceptRole,
+        )
+        buttons.rejected.connect(self.close)
+        self.export_button.clicked.connect(self._request_export)
+        root.addWidget(buttons)
+
+    def set_busy(self, busy: bool) -> None:
+        self.export_button.setEnabled(not busy)
+        self.message.setText("Preparing authoritative report…" if busy else "Ready")
+
+    def show_error(self, message: str) -> None:
+        self.set_busy(False)
+        self.message.setText(_safe_text(message, "Export unavailable"))
+
+    def show_success(self, path: str) -> None:
+        self.set_busy(False)
+        self.message.setText(f"Saved: {_safe_text(path)}")
+
+    def _request_export(self) -> None:
+        start = self.start_date.date().toPyDate()
+        end = self.end_date.date().toPyDate()
+        if start > end:
+            self.show_error("The From date must not be later than the To date.")
+            return
+        request = AnalyticsSheetRequest(
+            range_start=start,
+            range_end=end,
+            include_metric_hub=self.sections[PAGE_METRIC_HUB].isChecked(),
+            include_science_lab=self.sections[PAGE_SCIENCE_LAB].isChecked(),
+            include_live_mirl=self.sections[PAGE_LIVE_MIRL].isChecked(),
+            include_cosine=self.sections[PAGE_COSINE].isChecked(),
+        )
+        if not request.selected_sections():
+            self.show_error("Select at least one analytics section.")
+            return
+        self.export_requested.emit(request)
+
+
+class _AnalyticsExport(QObject):
+    """One guarded background export; the reporting owner does the work."""
+
+    succeeded = pyqtSignal(str)
+    failed = pyqtSignal(str)
+    busy_changed = pyqtSignal(bool)
+
+    def __init__(
+        self,
+        report_access,
+        exporter: Callable[[object, AnalyticsSheetRequest], str],
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._report_access = report_access
+        self._exporter = exporter
+        self._snapshot = None
+        self._busy = False
+        self._closed = False
+        # The worker is retained so shutdown can join it (C12-C).  An export
+        # discarded its thread entirely, which made a bounded wait impossible.
+        self._worker: threading.Thread | None = None
+        self._results: queue.Queue = queue.Queue(maxsize=1)
+        self._poll = QTimer(self)
+        self._poll.setInterval(POLL_INTERVAL_MS)
+        self._poll.timeout.connect(self._take_result)
+
+    def set_snapshot(self, snapshot: object) -> None:
+        self._snapshot = snapshot
+
+    def begin(self, request: AnalyticsSheetRequest) -> bool:
+        if self._closed or self._busy:
+            return False
+        if self._snapshot is None:
+            self.failed.emit("Refresh analytics before exporting.")
+            return False
+        refusal = self._report_access.refusal()
+        if refusal is not None:
+            self.failed.emit(_safe_text(_field(refusal, "message", refusal)))
+            return False
+        try:
+            lease = self._report_access.begin_export("Analytics Sheet")
+        except Exception as error:
+            self.failed.emit(_bounded_error(error))
+            return False
+
+        snapshot = self._snapshot
+        self._busy = True
+        self.busy_changed.emit(True)
+
+        def export() -> None:
+            try:
+                path = self._exporter(snapshot, request)
+            except Exception as error:
+                result = (None, _bounded_error(error))
+            else:
+                result = (_safe_text(path), None)
+            finally:
+                try:
+                    lease.release()
+                except Exception:
+                    pass
+            _publish_latest(self._results, result)
+
+        self._worker = threading.Thread(
+            target=export,
+            name="MyelinAnalyticsExport",
+            daemon=True,
+        )
+        self._worker.start()
+        self._poll.start()
+        return True
+
+    def shutdown(
+        self,
+        *,
+        timeout: float = ANALYTICS_SHUTDOWN_TIMEOUT_SECONDS,
+    ) -> bool:
+        """Reject new exports, stop delivery, then wait BOUNDED for the writer.
+
+        Returns whether the accepted export actually finished.
+        """
+
+        self._closed = True
+        self._poll.stop()
+        worker = self._worker
+        if worker is None or not worker.is_alive():
+            self._worker = None
+            return True
+        worker.join(max(0.0, float(timeout)))
+        if worker.is_alive():
+            return False
+        self._worker = None
+        return True
+
+    def _take_result(self) -> None:
+        if self._closed:
+            self._poll.stop()
+            return
+        try:
+            path, error = self._results.get_nowait()
+        except queue.Empty:
+            return
+        self._poll.stop()
+        self._busy = False
+        self.busy_changed.emit(False)
+        if error is not None:
+            self.failed.emit(error)
+        else:
+            self.succeeded.emit(path)
+
+
+class AnalyticsController(QObject):
+    """Compose all analytics surfaces around one read-only refresh lane."""
+
+    today_session_health_ready = pyqtSignal(object)
+    today_session_health_failed = pyqtSignal(str)
+
+    def __init__(
+        self,
+        *,
+        report_access,
+        red_guard,
+        timezone_key_provider: Callable[[], str] | None = None,
+        snapshot_provider: Callable[[], object] | None = None,
+        export_provider: Callable[[object, AnalyticsSheetRequest], str] | None = None,
+        today_health_provider: Callable[[], object] | None = None,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._report_access = report_access
+        self._red_guard = red_guard
+        self._closed = False
+        self._bundle = None
+        self._pages: dict[str, DashboardPage] = {}
+        self._composer: AnalyticsSheetDialog | None = None
+        self._timezone_key_provider = timezone_key_provider or (lambda: "local")
+
+        self._refresh = SharedDashboardRefresh(
+            snapshot_provider
+            or (
+                lambda: _default_snapshot_provider(
+                    self._timezone_key_provider()
+                )
+            ),
+            parent=self,
+        )
+        self._refresh.bundle_ready.connect(self._deliver_bundle)
+        self._refresh.refresh_failed.connect(self._refresh_failed)
+        self._refresh.refreshing_changed.connect(self._refreshing_changed)
+
+        # A second, independent read lane. Today Health is not part of the
+        # frozen ControlStationAnalyticsSnapshot bundle and must not share
+        # that bundle's generation/coalescing with the four dashboard pages.
+        self._today_health_refresh = SharedDashboardRefresh(
+            today_health_provider
+            or (
+                lambda: _default_today_session_health_provider(
+                    self._timezone_key_provider()
+                )
+            ),
+            parent=self,
+        )
+        self._today_health_refresh.bundle_ready.connect(
+            self.today_session_health_ready.emit
+        )
+        self._today_health_refresh.refresh_failed.connect(
+            self.today_session_health_failed.emit
+        )
+
+        self._export = _AnalyticsExport(
+            report_access,
+            export_provider or _default_export_provider,
+            parent=self,
+        )
+
+    def create_metric_hub_page(self) -> MetricHubPage:
+        return self._create_page(PAGE_METRIC_HUB, MetricHubPage)
+
+    def create_science_lab_page(self) -> ScienceLabPage:
+        return self._create_page(PAGE_SCIENCE_LAB, ScienceLabPage)
+
+    def create_live_mirl_page(self) -> LiveMirlPage:
+        return self._create_page(PAGE_LIVE_MIRL, LiveMirlPage)
+
+    def create_cosine_page(self) -> CosinePage:
+        return self._create_page(PAGE_COSINE, CosinePage)
+
+    def create_mine_page(self, page_type):
+        """Register the frozen MINE page on the shared projection lane.
+
+        The concrete page remains launcher-owned until the separately
+        authorized visual wiring phase, avoiding a UI import cycle here.
+        """
+
+        return self._create_page(PAGE_MINE, page_type)
+
+    def page_opened(self, page_name: str) -> None:
+        """Refresh only when an analytics page or Control becomes visible."""
+
+        if page_name in PROJECTION_NAMES:
+            self._refresh.request_refresh()
+        if page_name == PAGE_CONTROL:
+            self.request_today_session_health_refresh()
+
+    def request_today_session_health_refresh(self) -> None:
+        """Ask for one fresh Today Health read; overlaps coalesce."""
+
+        if self._closed:
+            return
+        self._today_health_refresh.request_refresh()
+
+    def timezone_changed(self) -> None:
+        """Reproject both existing read lanes through the newest setting."""
+
+        if self._closed:
+            return
+        self._refresh.request_refresh()
+        self._today_health_refresh.request_refresh()
+
+    def engine_status_changed(self, status: object) -> None:
+        """Refresh Today Health on every engine lifecycle transition."""
+
+        del status
+        self.request_today_session_health_refresh()
+
+    def telemetry_received(self, event: object) -> None:
+        """Refresh Today Health only for the two factual admission signals.
+
+        ``kind`` tells this method to re-read; it never supplies the count
+        itself -- that truth always comes from persistence.
+        """
+
+        if _field(event, "kind") in TODAY_HEALTH_TELEMETRY_KINDS:
+            self.request_today_session_health_refresh()
+
+    def open_composer(self) -> bool:
+        """Open one Analytics Sheet surface after Red/report checks."""
+
+        if self._closed:
+            return False
+        if not self._red_guard.allow_surface(SurfaceKind.ANALYTICS_COMPOSER):
+            self._red_guard.restore_authoritative_surface()
+            return False
+        refusal = self._report_access.refusal()
+        if refusal is not None:
+            return False
+        if self._composer is None:
+            self._composer = AnalyticsSheetDialog(
+                parent=self.parent() if isinstance(self.parent(), QWidget) else None
+            )
+            self._composer.export_requested.connect(self._export.begin)
+            self._export.busy_changed.connect(self._composer.set_busy)
+            self._export.failed.connect(self._composer.show_error)
+            self._export.succeeded.connect(self._composer.show_success)
+        self._composer.show()
+        self._composer.raise_()
+        self._composer.activateWindow()
+        self._refresh.request_refresh()
+        return True
+
+    def shutdown(
+        self,
+        *,
+        timeout: float = ANALYTICS_SHUTDOWN_TIMEOUT_SECONDS,
+    ) -> bool:
+        """Stop delivery and bound-wait for accepted analytics workers.
+
+        Returns whether every accepted worker finished inside the budget.
+        Both lanes are always asked to stop even if the first one overruns, and
+        a repeat call still reports the current worker truth -- a shutdown that
+        returned ``False`` may be retried once the surface is really idle.
+        """
+
+        self._closed = True
+        budget = max(0.0, float(timeout))
+        drained = self._refresh.shutdown(timeout=budget)
+        drained = self._today_health_refresh.shutdown(timeout=budget) and drained
+        drained = self._export.shutdown(timeout=budget) and drained
+        if self._composer is not None:
+            self._composer.close()
+            self._composer.deleteLater()
+            self._composer = None
+        return drained
+
+    def _create_page(self, name: str, page_type):
+        existing = self._pages.get(name)
+        if existing is not None:
+            return existing
+        page = page_type()
+        page.refresh_requested.connect(self._refresh.request_refresh)
+        self._pages[name] = page
+        return page
+
+    def _deliver_bundle(self, bundle: object) -> None:
+        self._bundle = bundle
+        self._export.set_snapshot(bundle)
+        for page_name, page in self._pages.items():
+            projection = _projection(bundle, PROJECTION_NAMES[page_name])
+            if projection is not None:
+                page.render_projection(projection)
+            else:
+                page.show_refresh_failure()
+
+    def _refresh_failed(self, _message: str) -> None:
+        for page in self._pages.values():
+            page.show_refresh_failure()
+
+    def _refreshing_changed(self, refreshing: bool) -> None:
+        for page in self._pages.values():
+            page.set_refreshing(refreshing)

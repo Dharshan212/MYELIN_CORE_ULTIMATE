@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Final
 
-from PyQt6.QtCore import QDate, QObject, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QDate, QObject, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -57,6 +57,7 @@ from time_projection import (
     selected_civil_date,
     timezone_tag,
 )
+from SCIENCE_LAB.lab import ScienceLabWorkspace
 
 
 POLL_INTERVAL_MS: Final = 120
@@ -79,12 +80,21 @@ PAGE_COSINE: Final = "cosine"
 PAGE_MINE: Final = "mine"
 
 PROJECTION_NAMES: Final = {
-    PAGE_METRIC_HUB: "metric_hub",
-    PAGE_SCIENCE_LAB: "science_lab",
+    PAGE_METRIC_HUB: "lifetime_metric_hub",
+    # "legacy_evidence_summary", not "science_lab" (Phase C evidence audit):
+    # ControlStationAnalyticsSnapshot renamed this field to free "science_lab"
+    # for the SCIENCE_LAB/ organ's own future evidence -- this is still the
+    # same pre-existing MIRL-sourced formulas/evidence-scope projection that
+    # ScienceLabPage.render_projection's hidden legacy seam has always read.
+    PAGE_SCIENCE_LAB: "legacy_evidence_summary",
     PAGE_LIVE_MIRL: "live_mirl",
     PAGE_COSINE: "cosine",
     PAGE_MINE: "mine",
 }
+
+#: Science Lab's own chapter numbering/content now lives in
+#: SCIENCE_LAB.chapters (Phase B organ extraction); this module only hosts
+#: the workspace via SCIENCE_LAB.lab.ScienceLabWorkspace.
 
 #: Telemetry kinds that must trigger a Today Health re-read. ``trigger`` only
 #: fires after durable admission (CORE_ENGINE/monitor.py emits it post-COMMIT);
@@ -569,21 +579,37 @@ class MetricHubPage(DashboardPage):
 
 
 class ScienceLabPage(DashboardPage):
-    """Science Lab displays formulas, evidence scope and supplied values."""
+    """Thin Control Station host for the Science Lab organ.
+
+    All chapter navigation, the LAB CHAPTERS drawer, Chapter 1's
+    presentation, and the Coming Soon / Reserved pages now live in
+    ``SCIENCE_LAB.lab.ScienceLabWorkspace`` (Phase B organ extraction).
+    This host only wires that workspace into the generic DashboardPage
+    shell and preserves the render_projection / hidden-evidence-seam
+    contract that predates the chapter UI -- AnalyticsController's refresh
+    lane still targets this class exactly as before.
+    """
 
     def __init__(self, parent=None) -> None:
         super().__init__(
             "MYELIN SCIENCE LAB",
-            "Scientific presentation of committed behavioral evidence",
+            "Human Behaviour × Technology × Deeper Insights",
             parent,
         )
+        self.workspace = ScienceLabWorkspace(self)
+        self.body.addWidget(self.workspace, 1)
+
+        # Legacy evidence widgets: kept alive and kept current by
+        # render_projection below, but not part of the default chapter view
+        # (spec section 91 -- hide the legacy panel, never delete the seam).
         self.metrics = _table(("Metric", "Value", "Formula", "Population", "Limit / exclusion"))
-        self.body.addWidget(self.metrics)
+        self.metrics.setParent(self)
+        self.metrics.hide()
         self.limitation = QLabel("Scientific evidence limitation: —")
         self.limitation.setObjectName("analyticsEvidenceNote")
         self.limitation.setWordWrap(True)
-        self.body.addWidget(self.limitation)
-        self.body.addStretch(1)
+        self.limitation.setParent(self)
+        self.limitation.hide()
 
     def render_projection(self, projection: object) -> None:
         super().render_projection(projection)
@@ -596,23 +622,9 @@ class ScienceLabPage(DashboardPage):
         )
         self.limitation.setText(f"Scientific evidence limitation: {limitation}")
         if not available:
-            self._replace_cards(
-                (("Status", "NO DATA", _safe_text(_field(projection, "empty_state_reason"))),)
-            )
             _replace_rows(self.metrics, ())
             return
 
-        counts = _field(projection, "counts", {}) or {}
-        self._replace_cards(
-            (
-                ("Recovery attempts", _display_number(_field(projection, "recovery_attempt_count")), "Recorded attempts"),
-                ("Relapses", _display_number(_field(projection, "relapse_count")), "Recorded relapse evidence"),
-                ("Evidence exclusions", _display_number(_field(_field(projection, "metadata"), "exclusion_count")), "Explicitly withheld evidence"),
-                ("Native episodes", _display_number(_field(counts, "native_episode_count")), "Native population"),
-                ("Operational triggers", _display_number(_field(counts, "total_trigger_count")), "Operational population"),
-                ("Legacy observations", _display_number(_field(counts, "legacy_observation_count")), "Separate legacy population"),
-            )
-        )
         rows = []
         for metric in tuple(_field(projection, "metrics", ()) or ()):
             exclusions = _field(metric, "exclusions", ()) or ()
@@ -1069,13 +1081,14 @@ class AnalyticsController(QObject):
         self._today_health_refresh.request_refresh()
 
     def engine_status_changed(self, status: object) -> None:
-        """Refresh Today Health on every engine lifecycle transition."""
+        """Refresh committed lifetime/session facts on lifecycle transitions."""
 
         del status
+        self._refresh.request_refresh()
         self.request_today_session_health_refresh()
 
     def telemetry_received(self, event: object) -> None:
-        """Refresh Today Health only for the two factual admission signals.
+        """Refresh affected read models after durable admission signals.
 
         ``kind`` tells this method to re-read; it never supplies the count
         itself -- that truth always comes from persistence.
@@ -1083,6 +1096,21 @@ class AnalyticsController(QObject):
 
         if _field(event, "kind") in TODAY_HEALTH_TELEMETRY_KINDS:
             self.request_today_session_health_refresh()
+        kind = str(_field(event, "kind", "") or "")
+        if (
+            kind in {
+                "trigger",
+                "sine_fact",
+                "cosecant_fact",
+                "cosine_effect",
+                "mine_effect",
+            }
+            or kind.startswith("mirl_")
+        ):
+            # Monitor emits these only after the corresponding storage batch
+            # has been durably accepted. SharedDashboardRefresh coalesces a
+            # burst and performs the read off the Qt GUI thread.
+            self._refresh.request_refresh()
 
     def open_composer(self) -> bool:
         """Open one Analytics Sheet surface after Red/report checks."""
