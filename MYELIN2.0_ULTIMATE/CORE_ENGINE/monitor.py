@@ -41,7 +41,7 @@ import queue
 import sys
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final, Protocol, runtime_checkable
@@ -51,6 +51,7 @@ from ME.handover import HandoverLayer, HandoverResult
 
 
 DEFAULT_POLL_SECONDS: Final = 1.5
+STUDY_CONTINUITY_MAX_GAP_NS: Final = 5_000_000_000
 # The recovery-evidence semantic generation THIS monitor implementation knows
 # how to interpret for learning.
 #
@@ -96,6 +97,7 @@ SHUTDOWN_PERSISTENCE_TIMEOUT_SECONDS: Final = 8.0
 MAX_TELEMETRY_TEXT: Final = 500
 MAX_COMMANDS_PER_CYCLE: Final = 16
 NANOSECONDS_PER_SECOND: Final = 1_000_000_000
+STUDY_APP_CATEGORY_SCHEMA_VERSION: Final = "myelin-study-app-category-v1-prototype"
 MESSAGING_PROCESS_LABELS: Final = {
     "whatsapp": "WhatsApp",
     "discord": "Discord",
@@ -188,6 +190,9 @@ class PendingTriggerWorkflow:
     candidate: object
     receipt_id: str
     submitted_monotonic_ns: int
+    superseded_by_break_id: str = ""
+    superseded_monotonic_ns: int = 0
+    committed_seen_monotonic_ns: int = 0
 
 
 @runtime_checkable
@@ -203,7 +208,6 @@ class BrowserAuthority(Protocol):
 class ResourceIntentAuthority(Protocol):
     def start_session(self, *, profile_type: str) -> None: ...
 
-    def set_stage_one_target_seconds(self, target_seconds: float) -> bool: ...
 
     def observe(
         self,
@@ -215,7 +219,6 @@ class ResourceIntentAuthority(Protocol):
 
     def live_view(self) -> object: ...
 
-    def set_sine_episode_active(self, active: bool) -> None: ...
 
     def set_certified_ott_platform_key(self, platform_key: str) -> None: ...
 
@@ -324,13 +327,6 @@ class SineAuthority(Protocol):
 
     def advance(self, *, now_monotonic_ns: int) -> tuple[object, ...]: ...
 
-    def cancel_matching_study_episode(
-        self,
-        *,
-        study_context_token: str,
-        occurred_monotonic_ns: int,
-        completion_reason: str,
-    ) -> bool: ...
 
     def confirm_verified_return(
         self,
@@ -1037,6 +1033,307 @@ def _enum_text(value: object) -> str:
     return str(getattr(value, "value", value) or "").strip()
 
 
+def _study_app_category_metadata(
+    context: MonitorContext,
+    blacklist_result: object | None,
+    *,
+    session_id: object,
+) -> dict[str, object]:
+    """Project a display-only app category from one coherent monitor sample.
+
+    The projection is deliberately downstream of Resource Intent, Blacklist and
+    certified COSINE identity.  It never changes those authorities and fails
+    closed when their resource/session/observation identities do not agree.
+    Window-title text and prior telemetry rows are never consulted.
+    """
+
+    from CORE_ENGINE.blacklist import SurfaceClass
+    from CORE_ENGINE.resource_intent import (
+        IntentReason,
+        NORMAL_FOCUS_SURFACES,
+        ResourceSurface,
+        ResourceObservation,
+        build_observation,
+        observation_token as source_observation_token,
+    )
+
+    foreground = context.foreground
+    resource_snapshot = context.resource_intent
+    verdict = _field(resource_snapshot, "verdict")
+    resource_identity = _field(verdict, "resource_identity")
+
+    try:
+        parent_session_id = int(session_id)
+        observation_sequence = int(_field(foreground, "sequence", 0) or 0)
+        observed_monotonic_ns = int(
+            _field(foreground, "observed_monotonic_ns", 0) or 0
+        )
+        process_id = int(_field(foreground, "process_id", 0) or 0)
+        hwnd = int(_field(foreground, "hwnd", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        parent_session_id = 0
+        observation_sequence = 0
+        observed_monotonic_ns = 0
+        process_id = 0
+        hwnd = 0
+
+    process_name = str(_field(foreground, "process_name", "") or "").strip().casefold()
+    process_name = process_name.removesuffix(".exe")
+    resource_key = str(_field(resource_identity, "stable_key", "") or "")
+    study_context = str(_field(verdict, "study_context_token", "") or "")
+    observation_token = str(_field(verdict, "observation_token", "") or "")
+    canonical_process = str(_field(resource_identity, "process_name", "") or "")
+    source_observation = _field(resource_snapshot, "observation")
+    # Rejoin existing facts with the original identity authority. This does not
+    # sample foreground/browser or classify again and does not copy an alias map.
+    coherent_source = bool(
+        isinstance(source_observation, ResourceObservation)
+        and source_observation == build_observation(
+            foreground, context.browser_evidence,
+            cosine_owned=context.cosine_owned,
+            certified_ott_platform_key=str(
+                _field(_field(context, "cosine_platform"), "platform_key", "") or ""
+            ),
+        )
+        and source_observation_token(source_observation) == observation_token
+        and source_observation.process_name == canonical_process
+        and _field(resource_identity, "hwnd") == hwnd
+    )
+    surface = _field(resource_identity, "surface", ResourceSurface.UNKNOWN)
+    reasons = frozenset(_field(verdict, "positive_reason_codes", ()) or ()) | frozenset(
+        _field(verdict, "negative_reason_codes", ()) or ()
+    )
+
+    def result(
+        category: str = "",
+        label: str = "",
+        *,
+        source: str,
+        reason: str,
+        evidence_available: bool,
+    ) -> dict[str, object]:
+        return {
+            "schema_version": STUDY_APP_CATEGORY_SCHEMA_VERSION,
+            "session_id": parent_session_id,
+            "resource_key": resource_key,
+            "study_context_token": study_context,
+            "observation_token": observation_token,
+            "observation_sequence": observation_sequence,
+            "observed_monotonic_ns": observed_monotonic_ns,
+            "process_name": process_name,
+            "canonical_process_name": canonical_process,
+            "source_observation": source_observation if coherent_source else None,
+            "process_id": process_id,
+            "hwnd": hwnd,
+            "category": category,
+            "label": label,
+            "source": source,
+            "reason": reason,
+            "evidence_available": bool(evidence_available),
+        }
+
+    blacklist_verdict = _field(blacklist_result, "verdict")
+    blacklist_source = _field(blacklist_result, "source_identity")
+    try:
+        blacklist_sequence = int(
+            _field(blacklist_result, "observation_sequence", -1)
+        )
+        blacklist_process_id = int(_field(blacklist_source, "process_id", 0) or 0)
+        blacklist_hwnd = int(_field(blacklist_source, "hwnd", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        blacklist_sequence = -1
+        blacklist_process_id = 0
+        blacklist_hwnd = 0
+    blacklist_process = str(
+        _field(blacklist_source, "process_name", "") or ""
+    ).strip().casefold().removesuffix(".exe")
+    blacklist_resource_key = str(
+        _field(blacklist_result, "resource_key", "") or ""
+    )
+
+    identity_complete = bool(
+        coherent_source
+        and parent_session_id > 0
+        and observation_sequence > 0
+        and observed_monotonic_ns > 0
+        and process_id > 0
+        and hwnd > 0
+        and process_name
+        and resource_key
+        and observation_token
+        and bool(_field(resource_snapshot, "fresh", False))
+        and blacklist_result is not None
+        and blacklist_sequence == observation_sequence
+        and blacklist_resource_key == resource_key
+        and blacklist_process == process_name
+        and blacklist_process_id == process_id
+        and blacklist_hwnd == hwnd
+    )
+    if not identity_complete:
+        return result(
+            source="identity_guard",
+            reason="incomplete_or_mismatched_observation",
+            evidence_available=False,
+        )
+    if reasons.intersection(
+        {
+            IntentReason.STALE_OBSERVATION.value,
+            IntentReason.EMPTY_OBSERVATION.value,
+        }
+    ):
+        return result(
+            source="resource_intent",
+            reason="stale_or_empty_observation",
+            evidence_available=False,
+        )
+
+    active_study = bool(
+        context.study_owned
+        and study_context
+        and not reasons.intersection(
+            {
+                IntentReason.NO_ACTIVE_STUDY_BLOCK.value,
+                IntentReason.STUDY_PAUSED.value,
+                IntentReason.APPROVED_BREAK.value,
+            }
+        )
+    )
+    if active_study and _enum_text(_field(verdict, "classification", "")).upper() == "STUDY_ALIGNED":
+        return result(
+            "STUDY", "[STUDY]", source="resource_intent",
+            reason="current_study_alignment", evidence_available=True,
+        )
+
+    cosine_platform = _field(context, "cosine_platform")
+    if cosine_platform is not None:
+        cosine_process = str(
+            _field(cosine_platform, "process_name", "") or ""
+        ).strip().casefold().removesuffix(".exe")
+        try:
+            cosine_process_id = int(
+                _field(cosine_platform, "process_id", 0) or 0
+            )
+            cosine_hwnd = int(_field(cosine_platform, "hwnd", 0) or 0)
+            cosine_observed_ns = int(
+                _field(cosine_platform, "observed_monotonic_ns", 0) or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            cosine_process_id = 0
+            cosine_hwnd = 0
+            cosine_observed_ns = 0
+        cosine_matches = bool(
+            str(_field(cosine_platform, "platform_key", "") or "")
+            and cosine_process == process_name
+            and cosine_process_id == process_id
+            and cosine_hwnd == hwnd
+            and cosine_observed_ns == observed_monotonic_ns
+        )
+        if not cosine_matches:
+            return result(
+                source="cosine",
+                reason="certified_ott_identity_mismatch",
+                evidence_available=False,
+            )
+        return result(
+            "OTT",
+            "[OTT]",
+            source="cosine",
+            reason="certified_current_ott_platform",
+            evidence_available=True,
+        )
+
+    blacklist_surface = _field(blacklist_verdict, "surface_class")
+    if (
+        surface is ResourceSurface.MESSAGING
+        or blacklist_surface is SurfaceClass.MESSAGING
+    ):
+        return result(
+            "MESSAGING",
+            "[MESSAGING]",
+            source="resource_intent_blacklist",
+            reason="current_messaging_authority",
+            evidence_available=True,
+        )
+
+    managed_platform_key = str(
+        _field(blacklist_verdict, "platform_key", "") or ""
+    )
+    if managed_platform_key:
+        return result(
+            "SOCIAL",
+            "[SOCIAL]",
+            source="blacklist",
+            reason="current_managed_platform_identity",
+            evidence_available=True,
+        )
+
+    if surface in {
+        ResourceSurface.SOCIAL,
+        ResourceSurface.YOUTUBE_WATCH,
+        ResourceSurface.YOUTUBE_OTHER,
+        ResourceSurface.YOUTUBE_SHORTS,
+    }:
+        return result(
+            "SOCIAL",
+            "[SOCIAL]",
+            source="resource_intent",
+            reason="current_managed_social_surface",
+            evidence_available=True,
+        )
+    if surface is ResourceSurface.GAMING:
+        return result(
+            "GAMING",
+            "[GAMING]",
+            source="resource_intent",
+            reason="current_gaming_surface",
+            evidence_available=True,
+        )
+    if surface is ResourceSurface.COSINE:
+        return result(
+            source="resource_intent",
+            reason="ott_surface_without_matching_current_certification",
+            evidence_available=False,
+        )
+
+    if surface in NORMAL_FOCUS_SURFACES:
+        focus_web_certified = bool(
+            surface is not ResourceSurface.FOCUS_WEB
+            or _field(resource_identity, "browser_evidence_certified", False)
+        )
+        if active_study and focus_web_certified:
+            return result(
+                "STUDY_FOCUS",
+                "[STUDY FOCUS]",
+                source="resource_intent_focus_catalog",
+                reason="certified_focus_resource_during_active_study",
+                evidence_available=True,
+            )
+        return result(
+            source="resource_intent_focus_catalog",
+            reason="focus_resource_outside_active_certified_study",
+            evidence_available=False,
+        )
+
+    browser_snapshot = context.browser_evidence
+    if bool(_field(browser_snapshot, "supported_browser", False)) and (
+        IntentReason.BROWSER_EVIDENCE_UNAVAILABLE.value in reasons
+        or not bool(_field(resource_identity, "browser_evidence_certified", False))
+    ):
+        return result(
+            source="browser",
+            reason="unresolved_or_uncertified_browser_surface",
+            evidence_available=False,
+        )
+
+    return result(
+        "ACTIVITY",
+        "[ACTIVITY]",
+        source="observed_foreground",
+        reason="fresh_ordinary_resource_after_special_category_checks",
+        evidence_available=True,
+    )
+
+
 def _duration_mmss(seconds: object) -> str:
     try:
         value = max(0, int(float(seconds)))
@@ -1153,6 +1450,7 @@ class WindowsMonitorCoordinator:
         # monotonic authority.  Kept as an instance seam for deterministic
         # external physiology tests; production resolves to time.monotonic_ns.
         self._monotonic_ns = time.monotonic_ns
+        self._init_secant_connection()
 
         # Phase 2B: Mom owns exactly one legal relationship with the thin
         # sibling-continuity layer.  The layer owns its 120-second clock;
@@ -1161,6 +1459,15 @@ class WindowsMonitorCoordinator:
 
         self.session_id: int | None = None
         self._pending_trigger: PendingTriggerWorkflow | None = None
+        self._pending_study_start: dict | None = None
+        self._uncommitted_mirl_events: tuple[object, ...] = ()
+        self._uncommitted_sine_facts: list[object] = []
+        self._durable_mirl_closes: dict[tuple, str] = {}
+        self._durable_sine_terminals: dict[str, str] = {}
+        self._durable_sine_admissions: set[tuple[str, int]] = set()
+        self._durable_popup_closes: set[tuple[str, str]] = set()
+        self._durable_sine_fact_keys: set[tuple] = set()
+        self._mirl_consumed_sine_keys: set[tuple] = set()
         # One parked break request awaiting a real observation (C5).
         self._pending_break_seconds: int | None = None
         #: Expected (Study block_id, generation) carried by a parked GUI break
@@ -1175,6 +1482,7 @@ class WindowsMonitorCoordinator:
         self._last_foreground_identity: tuple[object, ...] | None = None
         self._last_red_state: bool | None = None
         self._last_blacklist_console_signature: tuple[object, ...] | None = None
+        self._last_cosecant_intent_mismatch_signature: tuple[object, ...] | None = None
         self._last_browser_diagnostic_signature: tuple[object, ...] | None = None
         self._last_activity_classification_signature: tuple[object, ...] | None = None
         self._pending_dwell_telemetry: dict[str, object] | None = None
@@ -1380,7 +1688,6 @@ class WindowsMonitorCoordinator:
         self.services.blacklist.start_session(
             personalization_factor=self._session_personalization_factor,
         )
-        self._bind_stage_one_target()
         self.services.trigger.start_session(
             session_id=self.session_id,
             profile_type=self.profile_type,
@@ -1420,17 +1727,6 @@ class WindowsMonitorCoordinator:
         )
         self._publish_startup_banner(learning_state, learned_lambda)
 
-    def _bind_stage_one_target(self) -> float:
-        """Give Resource Intent Blacklist's exact frozen Stage-1 target."""
-
-        target_seconds = self.services.blacklist.stage_one_target_seconds()
-        if not self.services.resource_intent.set_stage_one_target_seconds(
-            target_seconds
-        ):
-            raise RuntimeError(
-                "Resource Intent refused Blacklist's frozen Stage-1 target"
-            )
-        return target_seconds
 
     def _console_banner(self, line: object) -> None:
         _telemetry(self.telemetry_queue, "console_banner", message=line)
@@ -1473,7 +1769,9 @@ class WindowsMonitorCoordinator:
     def _finish_handover_for_study(self, now_ns: int) -> HandoverResult:
         """Terminate Mr Hand because factual Dad/Study owns the moment."""
 
-        return self._handover.finish("STUDY_MODE_ACTIVATED", now_ns)
+        # Mr Hand owns a processing-time timeline, not observation occurrence time.
+        # Keep caller evidence timestamps intact; never clamp or relabel them.
+        return self._handover.finish("STUDY_MODE_ACTIVATED", self._monotonic_ns())
 
     def _publish_handover_result_telemetry(
         self,
@@ -1576,13 +1874,18 @@ class WindowsMonitorCoordinator:
         handover = getattr(self, "_handover", None)
         if handover is None:
             return
+        authority_now_ns = self._monotonic_ns()
         _telemetry(
             self.telemetry_queue,
             "handover_live_status",
             observation=observation,
             live_view={
                 "territory": territory,
-                "handover": handover.snapshot(now_ns),
+                "handover": handover.snapshot(authority_now_ns),
+                "authority_monotonic_ns": authority_now_ns,
+                "observed_monotonic_ns": (
+                    observation.observed_monotonic_ns if observation is not None else None
+                ),
                 "study_authority": bool(study_authority),
                 "global_pause": bool(global_pause),
             },
@@ -1605,12 +1908,12 @@ class WindowsMonitorCoordinator:
         if self._study_owns_moment():
             return self._finish_handover_for_study(now_ns)
 
-        pause_result = self._handover.set_paused(global_paused, now_ns)
+        pause_result = self._handover.set_paused(global_paused, self._monotonic_ns())
         if pause_result.action != "NOOP":
             return pause_result
         if global_paused:
             return pause_result
-        return self._handover.advance(now_ns)
+        return self._handover.advance(self._monotonic_ns())
 
     def _monitor_loop(self) -> None:
         next_cycle = time.monotonic()
@@ -1618,7 +1921,10 @@ class WindowsMonitorCoordinator:
             self._drain_commands()
             if self.stop_event.is_set():
                 break
+            self._advance_pending_study_start()
+            self._connection_tick()
             if self.pause_event.is_set():
+                self._capture_study_boundary(gap_reason="GLOBAL_PAUSE")
                 # Global Pause inhibits ordinary monitoring cycles, but it is
                 # not authority to extend a factual Normal Break deadline.
                 # Advance only the independent break clock; no sensing occurs.
@@ -1692,7 +1998,6 @@ class WindowsMonitorCoordinator:
             mine_authority = getattr(self, "_mine_authority", None)
             if mine_authority is not None:
                 mine_authority.set_global_paused(False, resumed_now_ns)
-            self._reconcile_pending_trigger()
             observation = self.foreground_reader.observe()
             context = self._classify_observation(observation)
             blacklist_result = self.services.blacklist.observe(context)
@@ -1706,7 +2011,7 @@ class WindowsMonitorCoordinator:
                 study_authority=context.study_owned,
                 global_pause=False,
             )
-            self._publish_live_views(context)
+            self._publish_live_views(context, blacklist_result)
 
             next_cycle += self.poll_seconds
             remaining = next_cycle - time.monotonic()
@@ -1714,7 +2019,19 @@ class WindowsMonitorCoordinator:
                 # A slow cycle does not cause a rapid catch-up loop.
                 next_cycle = time.monotonic()
                 continue
-            self.stop_event.wait(remaining)
+            while remaining > 0:
+                # Service popup actions and their acknowledgements between
+                # sensing polls. A 1.5-second command wait against a
+                # 1.5-second GUI timeout could falsely reject a clarification
+                # that Monitor accepted on its next pass. Sensing itself stays
+                # on its original schedule.
+                self.stop_event.wait(min(remaining, 0.1))
+                if self.stop_event.is_set():
+                    break
+                self._drain_commands()
+                if self._pending_study_start is not None:
+                    self._advance_pending_study_start()
+                remaining = next_cycle - time.monotonic()
 
     def _classify_observation(
         self,
@@ -1781,11 +2098,6 @@ class WindowsMonitorCoordinator:
         self.services.resource_intent.set_protected_red(
             protected_red_active
         )
-        set_sine_active = getattr(
-            self.services.resource_intent, "set_sine_episode_active", None
-        )
-        if callable(set_sine_active):
-            set_sine_active(self._sine_owns_intervention())
         self.services.resource_intent.set_cosine_active(cosine_active)
         self.services.resource_intent.set_cosine_resource_owned(
             cosine_owned
@@ -1804,6 +2116,9 @@ class WindowsMonitorCoordinator:
             foreground=observation,
             browser_evidence=browser_evidence,
         )
+        # Capture this exact observation before any replaceable live view exists.
+        self._capture_study_boundary(observation)
+        self._capture_study_observation_evidence(observation)
         return MonitorContext(
             foreground=observation,
             browser_evidence=browser_evidence,
@@ -1812,6 +2127,61 @@ class WindowsMonitorCoordinator:
             cosine_owned=cosine_owned,
             study_owned=study_owned,
         )
+
+    def _capture_study_observation_evidence(self, observation=None, *, accepted=False, request_id="", applied_ns=None):
+        """Transport authority history before UI replacement, without making decisions."""
+        try:
+            read = getattr(self.services.resource_intent, "study_observation_evidence", None)
+            capture = getattr(self.services.storage, "capture_study_observation_evidence", None)
+            if not callable(read) or not callable(capture):
+                return
+            if observation is not None:
+                if self._study_world != "STUDY" or self._study_break or self.pause_event.is_set():
+                    return
+                evidence = read(expected_observation_ns=observation.observed_monotonic_ns,
+                    expected_sequence=observation.sequence)
+            elif accepted and request_id:
+                evidence = read()
+            else:
+                return
+            if evidence is not None:
+                capture(session_id=self.session_id, authority_json=evidence,
+                    request_id=request_id, applied_ns=applied_ns)
+        except Exception:
+            pass  # Missing extension evidence stays unresolved; authority is unaffected.
+
+    def _end_study_foreground_span(self, reason):
+        """Observation-only lifecycle fence; never supplies a duration endpoint."""
+        try:
+            close = getattr(self.services.storage, "end_study_resource_interval", None)
+            if callable(close):
+                close(reason)
+        except Exception:
+            pass  # An evidence extension cannot influence organ decisions.
+
+    def _capture_study_boundary(self, observation=None, *, gap_reason=""):
+        """Publish existing factual evidence only; never participate in routing."""
+        try:
+            capture = getattr(self.services.storage, "capture_study_resource_observation", None)
+            if not callable(capture):
+                return
+            sample = None
+            if observation is not None:
+                if self._study_world == "STUDY" and not self._study_break and not self.pause_event.is_set():
+                    sample = self.services.resource_intent.study_sample(
+                        expected_observation_ns=observation.observed_monotonic_ns,
+                        expected_sequence=observation.sequence)
+                else:
+                    gap_reason = "INACTIVE_STUDY"
+            capture(session_id=self.session_id, sample=sample,
+                observed_at_utc=observation.observed_wall_time_utc if observation is not None else "",
+                max_interval_ns=STUDY_CONTINUITY_MAX_GAP_NS, gap_reason=gap_reason)
+        except Exception:
+            # A failed sample read is an evidence gap, never an organ decision.
+            try:
+                capture(session_id=self.session_id, sample=None, gap_reason="CAPTURE_ERROR")
+            except Exception:
+                pass
 
     def _son_authority(self, son: str):
         if son == "SINE":
@@ -1836,8 +2206,9 @@ class WindowsMonitorCoordinator:
         observation: ForegroundObservation | None,
     ) -> None:
         if son == "SINE":
-            for fact in self.services.sine.advance(now_monotonic_ns=now_ns):
-                self._route_sine_fact(fact, observation)
+            self._route_sine_batch(
+                self.services.sine.advance(now_monotonic_ns=now_ns), observation
+            )
             return
         authority = self._son_authority(son)
         if authority is None:
@@ -1971,12 +2342,12 @@ class WindowsMonitorCoordinator:
             self._publish_handover_result_telemetry(result, context.foreground)
             return
         now_ns = context.foreground.observed_monotonic_ns
-        clock_result = self._handover.advance(now_ns)
+        clock_result = self._handover.advance(self._monotonic_ns())
         self._apply_handover_clock_result(
             clock_result, now_ns=now_ns, observation=context.foreground
         )
         self._publish_handover_result_telemetry(clock_result, context.foreground)
-        snapshot = self._handover.snapshot(now_ns)
+        snapshot = self._handover.snapshot(self._monotonic_ns())
         territory = self._sibling_territory(context, blacklist_result)
 
         if snapshot.active:
@@ -1989,13 +2360,13 @@ class WindowsMonitorCoordinator:
                 or not bool(_field(source_status, "factual_episode", False))
                 or _field(source_status, "episode_key") != key
             ):
-                result = self._handover.finish("SOURCE_NO_LONGER_FACTUAL", now_ns)
+                result = self._handover.finish("SOURCE_NO_LONGER_FACTUAL", self._monotonic_ns())
                 self._publish_handover_result_telemetry(result, context.foreground)
                 return
             if bool(_field(source_status, "termination_pending", False)):
                 return
             if territory == source:
-                result = self._handover.source_returned(now_ns)
+                result = self._handover.source_returned(self._monotonic_ns())
                 if result.action == "EXPIRED":
                     self._apply_handover_clock_result(
                         result, now_ns=now_ns, observation=context.foreground
@@ -2017,14 +2388,14 @@ class WindowsMonitorCoordinator:
                     source, key, now_ns=now_ns, observation=context.foreground
                 ):
                     result = self._handover.finish(
-                        self._handover_exit_reason(context), now_ns
+                        self._handover_exit_reason(context), self._monotonic_ns()
                     )
                     self._publish_handover_result_telemetry(
                         result, context.foreground
                     )
                 return
             if territory != target:
-                result = self._handover.switch_target(territory, now_ns)
+                result = self._handover.switch_target(territory, self._monotonic_ns())
                 self._publish_handover_result_telemetry(result, context.foreground)
             return
 
@@ -2056,7 +2427,7 @@ class WindowsMonitorCoordinator:
         ):
             return
         try:
-            result = self._handover.start(source, territory, key, now_ns)
+            result = self._handover.start(source, territory, key, self._monotonic_ns())
         except Exception:
             self._monitor_resume_son(
                 source, key, now_ns=now_ns, observation=context.foreground
@@ -2070,7 +2441,7 @@ class WindowsMonitorCoordinator:
         if context.study_owned:
             return
         now_ns = context.foreground.observed_monotonic_ns
-        snapshot = self._handover.snapshot(now_ns)
+        snapshot = self._handover.snapshot(self._monotonic_ns())
         if not snapshot.active:
             return
         source = str(snapshot.source or "")
@@ -2083,7 +2454,7 @@ class WindowsMonitorCoordinator:
             or not bool(_field(source_status, "factual_episode", False))
             or _field(source_status, "episode_key") != key
         ):
-            result = self._handover.finish("SOURCE_NO_LONGER_FACTUAL", now_ns)
+            result = self._handover.finish("SOURCE_NO_LONGER_FACTUAL", self._monotonic_ns())
             self._publish_handover_result_telemetry(result, context.foreground)
             return
         if not bool(_field(target_status, "factual_episode", False)):
@@ -2091,28 +2462,516 @@ class WindowsMonitorCoordinator:
         if self._monitor_terminate_son(
             source, key, now_ns=now_ns, observation=context.foreground
         ):
-            result = self._handover.finish("TARGET_ACTIVATED", now_ns)
+            result = self._handover.finish("TARGET_ACTIVATED", self._monotonic_ns())
             self._publish_handover_result_telemetry(result, context.foreground)
+
+    # Phase 3B: Mom transports facts and owns cross-organ transactions only.
+    def _init_secant_connection(self):
+        from SECANT.secant import SecantAuthority
+        self._secant = SecantAuthority()
+        self._study_world = "NORMAL"
+        self._study_entry = None
+        self._study_exit = None
+        self._study_break = None
+        self._study_last_sample = None
+        self._study_return_target = None
+        self._pending_secant_break_action = None
+        self._study_resource_receipts = {}
+        self._secant_transport = []
+        self._pause_requests = {}
+        self._pause_revision = 0
+        self._pause_signature = None
+        self._global_hold_id = ""
+        self._cosecant_durable = set()
+        self._cosecant_withdrawn = set()
+        self._cosecant_pending_facts = []
+
+    def _queue_secant_transport(self, kind, **payload):
+        self._secant_transport.append((kind, dict(payload, session_id=self.session_id)))
+        self._flush_secant_transport()
+
+    def _flush_secant_transport(self):
+        while self._secant_transport:
+            kind, payload = self._secant_transport[0]
+            if not _telemetry(self.telemetry_queue, kind, **payload):
+                break
+            self._secant_transport.pop(0)
+
+    def _drain_secant(self):
+        from SECANT.popup import PopupRequest
+        # Applied behavioral outcomes, never the ordered-inbox receipt boolean.
+        # Publish before withdrawal so the existing presenter can match the action.
+        for result in self._secant.drain_return_action_results():
+            self._queue_secant_transport("secant_action_result",
+                request_id=result.request_id, display_id=result.display_id,
+                action_sequence=result.action_sequence, episode_id=result.episode_id,
+                accepted=result.accepted, occurred_monotonic_ns=result.at_ns,
+                message="RETURN accepted" if result.accepted else "RETURN rejected")
+        for fact in self._secant.drain():
+            if isinstance(fact, PopupRequest):
+                self._queue_secant_transport("secant_popup", request=fact)
+            elif fact.name == "SECANT_POPUP_CLOSE_REQUESTED":
+                self._queue_secant_transport("secant_close", request_id=fact.request_id,
+                    occurred_monotonic_ns=fact.at_ns)
+            elif fact.name=="SECANT_ACTION_INTENT" and fact.reason=="NEED BREAK":
+                projection=self._secant.snapshot()
+                action=(fact.request_id,projection.presentation.sequence)
+                self._pending_secant_break_action=action
+                self._queue_secant_transport("secant_break_selection",request_id=fact.request_id)
+            else:
+                _telemetry(self.telemetry_queue,"secant_fact",session_id=self.session_id,fact=fact)
+        projection = self._secant.snapshot()
+        self.services.study.set_connection_state(
+            secant_episode_active=bool(projection.episode_id and not projection.terminal_reason),
+            break_pause_id=self._study_break["id"] if self._study_break else "")
+        _telemetry(self.telemetry_queue,"secant_projection",session_id=self.session_id,live_view=projection)
+
+    def _pause_veto(self):
+        if self.stop_event.is_set() or self._emergency_requested:
+            return "Session is stopping"
+        if self._study_world in {"ENTERING_STUDY", "EXITING_STUDY", "TERMINATING"}:
+            return "Study authority transfer is unresolved"
+        if self._normal_break_owns_pause():
+            return "Normal SINE break owns the moment"
+        if self._study_break or self._cosecant_owns_break_return() or self._cosecant_pending_facts:
+            return "COSECANT break transaction owns the moment"
+        mine = self._mine_authority.snapshot(now_ns=self._monotonic_ns()) if self._mine_authority else None
+        if mine is None:
+            return "MINE ownership is unknown"
+        phase = _enum_text(_field(mine,"phase",""))
+        if not phase or phase == "IMPORTANT_COMMIT_PENDING":
+            return "MINE allowance commitment is unresolved"
+        # A recovery phase may return to the same allowance. Only the native
+        # MINE2B deadline transition or an episode terminal ends this veto.
+        if (_field(mine,"important_deadline_effective_ns",0)
+                and phase not in {"IDLE","CLOSED","SHUTDOWN"}
+                and _field(mine,"mine2_variant","") != "MINE2B"):
+            return "MINE important allowance owns the moment"
+        return ""  # COSINE deliberately creates no new break veto.
+
+    def _publish_pause_eligibility(self):
+        from SECANT.read_model import PauseEligibility
+        if self.session_id is None:
+            return
+        reason = self._pause_veto()
+        signature = (self.session_id,not bool(reason),reason,self.pause_event.is_set())
+        if signature != self._pause_signature:
+            self._pause_signature=signature; self._pause_revision += 1
+            _telemetry(self.telemetry_queue,"pause_eligibility",session_id=self.session_id,
+                live_view=PauseEligibility(self.session_id,self._pause_revision,not bool(reason),reason))
+
+    def _global_pause_request(self,payload):
+        if _field(payload,"session_id") != self.session_id:
+            return False
+        request_id=_field(payload,"request_id",""); paused=_field(payload,"paused")
+        if not request_id or type(paused) is not bool:
+            return False
+        if request_id in self._pause_requests:
+            old_paused,accepted,reason=self._pause_requests[request_id]
+            if old_paused != paused:
+                return False
+        else:
+            reason=self._pause_veto() if paused else ""
+            accepted=not bool(reason)
+            now=self._monotonic_ns()
+            if accepted and paused != self.pause_event.is_set():
+                hold=request_id if paused else self._global_hold_id
+                scope=self._secant.snapshot().scope
+                if scope and not self._secant.set_global_paused(hold,paused,now):
+                    accepted=False;reason="SECANT global hold is unresolved"
+                if accepted and self._study_world == "STUDY":
+                    if not self.services.study.set_global_paused(hold,paused):
+                        if scope:self._secant.set_global_paused(hold,not paused,now)
+                        accepted=False;reason="Study global hold is unresolved"
+                if accepted:
+                    if paused:self.pause_event.set();self._global_hold_id=hold
+                    else:self.pause_event.clear();self._global_hold_id=""
+                    self._study_last_sample=None
+                    self._end_study_foreground_span("GLOBAL_PAUSE")
+                    self._drain_secant()
+            self._pause_requests[request_id]=(paused,accepted,reason)
+        self._queue_secant_transport("pause_ack",request_id=request_id,accepted=accepted,reason=reason)
+        self._publish_pause_eligibility()
+        return accepted
+
+    def _handle_secant_connection_command(self,kind,payload):
+        from dataclasses import replace
+        from SECANT.popup import PopupReceipt,Action
+        if kind == "global_pause_request":
+            self._global_pause_request(payload);return True
+        if kind not in {"secant_receipt","normal_surface_clearance","cosecant_popup_closed"}:
+            return False
+        if _field(payload,"session_id") != self.session_id:
+            return True
+        if kind == "normal_surface_clearance":
+            pending=self._study_entry
+            if pending and _field(payload,"request_id")==pending.get("fence"):
+                pending["surfaces_clear"]=_field(payload,"clear") is True
+                if not pending["surfaces_clear"]:pending["fence"]=""
+        elif kind == "cosecant_popup_closed":
+            snap=self.services.cosecant.snapshot()
+            key=(_field(payload,"break_id"),_field(payload,"generation"))
+            if (key==(_field(snap,"break_id"),_field(snap,"generation"))
+                    and _field(payload,"study_block_id")==_field(snap,"study_block_id")
+                    and not _field(snap,"popup_required",True)):
+                self._cosecant_withdrawn.add(key)
+        else:
+            receipt=_field(payload,"receipt")
+            if isinstance(receipt,PopupReceipt):
+                receipt=replace(receipt,received_at_ns=self._monotonic_ns())
+                accepted=self._secant.receipt(receipt)
+                self._drain_secant()
+        return True
+
+    def _supported_study_interval(self,sample,epoch):
+        previous=self._study_last_sample
+        self._study_last_sample=(sample,epoch)
+        if previous is None:return None
+        old,old_epoch=previous
+        delta=sample.observed_monotonic_ns-old.observed_monotonic_ns
+        if (old_epoch==epoch and sample.study_context_token==old.study_context_token
+                and sample.resource==old.resource and sample.observation_sequence>old.observation_sequence
+                and 0 < delta <= STUDY_CONTINUITY_MAX_GAP_NS):
+            return old.observed_monotonic_ns
+        return None
+
+    def _reconcile_study_resources(self):
+        for fact in self.services.study.snapshot().pending_resources:
+            pending=self._study_resource_receipts.get(fact.resource_fact_id)
+            receipt=self.services.storage.receipt(pending) if pending else None
+            if pending and receipt is None:
+                continue  # Unknown is not failed and cannot acquire a new write.
+            if receipt is None:
+                receipt=self.services.storage.record_study_resource(fact)
+                self._study_resource_receipts[fact.resource_fact_id]=_receipt_id(receipt)
+            state=_receipt_state(receipt)
+            if state==COMMITTED_STATE:
+                self.services.study.resource_committed(fact.resource_fact_id)
+                self._consume_receipt(_receipt_id(receipt))
+                self._study_resource_receipts.pop(fact.resource_fact_id,None)
+            elif state in {"FAILED","CANCELLED"}:
+                self._consume_receipt(_receipt_id(receipt))
+                self._study_resource_receipts.pop(fact.resource_fact_id,None)
+        self._secant.set_resources(self.services.study.snapshot().resources)
+
+    def _route_study_evidence(self,context):
+        from SECANT.read_model import StudyScope, FoundingSourceEvidence
+        from SECANT.secant import StudyEvidence,Meaning,Territory
+        from SECANT.recovery import AcceptedResourceEvidence
+        from COSECANT_STUDY_MODE.study import StudyState
+        study=self.services.study.snapshot()
+        if (self._study_world!="STUDY" or study.state is not StudyState.ACTIVE
+                or self.pause_event.is_set() or self._study_break):
+            self._study_last_sample=None;return
+        try:
+            sample=self.services.resource_intent.study_sample(
+                expected_observation_ns=context.foreground.observed_monotonic_ns,
+                expected_sequence=context.foreground.sequence)
+        except Exception as error:
+            # Contain only the read-only RI -> SECANT adapter. Normal organs,
+            # runtime mutations and persistence remain outside this boundary.
+            self._study_last_sample=None
+            _telemetry(self.telemetry_queue,"study_evidence_unavailable",
+                observation=context.foreground,session_id=self.session_id,
+                reason="adapter_exception",error_type=type(error).__name__,
+                message="Study exact-resource adapter failed; continuity interrupted")
+            return
+        if sample is None:
+            self._study_last_sample=None
+            _telemetry(self.telemetry_queue,"study_evidence_unavailable",
+                observation=context.foreground,session_id=self.session_id,
+                reason="unsupported_sample",
+                message="No usable Study exact-resource sample; continuity interrupted")
+            return
+        supported=self._supported_study_interval(sample,study.active_epoch_monotonic_ns)
+        self.services.study.observe_resource(sample,supported_since_ns=supported)
+        self._reconcile_study_resources()
+        resources=self.services.study.snapshot().resources
+        primary=next((f for f in resources if f.role=="PRIMARY"),None)
+        if primary is None:return
+        if (sample.effective_state=="STUDY_ALIGNED"
+                and any(f.resource==sample.resource for f in resources)):
+            from COSECANT_STUDY_MODE.cosecant import CosecantReturnTarget
+            exact=sample.resource
+            self._study_return_target=CosecantReturnTarget(study.context_token,exact.platform_key,exact.resource_token,
+                sample.observed_monotonic_ns,exact.kind,exact.key,exact.process_name,exact.process_id,
+                exact.hwnd,exact.normalized_title,exact.version,display_metadata=getattr(sample,"display_metadata",None))
+        projection=self._secant.snapshot()
+        scope=StudyScope(str(self.session_id)+":"+study.context_token,primary.resource.key)
+        if projection.scope is None:
+            if not self._secant.open_scope(scope,sample.observed_monotonic_ns):return
+        elif projection.scope!=scope:return
+        meaning=Meaning.STUDY_ALIGNED if sample.effective_state=="STUDY_ALIGNED" else (Meaning.OFF_TASK if sample.classification=="DISTRACTION" else Meaning.ACTIVITY)
+        if sample.classification=="UNCERTAIN":meaning=Meaning.UNCERTAIN
+        if sample.confirmed_off_task:meaning=Meaning.OFF_TASK
+        identity=_field(_field(context.resource_intent,"verdict"),"resource_identity")
+        surface=_enum_text(_field(identity,"surface","")).upper()
+        territory={"SOCIAL":Territory.SOCIAL,"MESSAGING":Territory.MESSAGING,"GAMING":Territory.GAMING,
+            "YOUTUBE_WATCH":Territory.VIDEO,"YOUTUBE_SHORTS":Territory.SHORT_VIDEO}.get(surface,Territory.ORDINARY)
+        evidence=None;accepted=sample.accepted;projection=self._secant.snapshot()
+        if (accepted and accepted.study_context_token==sample.study_context_token
+                and accepted.resource_key==sample.resource.key
+                and projection.episode_id and not projection.terminal_reason):
+            evidence=AcceptedResourceEvidence(projection.episode_id,scope,sample.resource.key,sample.observed_monotonic_ns,
+                accepted.request_id,sample.observation_id,accepted_at_ns=accepted.accepted_monotonic_ns,
+                source_observation_id=accepted.source_observation_id,source_request_id=accepted.request_id,
+                provenance=accepted.source)
+        self._secant.observe(StudyEvidence(scope,sample.resource.key,meaning,sample.observed_monotonic_ns,
+            sample.observation_id,territory,sample.confirmed_off_task,sample.certified_ott,supported,True,evidence,
+            FoundingSourceEvidence(sample.resource,sample.observation_id,sample.observed_monotonic_ns,
+                meaning.value,sample.classification,territory.value,sample.confirmed_off_task,sample.certified_ott,
+                display_metadata=getattr(sample,"display_metadata",None))))
+        self._drain_secant()
+
+    def _begin_study_entry(self):
+        """Internal barrier contract. Public START remains locked in Phase 3B."""
+        from uuid import uuid4
+        from COSECANT_STUDY_MODE.study import StudyState
+        if (self._study_world!="NORMAL" or self.pause_event.is_set() or self.stop_event.is_set()
+                or self.services.study.snapshot().state is not StudyState.READY
+                or self._normal_break_owns_pause()):return False
+        self._study_world="ENTERING_STUDY"
+        sine=self.services.sine.live_view();mirl=self.services.mirl.live_view()
+        self._study_entry={"identity":(self.services.study.snapshot().block_id,self.services.study.snapshot().generation),
+            "sine_uid":_field(sine,"episode_uid",""),"candidate_uid":_field(sine,"candidate_uid",""),
+            "event_id":_field(sine,"operational_event_id"),"mirl_episode_id":_field(mirl,"episode_id"),
+            "popup_request_id":_field(sine,"popup_request_id",""),"fence":"","surfaces_clear":False}
+        self._advance_study_entry();return True
+
+    def _advance_study_entry(self):
+        from uuid import uuid4
+        from COSECANT_STUDY_MODE.study import StudyState
+        pending=self._study_entry
+        if pending is None:return
+        now=self._monotonic_ns();study=self.services.study.snapshot()
+        if (self.pause_event.is_set() or self.stop_event.is_set() or self._normal_break_owns_pause()
+                or (study.block_id,study.generation)!=pending["identity"] or study.state is not StudyState.READY):return
+        result=self._finish_handover_for_study(now)
+        self._apply_handover_clock_result(result,now_ns=now,observation=None)
+        if _field(_field(result,"snapshot"),"active",True):return
+        mirl=self.services.mirl.live_view()
+        if pending["sine_uid"]:
+            if (not pending["mirl_episode_id"] or _field(mirl,"candidate_uid")!=pending["candidate_uid"]
+                    or _field(mirl,"operational_event_id")!=pending["event_id"]):return
+            live=self.services.sine.live_view()
+            if _enum_text(_field(live,"phase")).upper() not in {"RESOLVED","CANCELLED","EMERGENCY_STOPPED"}:
+                self.services.sine.close_for_study_transition(episode_uid=pending["sine_uid"],
+                    candidate_uid=pending["candidate_uid"],operational_event_id=pending["event_id"],now_ns=now)
+                self._route_sine_batch(self.services.sine.advance(now_monotonic_ns=now))
+            key=(pending["mirl_episode_id"],pending["candidate_uid"],pending["event_id"])
+            reason=self._durable_sine_terminals.get(pending["sine_uid"],"")
+            outcome=self._durable_mirl_closes.get(key)
+            if not ((outcome=="ABORTED" and reason=="STUDY_MODE_ACTIVATED")
+                    or (outcome=="RETURNED" and reason.startswith("verified_return:"))):return
+            popup=pending["popup_request_id"]
+            if popup and (pending["sine_uid"],popup) not in self._durable_popup_closes:return
+        elif _enum_text(_field(self.services.sine.live_view(),"phase","")).upper() not in {"IDLE","RESOLVED","CANCELLED","EMERGENCY_STOPPED"}:
+            return
+        if not pending["sine_uid"] and _enum_text(_field(mirl,"phase","")).upper() not in {"IDLE","CLOSED","EMERGENCY_STOPPED"}:return
+        for authority,route in ((self._mine_authority,self._route_mine_effect),(self.services.cosine,self._route_cosine_effect)):
+            if authority is None:return
+            for effect in authority.preempt_for_study(now_ns=now):route(effect)
+            if _enum_text(_field(authority.snapshot(now_ns=now),"phase","")) not in {"IDLE","CLOSED","SHUTDOWN"}:return
+        if self._pending_trigger is not None:return
+        if not pending["surfaces_clear"]:
+            if not pending["fence"]:
+                pending["fence"]="normal-fence-"+uuid4().hex
+                self._queue_secant_transport("normal_surface_fence",request_id=pending["fence"])
+            return
+        if not self.services.study.bind_session(self.session_id):return
+        result=self.services.study.start()
+        if not _field(result,"accepted",False):return
+        self._handle_study_result("START",result)
+        self._study_entry=None;self._study_world="STUDY";self._study_last_sample=None
+
+    def _begin_study_exit(self,reason="study_complete"):
+        self._end_study_foreground_span("STUDY_EXIT")
+        if self._study_exit is None:
+            self._study_exit={"reason":reason,"context":self.services.study.snapshot().context_token,"finalized":False}
+        elif reason in {"emergency","session_end"}:
+            self._study_exit["reason"]=reason
+        self._study_world="EXITING_STUDY" if reason=="study_complete" else "TERMINATING"
+        self._study_last_sample=None
+        self._advance_study_exit()
+
+    def _advance_study_exit(self):
+        from COSECANT_STUDY_MODE.study import StudyState
+        pending=self._study_exit
+        if pending is None:return
+        now=self._monotonic_ns();scope=self._secant.snapshot().scope
+        if scope:self._secant.complete(scope,now,pending["reason"])
+        self._drain_secant()
+        if self._study_break and not self._study_break.get("owned"):
+            if not self.services.cosecant.abort_reservation(self._study_break["id"]):return
+            self._study_break=None
+        self._route_cosecant_result(self.services.cosecant.cancel_for_session_end(reason=pending["reason"]))
+        cosecant=self.services.cosecant.snapshot()
+        _telemetry(self.telemetry_queue,"cosecant_view",live_view=cosecant)
+        secant=self._secant.snapshot()
+        if secant.cleanup_pending or secant.popup_state in {"REQUESTED","DISPLAYED","CLOSE_REQUESTED"}:return
+        if self._cosecant_pending_facts or not self.services.cosecant.retry_cleanup():return
+        if cosecant.break_id and (cosecant.break_id,cosecant.generation) not in self._cosecant_withdrawn:return
+        token=pending["context"]
+        if token and not self.services.resource_intent.context_retirement_proven(token):
+            self.services.resource_intent.retire_study_context(expected_context_token=token)
+            if not self.services.resource_intent.context_retirement_proven(token):return
+        if not pending["finalized"]:
+            study=self.services.study.snapshot()
+            if study.state not in {StudyState.COMPLETED,StudyState.SHUTDOWN}:
+                result=self.services.study.complete()
+                if not result.accepted:return
+                study=result.snapshot
+            if not self.services.storage.record_study_snapshot(session_id=self.session_id,action="COMPLETE" if pending["reason"]=="study_complete" else pending["reason"].upper(),snapshot=study):return
+            pending["finalized"]=True
+        self._study_break=None;self._study_entry=None;self._study_exit=None
+        self._study_world="NORMAL" if pending["reason"]=="study_complete" and not self.stop_event.is_set() and not self._emergency_requested else "TERMINATING"
+        self._drain_secant()
+
+    def _connection_tick(self):
+        from COSECANT_STUDY_MODE.study import StudyState
+        if self._study_world=="STUDY" and self.services.study.snapshot().state is StudyState.COMPLETED:
+            self._begin_study_exit("study_complete")
+        self._flush_secant_transport()
+        self._advance_study_entry()
+        self._advance_study_exit()
+        if self._study_world=="STUDY":self._advance_study_break()
+        self._publish_pause_eligibility()
+    def _reject_secant_break_action(self,action,message):
+        request_id,sequence=action
+        self._secant.action_result(request_id,False,self._monotonic_ns(),action_sequence=sequence)
+        self._queue_secant_transport("secant_action_result",request_id=request_id,
+            accepted=False,action_sequence=sequence,message=message)
+
+    def _begin_study_break(self,seconds,target,*,request_id="",action_sequence=None):
+        from uuid import uuid4
+        from COSECANT_STUDY_MODE.study import StudyState
+        study=self.services.study.snapshot();secant=self._secant.snapshot()
+        if (self._study_world!="STUDY" or self.pause_event.is_set() or self._study_break
+                or study.state is not StudyState.ACTIVE or int(secant.stage)>=2):return False
+        pause_id="study-break-pause-"+uuid4().hex
+        reservation=self.services.cosecant.reserve_break(pause_id=pause_id,study=study,
+            selected_break_seconds=seconds,intended_return_target=target,secant_stage=int(secant.stage))
+        if reservation is None:return False
+        self._end_study_foreground_span("BREAK_PENDING")
+        self._study_break={"id":pause_id,"scope":secant.scope,"episode":secant.episode_id,
+            "owned":False,"paused_study":False,"held":False,"request_id":request_id,
+            "action_sequence":action_sequence,"abort":False,"identity":(study.block_id,study.generation)}
+        self._study_last_sample=None;self._advance_study_break();return True
+
+    def _abort_study_break(self):
+        pending=self._study_break
+        if pending is None:return True
+        if pending["owned"]:return False
+        if not pending.get("reservation_aborted"):
+            if not self.services.cosecant.abort_reservation(pending["id"]):return False
+            pending["reservation_aborted"]=True
+        if pending["paused_study"] and not pending.get("abort_resumed"):
+            result=self.services.study.resume(break_pause_id=pending["id"])
+            if not result.accepted:return False
+            self._handle_study_result("BREAK_ABORT_RESUME",result)
+            pending["abort_resumed"]=True
+        if pending["held"]:
+            if not self._secant.release_break(pending["scope"],pending["episode"],pending["id"],self._monotonic_ns()):return False
+        if pending["request_id"]:
+            self._secant.action_result(pending["request_id"],False,self._monotonic_ns(),action_sequence=pending["action_sequence"])
+            self._queue_secant_transport("secant_action_result",request_id=pending["request_id"],accepted=False,action_sequence=pending["action_sequence"])
+        self._study_break=None;self._drain_secant();return True
+
+    def _advance_study_break(self):
+        from COSECANT_STUDY_MODE.study import StudyState
+        pending=self._study_break
+        if pending is None:return
+        if pending["abort"]:
+            self._abort_study_break();return
+        study=self.services.study.snapshot();projection=self._secant.snapshot();now=self._monotonic_ns()
+        if (study.block_id,study.generation)!=pending["identity"]:
+            pending["abort"]=True;self._abort_study_break();return
+        if pending["owned"]:
+            snap=self.services.cosecant.snapshot()
+            terminal=any(k[0]==snap.break_id and k[2]=="RETURN_CONFIRMED" for k in self._cosecant_durable)
+            if (not terminal or self._cosecant_pending_facts or not snap.return_confirmed
+                    or not self.services.cosecant.transaction_clear(pending["id"])
+                    or (snap.break_id,snap.generation) not in self._cosecant_withdrawn):return
+            result=self.services.study.resume(break_pause_id=pending["id"])
+            if not result.accepted:return
+            self._handle_study_result("RETURN_CONFIRMED_RESUME",result)
+            if pending["held"] and not self._secant.release_break(pending["scope"],pending["episode"],pending["id"],now):return
+            self._study_break=None;self._study_last_sample=None;self._drain_secant();return
+        # A possible founding display is not the pre-episode branch. Ask the
+        # native authority to withdraw and reconcile it before choosing.
+        if projection.presentation.unresolved_display:
+            self._secant.reset_pre_episode(projection.scope,now);self._drain_secant();return
+        if projection.episode_id and not projection.terminal_reason:
+            if int(projection.stage)!=1:
+                pending["abort"]=True;self._abort_study_break();return
+            pending["episode"]=projection.episode_id;pending["scope"]=projection.scope
+            if not pending["held"]:
+                if not self._secant.yield_break(projection.scope,projection.episode_id,pending["id"],now):
+                    pending["abort"]=True;self._abort_study_break();return
+                pending["held"]=True;self._drain_secant()
+            if self._secant.snapshot().popup_state in {"REQUESTED","DISPLAYED","CLOSE_REQUESTED"}:return
+        elif projection.scope and not self._secant.reset_pre_episode(projection.scope,now):
+            self._drain_secant();return
+        self.services.study.set_connection_state(secant_episode_active=bool(pending["episode"]),break_pause_id=pending["id"])
+        if not pending["paused_study"]:
+            result=self.services.study.pause(break_pause_id=pending["id"])
+            if not result.accepted:
+                pending["abort"]=True;self._abort_study_break();return
+            pending["paused_study"]=True
+            self._handle_study_result("BREAK_PAUSE",result)
+        paused=self.services.study.snapshot()
+        if paused.state is not StudyState.PAUSED:return
+        result=self.services.cosecant.commit_reserved_break(pause_id=pending["id"],study=paused)
+        pending["owned"]=self._cosecant_owns_break_return(result.snapshot)
+        self._route_cosecant_result(result)
+        if pending["owned"]:
+            if pending["held"]:self._secant.confirm_break(pending["id"],result.snapshot.break_id)
+            self._drain_secant()
+        else:
+            pending["abort"]=True;self._abort_study_break()
+
+    def _apply_internal_study_action(self,action):
+        """Native action contract behind the public Phase-3B lock."""
+        if self._study_world!="STUDY" or self._study_exit:return False
+        key=action.upper()
+        if key=="COMPLETE":self._begin_study_exit();return True
+        if key not in {"PAUSE","RESUME"} or self._study_break or self.pause_event.is_set():return False
+        projection=self._secant.snapshot()
+        if projection.episode_id and not projection.terminal_reason:return False
+        if key=="PAUSE" and projection.scope:
+            if not self._secant.reset_pre_episode(projection.scope,self._monotonic_ns()):
+                self._drain_secant();return False
+        result=getattr(self.services.study,key.lower())()
+        self._handle_study_result(key,result);self._study_last_sample=None
+        return result.accepted
+
 
     def _study_owns_moment(self) -> bool:
         """Read the two existing lifecycle authorities; detect nothing anew."""
 
-        from COSECANT_STUDY_MODE.cosecant import CosecantState
         from COSECANT_STUDY_MODE.study import StudyState
 
         study = self.services.study.snapshot()
-        cosecant = self.services.cosecant.snapshot()
-        return bool(
-            _field(study, "state", None) is StudyState.ACTIVE
-            or _field(cosecant, "state", None)
-            in {
-                CosecantState.BREAK_ACTIVE,
-                CosecantState.BREAK_COMPLETE,
-                CosecantState.BREAK_ALREADY_OVER,
-                CosecantState.FINAL_LOCK,
-                CosecantState.RETURN_CONFIRMING,
-            }
-        )
+        projection=self._secant.snapshot()
+        return bool(self._study_world!="NORMAL" or self._study_entry or self._study_exit or self._study_break
+            or _field(study,"state") in {StudyState.ACTIVE,StudyState.PAUSED}
+            or (projection.episode_id and not projection.terminal_reason)
+            or projection.cleanup_pending or projection.frozen_reasons
+            or self._cosecant_owns_break_return())
+
+    def _cosecant_owns_break_return(self, snapshot: object | None = None) -> bool:
+        """Read whether the existing COSECANT lifecycle owns this moment."""
+
+        from COSECANT_STUDY_MODE.cosecant import CosecantState
+
+        current = self.services.cosecant.snapshot() if snapshot is None else snapshot
+        return _field(current, "state", None) in {
+            CosecantState.BREAK_ACTIVE,
+            CosecantState.BREAK_COMPLETE,
+            CosecantState.BREAK_ALREADY_OVER,
+            CosecantState.FINAL_LOCK,
+            CosecantState.RETURN_CONFIRMING,
+        }
 
     def _settle_study_son_preemption(
         self,
@@ -2129,9 +2988,8 @@ class WindowsMonitorCoordinator:
         own Dad-preemption is handled independently by Mom's established
         _finish_handover_for_study() / _sync_handover_clock() boundary.
 
-        SINE is intentionally one-shot: an old Normal-mode SINE episode is
-        terminated, while a fresh Study-mode SINE episode is allowed to live
-        under the existing Study-distraction physiology.  COSINE preserves the
+        SINE settles its existing Normal episode at the ownership boundary.
+        COSINE preserves the
         exact first Study-owned boundary sample before terminal preemption, and
         its private pending flag remains only a durability-retry latch.  MINE
         keeps its native Study latch and retries terminal durability through its
@@ -2139,12 +2997,14 @@ class WindowsMonitorCoordinator:
         """
 
         now_ns = observation.observed_monotonic_ns
+        if self._study_world != "NORMAL":
+            # The explicit entry/exit barrier owns positive settlement.
+            return self._study_world == "STUDY"
 
         if study_owned:
             sine_view = self.services.sine.live_view()
             if (
                 str(_field(sine_view, "episode_uid", "") or "").strip()
-                and not bool(_field(sine_view, "study_mode", False))
             ):
                 try:
                     sine_preempted = bool(
@@ -2174,6 +3034,7 @@ class WindowsMonitorCoordinator:
                             "will retry on the next factual Study sample."
                         ),
                     )
+                    raise RuntimeError("Normal SINE refused Study ownership; routing stopped")
 
         cosine_snapshot = self.services.cosine.snapshot(now_ns=now_ns)
         cosine_phase = _enum_text(_field(cosine_snapshot, "phase", ""))
@@ -2335,9 +3196,12 @@ class WindowsMonitorCoordinator:
         # Study and COSECANT consume the same Resource Intent fact. No second
         # foreground/browser read is permitted inside either runtime.
         self._sync_study_context_after_advance(self.services.study.advance())
+        self._route_study_evidence(context)
         cosecant_result = self.services.cosecant.advance()
         self._route_cosecant_result(cosecant_result, context.foreground)
         self._observe_cosecant_return(context)
+        self._reconcile_pending_trigger(context, blacklist_result)
+        self._connection_tick()
 
         # One unresolved candidate at a time. A RUNNING database transaction
         # cannot be replaced by a later foreground observation. Once SINE has
@@ -2346,6 +3210,7 @@ class WindowsMonitorCoordinator:
         # visibility is presentation state and must not found another SINE 1.
         if (
             self._pending_trigger is None
+            and self._pending_study_start is None
             and not self._sine_owns_intervention()
             and not self._mine_owns_intervention()
             and not self._normal_break_owns_pause()
@@ -2356,10 +3221,11 @@ class WindowsMonitorCoordinator:
                 blacklist=blacklist_result,
             )
             if candidate is not None:
-                self._begin_trigger_persistence(candidate)
+                self._begin_trigger_persistence(candidate, context, blacklist_result)
 
-        for fact in self.services.sine.advance(now_monotonic_ns=now_ns):
-            self._route_sine_fact(fact, context.foreground)
+        self._route_sine_batch(
+            self.services.sine.advance(now_monotonic_ns=now_ns), context.foreground
+        )
         self._reconcile_pending_normal_break_selector(
             occurred_monotonic_ns=now_ns,
             observation=context.foreground,
@@ -2441,16 +3307,71 @@ class WindowsMonitorCoordinator:
         )
 
     def _study_trigger_admission_open(self, context: MonitorContext) -> bool:
-        """Do not let Blacklist backdate an active Study uncertainty period."""
+        """Exclude Study and COSECANT ownership from Normal Trigger admission."""
 
         from CORE_ENGINE.resource_intent import ResourceIntent, SineContribution
+        from COSECANT_STUDY_MODE.study import StudyState
 
+        if self._study_owns_moment():
+            return False
         verdict = _field(context.resource_intent, "verdict")
-        if not str(_field(verdict, "study_context_token", "") or ""):
-            return True
+        cosecant = self.services.cosecant.snapshot()
+        if self._cosecant_owns_break_return(cosecant):
+            classification = _field(verdict, "classification")
+            contribution = _field(verdict, "sine_contribution")
+            verdict_token = str(_field(verdict, "study_context_token", "") or "")
+            expected_token = str(_field(cosecant, "study_context_token", "") or "")
+            fresh = bool(_field(context.resource_intent, "fresh", False))
+            context_delivery = _enum_text(_field(cosecant, "context_delivery", ""))
+            mismatch = bool(
+                not fresh
+                or not verdict_token
+                or verdict_token != expected_token
+                or classification is not ResourceIntent.APPROVED_BREAK
+                or contribution is not SineContribution.NONE
+                or context_delivery != "CONFIRMED"
+            )
+            if mismatch:
+                signature = (
+                    str(_field(cosecant, "break_id", "") or ""),
+                    _enum_text(_field(cosecant, "state", "")),
+                    verdict_token,
+                    _enum_text(classification),
+                    _enum_text(contribution),
+                    fresh,
+                    context_delivery,
+                )
+                if signature != getattr(
+                    self, "_last_cosecant_intent_mismatch_signature", None
+                ):
+                    _telemetry(
+                        self.telemetry_queue,
+                        "cosecant_resource_intent_mismatch",
+                        observation=context.foreground,
+                        message=(
+                            "Live COSECANT ownership overruled stale or missing "
+                            "Resource Intent trigger evidence"
+                        ),
+                        break_id=signature[0],
+                        cosecant_state=signature[1],
+                        study_context_token=verdict_token,
+                        expected_study_context_token=expected_token,
+                        resource_intent_classification=signature[3],
+                        sine_contribution=signature[4],
+                        resource_intent_fresh=fresh,
+                        context_delivery=signature[6],
+                    )
+                self._last_cosecant_intent_mismatch_signature = signature
+            else:
+                self._last_cosecant_intent_mismatch_signature = None
+            return False
+        self._last_cosecant_intent_mismatch_signature = None
+        study = self.services.study.snapshot()
+        verdict_token = str(_field(verdict, "study_context_token", "") or "")
         return bool(
-            _field(verdict, "classification") is ResourceIntent.DISTRACTION
-            and _field(verdict, "sine_contribution") is SineContribution.READY
+            _field(study, "state") is not StudyState.ACTIVE
+            and not verdict_token
+            and not context.study_owned
         )
 
     def _sine_owns_intervention(self) -> bool:
@@ -2471,7 +3392,6 @@ class WindowsMonitorCoordinator:
                 SinePhase.ACTIVE,
                 SinePhase.PROTECTED_RED,
             }
-            and not _field(status, "held", False)
         )
 
     def _normal_break_owns_pause(self) -> bool:
@@ -2563,6 +3483,7 @@ class WindowsMonitorCoordinator:
                 evidence_source="monitor_ordinary_activity",
             )
         )
+
 
     def _observe_mirl_for_context(self, context: MonitorContext) -> tuple[object, ...]:
         """Route exactly one MIRL path, including fail-closed break ownership."""
@@ -2852,23 +3773,24 @@ class WindowsMonitorCoordinator:
             effect=effect,
         )
 
-    def _route_cosecant_result(
-        self,
-        result: object,
-        observation: ForegroundObservation | None = None,
-    ) -> None:
-        facts = tuple(_field(result, "facts", ()) or ())
-        if facts:
-            if not self.services.storage.append_cosecant_facts(
-                session_id=self.session_id,
-                facts=facts,
-            ):
-                raise RuntimeError("COSECANT fact batch was not durably accepted")
-            for fact in facts:
-                self._publish_domain_fact("cosecant", fact, observation)
+    def _route_cosecant_result(self,result,observation=None) -> None:
+        for fact in tuple(_field(result,"facts",()) or ()):
+            key=(fact.break_id,fact.sequence,_enum_text(fact.kind))
+            if key not in self._cosecant_durable and fact not in self._cosecant_pending_facts:
+                self._cosecant_pending_facts.append(fact)
+        if self._cosecant_pending_facts:
+            facts=tuple(self._cosecant_pending_facts)
+            if self.services.storage.append_cosecant_facts(session_id=self.session_id,facts=facts):
+                for fact in facts:
+                    self._cosecant_durable.add((fact.break_id,fact.sequence,_enum_text(fact.kind)))
+                    self._publish_domain_fact("cosecant",fact,observation)
+                self._cosecant_pending_facts.clear()
+        if self._cosecant_owns_break_return(_field(result,"snapshot")):
+            self.services.blacklist.inhibit_normal_sine_watch()
 
     def _observe_cosecant_return(self, context: MonitorContext) -> None:
         from COSECANT_STUDY_MODE.cosecant import (
+            CosecantFactKind,
             CosecantState,
             StudyReturnObservation,
         )
@@ -2903,75 +3825,24 @@ class WindowsMonitorCoordinator:
         )
         result = self.services.cosecant.observe_return(observation)
         self._route_cosecant_result(result, context.foreground)
-        after = _field(result, "snapshot")
-        if bool(_field(after, "return_confirmed", False)):
-            study_snapshot = self.services.study.snapshot()
-            state = str(_field(study_snapshot, "state", ""))
-            if hasattr(_field(study_snapshot, "state", None), "value"):
-                state = str(_field(study_snapshot, "state").value)
-            if state == "PAUSED":
-                resumed = self.services.study.resume()
-                self._handle_study_result("RETURN_CONFIRMED_RESUME", resumed)
-
-    def _exact_return_confirmed(
-        self,
-        context: MonitorContext,
-        target: object,
-    ) -> bool:
-        """Is the user factually on the exact resource this break froze?
-
-        The mirror image of ``_break_admission_refusal``: the certified Browser
-        identity that founded the target is the only thing allowed to release
-        it.  Deliberately consults no title, no Study score, no allowance and
-        no ``study_idle_allowed`` -- a resource can be perfectly good Study
-        material and still not be the one the user left.
-        """
-
-        if target is None:
-            # No frozen memory trace means there is nothing to compare against,
-            # and an unknown target must never read as a match.
-            return False
-        target_platform = str(_field(target, "platform_key", "") or "")
-        target_token = str(_field(target, "resource_token", "") or "")
-        if not target_platform or not target_token:
-            return False
-
-        intent = context.resource_intent
-        if not bool(_field(intent, "fresh", False)):
-            # Stale evidence describes a moment that has already passed.
-            return False
-
-        browser = context.browser_evidence
-        if not bool(_field(browser, "authoritative", False)):
-            return False
-        if bool(_field(browser, "holding_previous_strong_evidence", False)):
-            # A held read proves the LAST resource, never the current one, so
-            # it can never release a lock the current resource must release.
-            return False
-
-        evidence = _field(browser, "evidence")
-        browser_platform = str(_field(evidence, "platform_key", "") or "")
-        browser_token = str(_field(evidence, "resource_token", "") or "")
-        if not browser_platform or not browser_token:
-            return False
-
-        verdict = _field(intent, "verdict")
-        identity = _field(verdict, "resource_identity")
-        if not bool(_field(identity, "browser_evidence_certified", False)):
-            return False
-        if str(_field(identity, "platform_key", "")) != browser_platform:
-            return False
-        if str(_field(identity, "opaque_resource_token", "")) != browser_token:
-            return False
-
-        if str(_field(verdict, "study_context_token", "")) != str(
-            _field(target, "study_context_token", "")
+        if any(
+            _field(fact, "kind") is CosecantFactKind.RETURN_CONFIRMED
+            for fact in tuple(_field(result, "facts", ()) or ())
         ):
-            # The right resource under a different Study block belongs to some
-            # other block's break, not to this one.
-            return False
+            # The durable COSECANT handoff retires break-owned Blacklist dwell;
+            # the next eligible observation starts a fresh intervention visit.
+            self.services.blacklist.set_paused(False)
+        self._advance_study_break()
 
-        return browser_platform == target_platform and browser_token == target_token
+    def _exact_return_confirmed(self,context,target) -> bool:
+        if target is None:return False
+        snapshot=context.resource_intent
+        observation=_field(snapshot,"observation")
+        if (not _field(snapshot,"fresh",False)
+                or _field(observation,"observed_monotonic_ns")!=context.foreground.observed_monotonic_ns
+                or _field(observation,"sequence")!=context.foreground.sequence):return False
+        exact=self.services.resource_intent._study_exact_identity(snapshot)
+        return bool(exact and target.matches_resource(exact))
 
     def _presence_for(self, context: MonitorContext, *, exact: bool) -> object:
         """Map one exact-return fact onto COSECANT's presence vocabulary.
@@ -2991,12 +3862,17 @@ class WindowsMonitorCoordinator:
             return StudyPresence.UNCERTAIN
         return StudyPresence.ABSENT
 
-    def _begin_trigger_persistence(self, candidate: object) -> None:
+    def _begin_trigger_persistence(self, candidate: object, context, blacklist_result) -> None:
         if self.session_id is None:
             raise RuntimeError("trigger candidate appeared before session start")
         candidate_uid = self.services.trigger.candidate_uid(candidate)
         if not candidate_uid:
             raise RuntimeError("trigger authority returned a candidate without UID")
+        if not self._candidate_authority_current(candidate, context, blacklist_result):
+            self.services.trigger.reject_candidate(
+                candidate_uid=candidate_uid, reason="source_or_authority_lost_before_persistence"
+            )
+            return
         receipt = self.services.storage.persist_trigger(
             session_id=self.session_id,
             candidate=candidate,
@@ -3012,7 +3888,7 @@ class WindowsMonitorCoordinator:
         self._console_history(
             f"[TRIGGER] candidate created | reason={reason} | uid={candidate_uid[:20]}... | persistence=PENDING"
         )
-        self._apply_trigger_receipt(receipt)
+        self._apply_trigger_receipt(receipt, context, blacklist_result)
 
     # ------------------------------------------------------------------
     # Receipt consumption.  C12-D2.
@@ -3059,15 +3935,53 @@ class WindowsMonitorCoordinator:
         if pending is not None:
             self._consume_receipt(pending.receipt_id)
 
-    def _reconcile_pending_trigger(self) -> None:
+    def _reconcile_pending_trigger(self, context, blacklist_result) -> None:
         pending = self._pending_trigger
         if pending is None:
             return
         receipt = self.services.storage.receipt(pending.receipt_id)
         if receipt is not None:
-            self._apply_trigger_receipt(receipt)
+            self._apply_trigger_receipt(receipt, context, blacklist_result)
 
-    def _apply_trigger_receipt(self, receipt: object) -> None:
+    def _candidate_authority_current(self, candidate, context, blacklist_result) -> bool:
+        if self._study_owns_moment():
+            return False
+        from CORE_ENGINE.trigger import TriggerSource
+        from CORE_ENGINE.resource_intent import OBSERVATION_FRESHNESS_NS
+        if (
+            context is None or self.stop_event.is_set() or self.pause_event.is_set()
+            or self._emergency_requested or self._pending_study_start is not None
+            or self._cosecant_owns_break_return()
+            or self._sine_owns_intervention() or self._mine_owns_intervention()
+            or self._normal_break_owns_pause()
+            or not self._study_trigger_admission_open(context)
+        ):
+            return False
+        now_ns = self._monotonic_ns()
+        observed_ns = context.foreground.observed_monotonic_ns
+        if not 0 <= now_ns - observed_ns <= OBSERVATION_FRESHNESS_NS:
+            return False
+        evidence = _field(candidate, "evidence")
+        if _field(evidence, "source") is not TriggerSource.EXECUTIVE_BLACKLIST:
+            return False
+        return self.services.trigger.candidate_still_current(
+            candidate=candidate, context=context, blacklist=blacklist_result
+        )
+
+    def _settle_trigger_without_intervention(self, pending, event_id, reason) -> None:
+        if not self.services.trigger.settle_without_intervention(
+            candidate_uid=pending.candidate_uid,
+            operational_event_id=event_id, reason=reason,
+        ):
+            raise RuntimeError("Exact committed candidate settlement failed")
+        self._clear_pending_trigger()
+        _telemetry(
+            self.telemetry_queue, "trigger_settled_without_intervention",
+            candidate_uid=pending.candidate_uid, operational_event_id=event_id,
+            message=reason,
+        )
+
+    def _apply_trigger_receipt(self, receipt: object, context, blacklist_result) -> None:
         pending = self._pending_trigger
         if pending is None:
             return
@@ -3079,41 +3993,90 @@ class WindowsMonitorCoordinator:
             return
         if state == COMMITTED_STATE:
             event_id = _receipt_result_id(receipt)
-            admitted = self.services.trigger.confirm_durable_admission(
-                candidate_uid=pending.candidate_uid,
-                operational_event_id=event_id,
+            if not pending.committed_seen_monotonic_ns:
+                self._pending_trigger = replace(
+                    pending, committed_seen_monotonic_ns=self._monotonic_ns()
+                )
+                return
+            if context.foreground.observed_monotonic_ns <= pending.committed_seen_monotonic_ns:
+                return
+            if pending.superseded_by_break_id or not self._candidate_authority_current(
+                pending.candidate, context, blacklist_result
+            ):
+                self._settle_trigger_without_intervention(
+                    pending, event_id, "authority_lost_after_candidate_commit"
+                )
+                return
+            token = self.services.mirl.prepare_trigger(
+                candidate=pending.candidate, operational_event_id=event_id,
             )
-            if not admitted:
+            if token is None:
+                self._settle_trigger_without_intervention(
+                    pending, event_id, "mirl_prepare_refused"
+                )
+                return
+            accepted_key = (pending.candidate_uid, event_id)
+            try:
+                if not self.services.mirl.prepared_token_current(
+                    token, now_ns=self._monotonic_ns()
+                ):
+                    raise RuntimeError("MIRL preparation identity is not current")
+                self._persist_mirl_events(self.services.mirl.drain_events())
+                if not self._candidate_authority_current(
+                    pending.candidate, context, blacklist_result
+                ) or not self.services.mirl.prepared_token_current(
+                    token, now_ns=self._monotonic_ns()
+                ):
+                    raise RuntimeError("Authority or MIRL token expired before handoff")
+                if not self.services.trigger.confirm_durable_admission(
+                    candidate_uid=pending.candidate_uid, operational_event_id=event_id
+                ):
+                    raise RuntimeError("Exact Trigger admission failed")
+                accepted = self.services.sine.request_trigger(
+                    candidate=pending.candidate, operational_event_id=event_id,
+                    mirl_display_token=token,
+                )
+                sine = self.services.sine.live_view()
+                facts = self.services.sine.advance(now_monotonic_ns=self._monotonic_ns())
+                exact = bool(
+                    accepted and _field(sine, "candidate_uid") == pending.candidate_uid
+                    and _field(sine, "operational_event_id") == event_id
+                    and any(
+                        _fact_kind(fact) == "SINE_TRIGGER_ACCEPTED"
+                        and _field(fact, "candidate_uid") == pending.candidate_uid
+                        and _field(fact, "operational_event_id") == event_id
+                        for fact in facts
+                    )
+                )
+                if not exact:
+                    raise RuntimeError("SINE did not accept the exact prepared handoff")
+                self._route_sine_batch(facts, context.foreground)
                 self._clear_pending_trigger()
-                raise RuntimeError("durable trigger admission invariant failed")
-
-            # MIRL preparation is factual but additive. A refused/disabled
-            # MIRL episode returns no token and does not suppress SINE.
-            mirl_token = self.services.mirl.prepare_trigger(
-                candidate=pending.candidate,
-                operational_event_id=event_id,
-            )
-            self._persist_mirl_events(self.services.mirl.drain_events())
-            accepted = self.services.sine.request_trigger(
-                candidate=pending.candidate,
-                operational_event_id=event_id,
-                mirl_display_token=mirl_token,
-            )
-            self._clear_pending_trigger()
-            if not accepted:
-                raise RuntimeError("SINE rejected a durably admitted trigger")
+            except Exception:
+                self.services.sine.cancel_exact_candidate(
+                    candidate_uid=pending.candidate_uid, operational_event_id=event_id,
+                    reason="prepared_handoff_failed", now_ns=self._monotonic_ns(),
+                )
+                self.services.mirl.abandon_prepared_token(
+                    token=token, reason="prepared_handoff_failed", now_ns=self._monotonic_ns()
+                )
+                if accepted_key not in self._durable_sine_admissions:
+                    # No surface was dispatched: keep failed facts for diagnosis,
+                    # but never replay an abandoned acceptance as a real admission.
+                    self._failed_handoff_sine_facts = tuple(self._uncommitted_sine_facts)
+                    self._uncommitted_sine_facts.clear()
+                    self._settle_trigger_without_intervention(
+                        pending, event_id, "prepared_handoff_failed"
+                    )
+                else:
+                    self._clear_pending_trigger()
+                raise
             _telemetry(
-                self.telemetry_queue,
-                "trigger",
-                message="Trigger durably admitted; SINE handoff accepted",
-                badge="TRIGGER",
-                feed_text="SINE 1 — triggered",
-                tone="red",
-                candidate_uid=pending.candidate_uid,
+                self.telemetry_queue, "trigger",
+                message="Exact SINE operational admission committed; display pending",
+                badge="TRIGGER", feed_text="SINE admission accepted — display pending",
+                tone="red", candidate_uid=pending.candidate_uid,
                 operational_event_id=event_id,
-            )
-            self._console_history(
-                f"[TRIGGER] DURABLY ADMITTED | event_id={event_id} | handoff=SINE"
             )
             return
 
@@ -3133,16 +4096,28 @@ class WindowsMonitorCoordinator:
         )
         self._console_history(f"[TRIGGER] REJECTED | {reason}")
 
+
     def _persist_mirl_events(
         self,
         events: tuple[object, ...],
         observation: ForegroundObservation | None = None,
     ) -> None:
+        events = tuple(dict(
+            (str(_field(event, "event_id")), event)
+            for event in (*self._uncommitted_mirl_events, *events)
+        ).values())
         if not events:
             return
+        self._uncommitted_mirl_events = events
         if not self.services.storage.append_mirl_events(events):
             raise RuntimeError("MIRL event batch was not durably accepted")
+        self._uncommitted_mirl_events = ()
         for event in events:
+            if _enum_text(_field(event, "event_name")).lower() == "episode_closed":
+                self._durable_mirl_closes[(
+                    _field(event, "episode_id"), _field(event, "candidate_uid"),
+                    _field(event, "operational_event_id"),
+                )] = str(_field(event, "reason", ""))
             self._route_mirl_sine_presentation(event, observation)
             self._publish_domain_fact("mirl", event, observation)
 
@@ -3159,6 +4134,13 @@ class WindowsMonitorCoordinator:
 
         kind = str(_field(event, "kind", "") or "").strip().upper()
         candidate_uid = str(_field(event, "candidate_uid", "") or "").strip()
+        if kind in {"MIRL_FIRST_DISPLAY_TIMED_OUT", "MIRL_FIRST_DISPLAY_REJECTED"}:
+            self.services.sine.cancel_exact_candidate(
+                candidate_uid=candidate_uid,
+                operational_event_id=_field(event, "operational_event_id"),
+                reason=kind.lower(),
+                now_ns=max(1, int(_field(event, "occurred_monotonic_ns", 0))),
+            )
         occurred_ns = int(_field(event, "occurred_monotonic_ns", 0) or 0)
         if not candidate_uid or occurred_ns <= 0:
             return
@@ -3489,6 +4471,15 @@ class WindowsMonitorCoordinator:
         for fact in tuple(drain() or ()):
             self._publish_domain_fact("resource_intent", fact, observation)
 
+    def _route_sine_batch(self, facts, observation=None) -> bool:
+        self._uncommitted_sine_facts.extend(tuple(facts))
+        accepted = True
+        while self._uncommitted_sine_facts:
+            fact = self._uncommitted_sine_facts[0]
+            accepted = self._route_sine_fact(fact, observation) and accepted
+            self._uncommitted_sine_facts.pop(0)
+        return accepted
+
     def _route_sine_fact(
         self,
         fact: object,
@@ -3498,8 +4489,31 @@ class WindowsMonitorCoordinator:
         occurred_ns = int(_field(fact, "occurred_monotonic_ns", 0) or 0)
         action_result_recorded = True
 
-        if not self.services.storage.append_sine_facts((fact,)):
-            raise RuntimeError(f"SINE fact was not durably accepted: {kind}")
+        fact_key = (
+            _field(fact, "session_id"), _field(fact, "episode_uid"), kind,
+            _field(fact, "popup_request_id"), _field(fact, "occurrence"), occurred_ns,
+        )
+        already_durable = fact_key in self._durable_sine_fact_keys
+        if not already_durable:
+            if not self.services.storage.append_sine_facts((fact,)):
+                raise RuntimeError(f"SINE fact was not durably accepted: {kind}")
+            self._durable_sine_fact_keys.add(fact_key)
+        if kind == "SINE_TRIGGER_ACCEPTED" and not already_durable:
+            key = (_field(fact, "candidate_uid"), _field(fact, "operational_event_id"))
+            self._durable_sine_admissions.add(key)
+            if not self.services.trigger.complete_operational_handoff(
+                candidate_uid=key[0], operational_event_id=key[1]
+            ):
+                raise RuntimeError("Durable SINE acceptance did not match Trigger admission")
+        if kind in {"SINE_EPISODE_CANCELLED", "SINE_EPISODE_RESOLVED", "SINE_EMERGENCY_STOPPED"}:
+            self._durable_sine_terminals[str(_field(fact, "episode_uid", ""))] = str(
+                _field(fact, "reason", "") or kind
+            )
+        if kind == "SINE_POPUP_CLOSED":
+            self._durable_popup_closes.add((
+                str(_field(fact, "episode_uid", "")),
+                str(_field(fact, "popup_request_id", "")),
+            ))
 
         if kind == "SINE_BREAK_REQUESTED":
             result = self.services.normal_break.request_duration(
@@ -3545,86 +4559,13 @@ class WindowsMonitorCoordinator:
                     "Normal Break duration request was not durably accepted"
                 )
 
-        if kind == "SINE_STUDY_MATERIAL_REQUESTED":
-            request_id = str(_field(fact, "popup_request_id", "") or "")
-            declared_context_token = str(
-                _field(fact, "study_context_token", "") or ""
-            )
-            declared_resource_key = str(_field(fact, "resource_key", "") or "")
-            from COSECANT_STUDY_MODE.study import StudyState
-            from CORE_ENGINE.resource_intent import study_context_token
-
-            study = self.services.study.snapshot()
-            sine = self.services.sine.live_view()
-            current_context_token = study_context_token(
-                str(_field(study, "block_id", "") or ""),
-                int(_field(study, "generation", 0) or 0),
-            )
-            popup_is_current = bool(
-                request_id
-                and request_id == str(_field(sine, "popup_request_id", "") or "")
-                and str(_field(fact, "episode_uid", "") or "")
-                == str(_field(sine, "episode_uid", "") or "")
-                and str(_field(sine, "last_response", "") or "")
-                == "this_is_study_material"
-            )
-            if not popup_is_current:
-                granted = False
-                reason = "denied_popup_not_current"
-            elif _field(study, "state") is not StudyState.ACTIVE:
-                granted = False
-                reason = "denied_no_active_block"
-            elif not declared_resource_key:
-                granted = False
-                reason = "denied_missing_exact_resource"
-            elif declared_context_token != current_context_token:
-                granted = False
-                reason = "denied_context_changed"
-            else:
-                result = self.services.resource_intent.record_study_material_allowance(
-                    study_context_token=declared_context_token,
-                    resource_key=declared_resource_key,
-                    granted_monotonic_ns=max(1, occurred_ns),
-                )
-                granted = bool(_field(result, "granted", False))
-                outcome = _field(result, "outcome")
-                reason = (
-                    str(outcome.value) if hasattr(outcome, "value") else str(outcome or "")
-                ) or str(_field(result, "detail", "") or "")
-            # UAT-02.  SINE may REFUSE this callback -- a superseded or stale
-            # occurrence, a terminal episode, an episode/occurrence identity
-            # mismatch, or a response this occurrence never carried.  A refusal
-            # produces NO SINE fact at all, so the popup is never told anything
-            # and sits on "ACTION SENT ... WAITING FOR ACCEPTANCE" forever.
-            #
-            # Presentation cannot be repaired from here: only SINE may close a
-            # popup, and inventing a close here would make the UI an authority.
-            # What Monitor owes is the truth, so a rejected authority callback
-            # is reported instead of disappearing silently.
-            recorded = self.services.sine.record_study_material_result(
-                request_id=request_id,
-                granted=granted,
-                occurred_monotonic_ns=max(1, occurred_ns),
-                reason=reason,
-            )
-            if not recorded:
-                action_result_recorded = False
-                _telemetry(
-                    self.telemetry_queue,
-                    "engine_command_rejected",
-                    message=(
-                        "SINE refused the Study Material result; no result fact "
-                        "was produced and the popup was not informed"
-                    ),
-                    request_id=request_id,
-                    granted=granted,
-                    reason=reason,
-                )
 
         # The popup's factual DISPLAYED event—not a schedule request—creates
         # MIRL episode evidence. Trigger also receives the exact same fact.
-        self.services.trigger.record_intervention_fact(fact)
-        self.services.mirl.record_sine_fact(fact)
+        if fact_key not in self._mirl_consumed_sine_keys:
+            self.services.trigger.record_intervention_fact(fact)
+            self.services.mirl.record_sine_fact(fact)
+            self._mirl_consumed_sine_keys.add(fact_key)
         self._persist_mirl_events(self.services.mirl.drain_events(), observation)
         self._publish_domain_fact("sine", fact, observation)
 
@@ -3768,11 +4709,16 @@ class WindowsMonitorCoordinator:
                     ),
                     "tone": "cyan",
                 }
+            if kind == "MIRL_SINE_TERMINATED" and _field(fact, "reason") == "STUDY_MODE_ACTIVATED":
+                return {
+                    "badge": "MIRL", "feed_text": "Study Mode started", "tone": "cyan",
+                }
             if kind == "MIRL_EPISODE_CLOSED":
+                outcome = str(_field(fact, "reason", "") or "")
                 return {
                     "badge": "MIRL",
-                    "feed_text": "EPISODE CLOSED",
-                    "tone": "green",
+                    "feed_text": f"EPISODE CLOSED — {outcome}" if outcome else "EPISODE CLOSED",
+                    "tone": "green" if outcome == "RETURNED" else "cyan",
                 }
         return {}
 
@@ -3782,7 +4728,9 @@ class WindowsMonitorCoordinator:
         self._pending_dwell_telemetry = None
         if not bool(_field(snapshot, "restarted", False)):
             return
-        if bool(_field(snapshot, "study_context_active", False)):
+        if bool(_field(snapshot, "sine_watch_inhibited", False)) or bool(
+            _field(snapshot, "study_context_active", False)
+        ):
             return
         verdict = _field(snapshot, "verdict")
         if _enum_text(_field(verdict, "disposition", "")).lower() not in {
@@ -4169,18 +5117,47 @@ class WindowsMonitorCoordinator:
             confidence = _enum_text(_field(blacklist, "confidence", "")).upper() or "NONE"
             next_stage = _field(blacklist, "next_sine_stage", None)
             if label and state in {"watching", "threshold_reached", "submitted"} and target > 0:
-                signature = (label, state, int(elapsed), int(target), next_stage, title)
+                cosecant = self.services.cosecant.snapshot()
+                cosecant_owned = self._cosecant_owns_break_return(cosecant)
+                cosecant_state = _enum_text(_field(cosecant, "state", "")).upper()
+                signature = (
+                    label,
+                    state,
+                    int(elapsed),
+                    int(target),
+                    next_stage,
+                    title,
+                    cosecant_owned,
+                    cosecant_state,
+                    context.study_owned,
+                )
                 if signature != self._last_blacklist_console_signature:
                     self._last_blacklist_console_signature = signature
                     next_text = f"SINE {int(next_stage)}" if type(next_stage) is int else (
                         "TRIGGER" if state in {"threshold_reached", "submitted"} else "—"
                     )
                     resource = label if not title else f"{label} - {title[:70]}"
-                    self._console_history(
-                        f"[SINE WATCH] {resource} | BLACKLIST={confidence} | "
-                        f"{_duration_mmss(elapsed)} / {_duration_mmss(target)} | NEXT={next_text}",
-                        context.foreground,
-                    )
+                    if cosecant_owned:
+                        owner_label = "BREAK" if cosecant_state == "BREAK_ACTIVE" else "RETURN"
+                        self._console_history(
+                            f"[COSECANT {owner_label}] {resource} | STATE={cosecant_state} | "
+                            f"BLACKLIST={confidence} (DESCRIPTIVE) | "
+                            "NEXT=RETURN CONTROL",
+                            context.foreground,
+                        )
+                    elif context.study_owned:
+                        verdict = _field(context.resource_intent, "verdict")
+                        self._console_history(
+                            f"[STUDY WATCH] {resource} | BLACKLIST={confidence} (DESCRIPTIVE) | "
+                            f"STUDY={_enum_text(_field(verdict, 'classification', ''))}",
+                            context.foreground,
+                        )
+                    else:
+                        self._console_history(
+                            f"[SINE WATCH] {resource} | BLACKLIST={confidence} | "
+                            f"{_duration_mmss(elapsed)} / {_duration_mmss(target)} | NEXT={next_text}",
+                            context.foreground,
+                        )
             else:
                 self._last_blacklist_console_signature = None
         else:
@@ -4217,18 +5194,32 @@ class WindowsMonitorCoordinator:
         else:
             self._last_mirl_console_signature = None
 
-    def _publish_live_views(self, context: MonitorContext) -> None:
+    def _publish_live_views(
+        self,
+        context: MonitorContext,
+        blacklist_result: object | None = None,
+    ) -> None:
         foreground = context.foreground
+        # One immutable Resource Intent projection is shared by its dedicated
+        # signal and the control bundle.  Some presentation-only uncertainty
+        # fields are clock-derived, so two reads could otherwise differ within
+        # one observation and defeat the category identity guard.
+        resource_live_view = self.services.resource_intent.live_view()
         display_app = _activity_display_app(context)
+        badge, tone = self._activity_telemetry_semantics(
+            context,
+            resource_view=resource_live_view,
+        )
         identity = (
             foreground.hwnd,
             foreground.process_name,
             foreground.window_title,
             display_app,
+            badge,
+            tone,
         )
         if identity != self._last_foreground_identity:
             self._last_foreground_identity = identity
-            badge, tone = self._activity_telemetry_semantics(context)
             _telemetry(
                 self.telemetry_queue,
                 "activity",
@@ -4253,7 +5244,7 @@ class WindowsMonitorCoordinator:
             self.telemetry_queue,
             "resource_intent_live_status",
             observation=foreground,
-            live_view=self.services.resource_intent.live_view(),
+            live_view=resource_live_view,
         )
         _telemetry(
             self.telemetry_queue,
@@ -4324,7 +5315,12 @@ class WindowsMonitorCoordinator:
             live_view={
                 "session_id": self.session_id,
                 "foreground": foreground,
-                "resource_intent": self.services.resource_intent.live_view(),
+                "resource_intent": resource_live_view,
+                "study_app_category": _study_app_category_metadata(
+                    context,
+                    blacklist_result,
+                    session_id=self.session_id,
+                ),
                 "blacklist": self.services.blacklist.live_view(),
                 "trigger": self.services.trigger.live_view(),
                 "sine": self.services.sine.live_view(),
@@ -4571,22 +5567,63 @@ class WindowsMonitorCoordinator:
     def _activity_telemetry_semantics(
         self,
         context: MonitorContext,
+        *,
+        resource_view: object | None = None,
     ) -> tuple[str, str]:
         """Return the badge/tone from already-authoritative current facts."""
 
+        from COSECANT_STUDY_MODE.study import StudyState
         from CORE_ENGINE.resource_intent import (
             NORMAL_FOCUS_SURFACES,
             ResourceIntent,
             ResourceSurface,
         )
 
-        resource_view = self.services.resource_intent.live_view()
-        if (
-            resource_view is not None
-            and _field(resource_view, "classification", None)
-            is ResourceIntent.STUDY_ALIGNED
-        ):
-            return "STUDY", "green"
+        if resource_view is None:
+            resource_view = self.services.resource_intent.live_view()
+        classification = _field(resource_view, "classification", None)
+        surface = _field(resource_view, "resource_surface", None)
+        study_snapshot = self.services.study.snapshot()
+        active_study = _field(study_snapshot, "state", None) is StudyState.ACTIVE
+
+        if active_study:
+            if classification is ResourceIntent.STUDY_ALIGNED:
+                return "STUDY", "green"
+
+            if surface in NORMAL_FOCUS_SURFACES:
+                return "STUDY FOCUS", "violet"
+
+            if classification is ResourceIntent.DISTRACTION:
+                if surface is ResourceSurface.GAMING:
+                    return "GAMING", "red"
+
+                if _field(context, "cosine_platform") is not None:
+                    return "OTT", "study-yellow"
+
+                if surface is ResourceSurface.MESSAGING:
+                    return "MESSAGING", "study-orange"
+
+                blacklist = self.services.blacklist.live_view()
+                if (
+                    surface
+                    in {
+                        ResourceSurface.SOCIAL,
+                        ResourceSurface.YOUTUBE_WATCH,
+                        ResourceSurface.YOUTUBE_OTHER,
+                        ResourceSurface.YOUTUBE_SHORTS,
+                    }
+                    or (
+                        blacklist is not None
+                        and _enum_text(_field(blacklist, "disposition", "")).lower()
+                        in {"accused", "unknown"}
+                    )
+                ):
+                    return "SOCIAL", "red"
+
+            # Uncertain evidence remains neutral and never appears as confirmed
+            # green Study or bright-red distraction.  Resource Intent retains
+            # the unchanged clarification authority behind this presentation.
+            return "STUDY ACTIVITY", "cyan"
 
         if _field(context, "cosine_platform") is not None:
             return "OTT", "cyan"
@@ -4597,6 +5634,9 @@ class WindowsMonitorCoordinator:
             is ResourceSurface.MESSAGING
         ):
             return "MESSAGING", "cyan"
+
+        if surface is ResourceSurface.GAMING:
+            return "GAMING", "amber"
 
         blacklist = self.services.blacklist.live_view()
         if (
@@ -4609,8 +5649,7 @@ class WindowsMonitorCoordinator:
         if (
             not bool(_field(context, "study_owned", False))
             and resource_view is not None
-            and _field(resource_view, "resource_surface", None)
-            in NORMAL_FOCUS_SURFACES
+            and surface in NORMAL_FOCUS_SURFACES
         ):
             return "FOCUS", "cyan"
 
@@ -4626,6 +5665,8 @@ class WindowsMonitorCoordinator:
             payload = _field(command, "payload")
             response_queue = _field(command, "response_queue")
 
+            if self._handle_secant_connection_command(kind,payload):
+                continue
             if kind == "emergency":
                 self._perform_emergency()
                 return
@@ -4639,12 +5680,26 @@ class WindowsMonitorCoordinator:
                 )
                 continue
             if kind == "cosine_command":
+                if (self._study_owns_moment() and _enum_text(_field(payload,"kind","")) in
+                        {"INTENT_ACTION","DURATION_SUBMITTED","CHECKIN_ACTION","WELCOME_ACTION"}):
+                    self._reject_command("Study world owns admission")
+                    self._answer_command(response_queue,False)
+                    continue
                 result = self.services.cosine.submit_command(payload)
                 for effect in self.services.cosine.drain_effects():
                     self._route_cosine_effect(effect)
                 self._answer_command(response_queue, result)
                 continue
             if kind == "mine_command":
+                if (self._study_owns_moment() and _enum_text(_field(payload,"kind","")) in
+                        {"MINE1_ACTION","IMPORTANT_DURATION_SUBMITTED"}):
+                    self._reject_command("Study world owns admission")
+                    self._answer_command(response_queue,False)
+                    continue
+                if (self.pause_event.is_set() and _enum_text(_field(payload,"kind",""))=="IMPORTANT_DURATION_SUBMITTED"):
+                    self._reject_command("Resume before starting a MINE allowance")
+                    self._answer_command(response_queue,False)
+                    continue
                 result = self._mine_authority.submit_command(payload)
                 for effect in self._mine_authority.drain_effects():
                     self._route_mine_effect(effect)
@@ -4663,7 +5718,18 @@ class WindowsMonitorCoordinator:
                 self._answer_command(response_queue, accepted)
                 continue
             if kind == "study_prepare":
+                if self._pending_study_start is not None:
+                    self._answer_command(response_queue, {
+                        "accepted": False, "message": "Study START transfer is in progress.",
+                        "snapshot": self.services.study.snapshot(),
+                    })
+                    continue
                 if not self._study_command_identity_admits(payload, "PREPARE"):
+                    self._answer_command(response_queue, {
+                        "accepted": False,
+                        "message": "Study changed since it was displayed. Review the current block and press PREPARE again.",
+                        "snapshot": self.services.study.snapshot(),
+                    })
                     continue
                 # Keyword collections are forwarded EXACTLY as supplied, never
                 # coerced.  StudyRuntime.prepare owns the fail-closed rule that
@@ -4673,17 +5739,47 @@ class WindowsMonitorCoordinator:
                 #
                 # ``block_id`` below is the optional identity OF THE NEW BLOCK
                 # and is unrelated to the expected identity checked above.
+                from COSECANT_STUDY_MODE.study import StudyPlan
+
+                # Validate with Study's own immutable contract BEFORE prepare
+                # can mutate runtime truth. Invalid user input is a rejected
+                # command, not a reason to end the parent monitoring session.
+                try:
+                    plan = StudyPlan(
+                        subject=str(_field(payload, "subject", "")),
+                        task=str(_field(payload, "task", "")),
+                        planned_seconds=int(_field(payload, "planned_seconds", 0) or 0),
+                        keywords=_declared_keywords(payload, "keywords"),
+                        important_keywords=_declared_keywords(
+                            payload, "important_keywords"
+                        ),
+                    )
+                except (TypeError, ValueError, OverflowError) as exc:
+                    self._reject_command(f"PREPARE rejected: {exc}")
+                    self._answer_command(response_queue, {
+                        "accepted": False,
+                        "message": f"PREPARE rejected: {exc}",
+                        "snapshot": self.services.study.snapshot(),
+                    })
+                    continue
+                # Runtime and durability failures remain fatal: neither is
+                # inside the input-validation exception boundary above.
                 result = self.services.study.prepare(
-                    subject=str(_field(payload, "subject", "")),
-                    task=str(_field(payload, "task", "")),
-                    planned_seconds=int(_field(payload, "planned_seconds", 0) or 0),
-                    keywords=_declared_keywords(payload, "keywords"),
-                    important_keywords=_declared_keywords(
-                        payload, "important_keywords"
-                    ),
+                    subject=plan.subject,
+                    task=plan.task,
+                    planned_seconds=plan.planned_seconds,
+                    keywords=plan.keywords,
+                    important_keywords=plan.important_keywords,
                     block_id=str(_field(payload, "block_id", "") or ""),
                 )
                 self._handle_study_result("PREPARE", result)
+                # Acknowledge only AFTER the existing durability and context
+                # gates. The dedicated reply cannot be lost to telemetry load.
+                self._answer_command(response_queue, {
+                    "accepted": bool(_field(result, "accepted", False)),
+                    "message": str(_field(result, "message", "Study command processed")),
+                    "snapshot": _field(result, "snapshot"),
+                })
                 continue
             if kind == "study_action":
                 if not self._study_command_identity_admits(payload, "study action"):
@@ -4732,6 +5828,8 @@ class WindowsMonitorCoordinator:
         """Direct Phase-2 command seam; Controller/UI work remains Phase 3."""
 
         if kind == "normal_break_start":
+            if self.pause_event.is_set() or self._study_owns_moment():
+                return self._reject_command("Normal Break cannot start during Pause or Study ownership")
             return self._start_normal_break(payload)
         if kind == "normal_break_cancel":
             result = self.services.normal_break.cancel_duration(
@@ -4774,6 +5872,8 @@ class WindowsMonitorCoordinator:
     def _start_normal_break(self, payload: object) -> bool:
         """Persistence-first Normal Break start and exact SINE hold handoff."""
 
+        if self.pause_event.is_set() or self._study_owns_moment():
+            return False
         pending = self.services.normal_break.snapshot()
         declared = (
             _field(payload, "break_id"),
@@ -4973,6 +6073,7 @@ class WindowsMonitorCoordinator:
                     _field(payload, "expected_resource_key", "") or ""
                 ),
             )
+            self._capture_study_observation_evidence(accepted=accepted, request_id=request_id, applied_ns=occurred_ns)
         else:
             accepted = False
         if not accepted:
@@ -5022,11 +6123,8 @@ class WindowsMonitorCoordinator:
                 message=f"SINE callback rejected: {kind}",
                 request_id=request_id,
             )
-        action_result_recorded = True
-        for fact in self.services.sine.advance(now_monotonic_ns=occurred_ns):
-            action_result_recorded = (
-                self._route_sine_fact(fact, None) and action_result_recorded
-            )
+        action_result_recorded = self._route_sine_batch(self.services.sine.advance(now_monotonic_ns=occurred_ns))
+        self._advance_pending_study_start()
         return accepted and action_result_recorded
 
     # ------------------------------------------------------------------
@@ -5118,39 +6216,28 @@ class WindowsMonitorCoordinator:
             )
         return True
 
-    def _handle_study_action(self, action: str) -> None:
-        from COSECANT_STUDY_MODE.cosecant import CosecantState
+    def _publish_study_transition(self, pending, state, message="") -> None:
+        _telemetry(
+            self.telemetry_queue, "study_start_transition",
+            live_view={
+                "block_id": pending["study_identity"][0],
+                "generation": pending["study_identity"][1],
+                "deadline_monotonic_ns": pending["deadline"],
+                "state": state, "message": message,
+            },
+            message=message or "Study Mode will be starting in 5",
+        )
 
-        key = action.strip().upper()
-        cosecant_state = _field(self.services.cosecant.snapshot(), "state")
-        active_break = cosecant_state in {
-            CosecantState.BREAK_ACTIVE,
-            CosecantState.BREAK_COMPLETE,
-            CosecantState.BREAK_ALREADY_OVER,
-            CosecantState.FINAL_LOCK,
-            CosecantState.RETURN_CONFIRMING,
-        }
-        if active_break and key in {"RESUME", "COMPLETE"}:
-            _telemetry(
-                self.telemetry_queue,
-                "engine_command_rejected",
-                message="Study action is blocked by the active COSECANT break",
-            )
-            return
-        methods = {
-            "START": self.services.study.start,
-            "PAUSE": self.services.study.pause,
-            "RESUME": self.services.study.resume,
-            "COMPLETE": self.services.study.complete,
-        }
-        method = methods.get(key)
-        if method is None:
-            _telemetry(self.telemetry_queue, "engine_command_rejected", message=f"Unknown Study action: {key}")
-            return
-        result = method()
-        self._handle_study_result(key, result)
-        if key == "COMPLETE" and bool(_field(result, "accepted", False)):
-            self._route_cosecant_result(self.services.cosecant.cancel_for_session_end())
+    def _begin_study_start_transition(self) -> bool:
+        return self._begin_study_entry()
+
+    def _advance_pending_study_start(self) -> None:
+        if self._pending_study_start is not None:
+            self._pending_study_start=None
+
+    def _handle_study_action(self,action: str) -> None:
+        if action.upper()=="START":self._begin_study_entry()
+        else:self._apply_internal_study_action(action)
 
     def _handle_study_result(self, action: str, result: object) -> None:
         snapshot = _field(result, "snapshot")
@@ -5164,11 +6251,10 @@ class WindowsMonitorCoordinator:
             self._sync_study_context_with_resource_intent(snapshot)
             from COSECANT_STUDY_MODE.study import StudyState
 
+            if _field(snapshot, "state", None) is StudyState.ACTIVE:
+                self.services.blacklist.inhibit_normal_sine_watch()
+
             if _field(snapshot, "state", None) is StudyState.COMPLETED:
-                if not self._terminate_matching_study_sine(snapshot):
-                    raise RuntimeError(
-                        "SINE refused the exact terminal Study scope"
-                    )
                 # This command already durably recorded the terminal snapshot
                 # under its own correct action label (e.g. "COMPLETE"). Mark
                 # this block/generation handled so the periodic
@@ -5218,6 +6304,7 @@ class WindowsMonitorCoordinator:
         state = _field(snapshot, "state", None)
         self._reconcile_break_target_with_study(snapshot)
         if state is not StudyState.ACTIVE:
+            self._end_study_foreground_span("STUDY_INACTIVE")
             self.services.resource_intent.retire_study_context()
             return
 
@@ -5243,105 +6330,13 @@ class WindowsMonitorCoordinator:
         )
         self.services.resource_intent.publish_study_context(context)
 
-    def _sync_study_context_after_advance(self, snapshot: object) -> None:
-        """Keep Resource Intent's ACTIVE Study context current between commands.
-
-        ``StudyRuntime.advance()`` runs on every poll and can move ACTIVE ->
-        COMPLETED on its own once the planned duration elapses, and keeps
-        counting ``remaining_seconds`` down while ACTIVE -- neither of which
-        goes through ``_handle_study_result``. Discarding this return value
-        (the previous call site did) leaves Resource Intent holding a stale
-        ACTIVE context -- stale ``remaining_seconds``, or a context that
-        outlives Study actually completing -- which can keep granting
-        STUDY_ALIGNED/SINE exemption after Study genuinely stopped.
-
-        PAUSED is deliberately left untouched here, unlike
-        ``_sync_study_context_with_resource_intent``: a COSECANT break owns
-        the Resource Intent context slot while Study is paused for one, and
-        this method runs every poll, so unconditionally retiring on PAUSED
-        the way an explicit user-PAUSE transition correctly does once would
-        instead repeatedly delete COSECANT's own BREAK context out from
-        under it. Only ACTIVE (refresh) and a from-ACTIVE COMPLETED
-        transition (persist once, then retire) are handled here.
-
-        A COMPLETED snapshot alone does not mean *this poll* is what
-        completed it: ``StudyCompletionReason`` distinguishes an automatic
-        target-reached completion from a manual COMPLETE command
-        (USER_COMPLETED) or shutdown (SAFE_SHUTDOWN), both of which
-        ``_handle_study_result``/shutdown already durably recorded under
-        their own correct action label and already retired the context.
-        Recording ``TARGET_REACHED`` here for one of those would produce an
-        internally contradictory audit row (action=TARGET_REACHED,
-        completion_reason=USER_COMPLETED). Only a genuine
-        TARGET_REACHED reason is handled here at all.
-        """
-
-        from COSECANT_STUDY_MODE.study import StudyCompletionReason, StudyState
-
-        state = _field(snapshot, "state", None)
-        self._reconcile_break_target_with_study(snapshot)
-        if state is StudyState.ACTIVE:
+    def _sync_study_context_after_advance(self,snapshot) -> None:
+        from COSECANT_STUDY_MODE.study import StudyState
+        if self._study_exit:return
+        if snapshot.state is StudyState.ACTIVE:
             self._sync_study_context_with_resource_intent(snapshot)
-            return
-        if (
-            state is not StudyState.COMPLETED
-            or _field(snapshot, "completion_reason", None)
-            is not StudyCompletionReason.TARGET_REACHED
-        ):
-            return
-
-        block_id = str(_field(snapshot, "block_id", "") or "")
-        generation = int(_field(snapshot, "generation", 0) or 0)
-        signature = (block_id, generation)
-        if signature == self._last_study_completion_signature:
-            return
-
-        persisted = True
-        if self.session_id is not None:
-            persisted = self.services.storage.record_study_snapshot(
-                session_id=self.session_id,
-                action="TARGET_REACHED",
-                snapshot=snapshot,
-            )
-        # The exemption must not survive Study genuinely completing even if
-        # the audit write below fails -- a stale STUDY_ALIGNED exemption is
-        # worse than a missing durability record. The failure itself is
-        # still raised, never silently swallowed, and the completion is
-        # deliberately NOT marked handled on failure so the next poll
-        # retries the durability write instead of dropping it forever.
-        self.services.resource_intent.retire_study_context()
-        if not self._terminate_matching_study_sine(snapshot):
-            raise RuntimeError("SINE refused the exact terminal Study scope")
-        if not persisted:
-            raise RuntimeError("Study target-reached snapshot was not durably accepted")
-        self._last_study_completion_signature = signature
-
-    def _terminate_matching_study_sine(self, snapshot: object) -> bool:
-        """Forward one exact terminal Study identity to the SINE authority."""
-
-        from COSECANT_STUDY_MODE.study import StudyCompletionReason, StudyState
-
-        if _field(snapshot, "state", None) is not StudyState.COMPLETED:
-            return True
-        reason = _field(snapshot, "completion_reason", None)
-        if reason not in {
-            StudyCompletionReason.TARGET_REACHED,
-            StudyCompletionReason.USER_COMPLETED,
-        }:
-            return True
-
-        context_token = _field(snapshot, "context_token", "")
-        occurred_ns = _field(snapshot, "published_monotonic_ns", 0)
-        if type(context_token) is not str or not context_token:
-            return False
-        if type(occurred_ns) is not int or occurred_ns <= 0:
-            return False
-
-        return self.services.sine.cancel_matching_study_episode(
-            study_context_token=context_token,
-            occurred_monotonic_ns=occurred_ns,
-            completion_reason=reason.value,
-        )
+        elif snapshot.state is StudyState.COMPLETED and self._study_world=="STUDY":
+            self._begin_study_exit("study_complete")
 
     def _reconcile_break_target_with_study(self, study: object) -> None:
         """Clear remembered evidence when its owning Study identity retires."""
@@ -5470,217 +6465,23 @@ class WindowsMonitorCoordinator:
             return "the remembered target belongs to a different Study block"
         return ""
 
-    def _request_cosecant_break(
-        self,
-        selected_break_seconds: int,
-        *,
-        expected_study_identity=None,
-    ) -> None:
-        """Record a break request; admission happens on the next observation.
+    def _request_cosecant_break(self,selected_break_seconds: int,*,expected_study_identity=None) -> None:
+        study=self.services.study.snapshot()
+        current=(study.block_id,study.generation)
+        action=self._pending_secant_break_action
+        target=self._study_return_target
+        accepted=False
+        if (expected_study_identity in {None,current} and target is not None
+                and target.study_context_token==study.context_token
+                and target.observed_monotonic_ns>=study.active_epoch_monotonic_ns):
+            accepted=self._begin_study_break(selected_break_seconds,target,
+                request_id=action[0] if action else "",action_sequence=action[1] if action else None)
+        if not accepted and action:self._reject_secant_break_action(action,"Break admission rejected")
+        self._pending_secant_break_action=None
 
-        A managed break can only be admitted once MYELIN knows the exact
-        resource that will later release its FINAL_LOCK, and that fact comes
-        from a normal Monitor cycle -- foreground, then browser, then Resource
-        Intent.  Pressing the button therefore no longer pauses Study; it
-        parks the request until the artery delivers a real observation.
-        """
-
-        from COSECANT_STUDY_MODE.cosecant import CosecantState
-
+    def _admit_pending_break(self,context: MonitorContext) -> None:
         if self._pending_break_seconds is not None:
-            _telemetry(
-                self.telemetry_queue,
-                "engine_command_rejected",
-                message="A break request is already waiting for admission",
-            )
-            return
-        if _field(self.services.cosecant.snapshot(), "state") in {
-            CosecantState.BREAK_ACTIVE,
-            CosecantState.BREAK_COMPLETE,
-            CosecantState.BREAK_ALREADY_OVER,
-            CosecantState.FINAL_LOCK,
-            CosecantState.RETURN_CONFIRMING,
-        }:
-            _telemetry(
-                self.telemetry_queue,
-                "engine_command_rejected",
-                message="Another COSECANT break is already active",
-            )
-            return
-        self._pending_break_seconds = int(selected_break_seconds)
-        # C11-A.  A break request is PARKED until the next observation, so the
-        # identity checked at request time can move before admission.  Carry it
-        # with the request and check it again at the moment the break is
-        # actually founded, so only the Study block that asked can receive it.
-        self._pending_break_study_identity = expected_study_identity
-        _telemetry(
-            self.telemetry_queue,
-            "cosecant_break_pending",
-            message="Break requested; waiting for exact Study resource evidence",
-        )
-
-    def _admit_pending_break(self, context: MonitorContext) -> None:
-        """Decide one parked break request against this cycle's facts.
-
-        Evaluated exactly ONCE, on the first observation after the request.
-        A rejected request is discarded rather than retried, so a break can
-        never begin minutes later at a moment the user did not choose.
-        """
-
-        selected_break_seconds = self._pending_break_seconds
-        if selected_break_seconds is None:
-            return
-        # Direct callers in the external lab exercise this boundary without a
-        # complete _route_context() cycle. Production already refreshed the
-        # slot immediately before this call; repeating the idempotent refresh
-        # keeps the authority boundary self-contained.
-        self._refresh_break_eligible_study_target(context)
-        self._pending_break_seconds = None
-        expected_study_identity = self._pending_break_study_identity
-        self._pending_break_study_identity = None
-
-        # C11-A.  Re-check the requesting Study identity against current truth
-        # before anything is mutated.  Study may have completed and a new block
-        # started while this request sat parked.
-        if expected_study_identity is not None and not self._study_identity_matches(
-            expected_study_identity, "parked break request"
-        ):
-            self._publish_study_views()
-            return
-
-        remembered_target = self._break_eligible_study_target
-        if int(context.foreground.process_id or 0) == self._myelin_process_id:
-            refusal = self._remembered_break_admission_refusal(
-                context,
-                remembered_target,
-            )
-        else:
-            refusal = self._break_admission_refusal(context)
-        if refusal:
-            _telemetry(
-                self.telemetry_queue,
-                "engine_command_rejected",
-                observation=context.foreground,
-                message=f"Break not started: {refusal}",
-            )
-            self._publish_study_views()
-            return
-
-        from COSECANT_STUDY_MODE.cosecant import CosecantReturnTarget
-
-        # C10.2.  Capture who owns intervention RIGHT NOW, before Study is
-        # mutated, so the ownership transfer below names the exact episode that
-        # existed at admission rather than whatever SINE looks like afterwards.
-        # A terminal historical view is not an owner, and Protected Red is
-        # deliberately excluded -- Red is refused by the admission gate above
-        # and must never be resolvable through this path.
-        outgoing_sine_candidate = self._active_sine_candidate_uid()
-
-        if remembered_target is None:
-            raise RuntimeError(
-                "break admission passed without an exact certified Study target"
-            )
-        target = CosecantReturnTarget(
-            study_context_token=remembered_target.study_context_token,
-            platform_key=remembered_target.platform_key,
-            resource_token=remembered_target.resource_token,
-            observed_monotonic_ns=remembered_target.observed_monotonic_ns,
-        )
-
-        # Study pauses only now, once the target is known to be constructible.
-        # A refused admission above leaves Study running untouched.
-        paused = self.services.study.pause()
-        if not bool(_field(paused, "accepted", False)):
-            _telemetry(
-                self.telemetry_queue,
-                "engine_command_rejected",
-                message=_field(paused, "message", "Study could not pause for break"),
-            )
-            return
-        self._handle_study_result("PAUSE_FOR_BREAK", paused)
-        result = self.services.cosecant.start_break(
-            study=_field(paused, "snapshot"),
-            selected_break_seconds=selected_break_seconds,
-            intended_return_target=target,
-        )
-        if not bool(_field(result, "accepted", False)):
-            # COSECANT refused after Study already paused.  Put Study back so a
-            # rejected break never silently costs the user their session.
-            _telemetry(
-                self.telemetry_queue,
-                "engine_command_rejected",
-                message=_field(result, "message", "COSECANT refused the break"),
-            )
-            resumed = self.services.study.resume()
-            if not bool(_field(resumed, "accepted", False)):
-                # Study is now PAUSED with no break to release it, and the
-                # rollback that should have restored it has itself failed.
-                # There is no correct state left to continue from, so fail
-                # loudly rather than strand the user mid-session.
-                raise RuntimeError(
-                    "Study could not be resumed after COSECANT refused the "
-                    f"break: {_field(resumed, 'message', 'no reason given')}"
-                )
-            self._handle_study_result("RESUME_AFTER_REFUSED_BREAK", resumed)
-            self._publish_study_views()
-            return
-
-        # Durability first: the BREAK_STARTED fact is routed and persisted
-        # before any ownership changes hands.
-        self._route_cosecant_result(result, context.foreground)
-        self._break_eligible_study_target = None
-
-        # C10.2 -- ATOMIC OWNERSHIP TRANSFER.
-        #
-        # Before the factual break, SINE may own the intervention.  After it,
-        # COSECANT alone owns break-return regulation.  Monitor observes SINE
-        # earlier in the cycle than it admits the break, so without this an
-        # already-running episode would stay logically alive until the NEXT
-        # observation reclassified the surface as APPROVED_BREAK -- one cycle
-        # in which two behavioural authorities own the same moment.
-        #
-        # The timestamp is COSECANT's own factual break start, taken from the
-        # BREAK_STARTED fact in THIS accepted result.  Monitor does not read a
-        # clock here: a second reading would be a different instant from the
-        # one COSECANT recorded, and SINE validates the handoff time against
-        # its episode.
-        if outgoing_sine_candidate:
-            started_ns = self._break_started_monotonic_ns(result)
-            if not bool(
-                self.services.sine.confirm_break_started(
-                    candidate_uid=outgoing_sine_candidate,
-                    occurred_monotonic_ns=started_ns,
-                )
-            ):
-                # COSECANT is already BREAK_ACTIVE and durable.  Leaving the
-                # old episode alive would mean two authorities regulating one
-                # moment, which is exactly the state this phase exists to make
-                # impossible, so fail loudly rather than continue.
-                raise RuntimeError(
-                    "SINE refused the COSECANT break ownership handoff for "
-                    f"candidate {outgoing_sine_candidate!r}; two behavioural "
-                    "authorities would remain active"
-                )
-
-        self._publish_study_views()
-
-    def _active_sine_candidate_uid(self) -> str:
-        """Return the candidate UID of a live, non-Red SINE episode, else "".
-
-        Protected Red is excluded on purpose. Red is already refused by
-        ``_break_admission_refusal``, and making it eligible here would turn an
-        ownership handoff into an escape from the strongest intervention.
-        """
-
-        from SINE.sine import SinePhase
-
-        live = self.services.sine.live_view()
-        phase = _field(live, "phase")
-        if phase not in {SinePhase.WAITING_FOR_DISPLAY, SinePhase.ACTIVE}:
-            return ""
-        if bool(_field(live, "protected_red_active", False)):
-            return ""
-        return str(_field(live, "candidate_uid", "") or "")
+            self._pending_break_seconds=None;self._pending_break_study_identity=None
 
     def _break_started_monotonic_ns(self, result: object) -> int:
         """Read the factual break-start instant out of an accepted result."""
@@ -5748,6 +6549,7 @@ class WindowsMonitorCoordinator:
         if self.session_id is None:
             raise RuntimeError("emergency requested before session became durable")
         self._emergency_requested = True
+        if self._study_owns_moment():self._begin_study_exit("emergency")
         self._break_eligible_study_target = None
 
         # Stop presentation/runtime activity first, then record the emergency
@@ -5773,7 +6575,7 @@ class WindowsMonitorCoordinator:
             MineClosureReason.EMERGENCY, now_ns=time.monotonic_ns()
         ):
             self._route_mine_effect(effect)
-        self._route_cosecant_result(self.services.cosecant.cancel_for_session_end())
+        self._route_cosecant_result(self.services.cosecant.cancel_for_session_end(reason="emergency"))
         self.services.mirl.emergency_stop()
         self._persist_mirl_events(self.services.mirl.drain_events())
         receipt = self.services.storage.record_emergency(session_id=self.session_id)
@@ -5836,6 +6638,16 @@ class WindowsMonitorCoordinator:
     def _cleanup(self) -> bool:
         """Stop authorities in dependency order and close durable session."""
 
+        self._end_study_foreground_span("SESSION_STOP")
+        if self._study_owns_moment():
+            self._begin_study_exit("emergency" if self._emergency_requested else "session_end")
+            # Cleanup uses the existing bounded shutdown wait. Expiry reports
+            # unresolved cleanup; it never fabricates presentation clearance.
+            until=time.monotonic()+SHUTDOWN_PERSISTENCE_TIMEOUT_SECONDS
+            while self._study_exit and time.monotonic()<until:
+                self._drain_commands();self._connection_tick()
+                if self._study_exit:time.sleep(0.01)
+            if self._study_exit:self._cleanup_errors.append("Study world cleanup remains unresolved")
         self._break_eligible_study_target = None
         try:
             from SINE.normal_break import NormalBreakTerminationReason
@@ -5993,24 +6805,9 @@ class WindowsMonitorCoordinator:
             # may settle it, after which cleanup calls this method again.
             return
         if state == COMMITTED_STATE:
-            event_id = _receipt_result_id(receipt)
-            admitted = self.services.trigger.confirm_durable_admission(
-                candidate_uid=pending.candidate_uid,
-                operational_event_id=event_id,
+            self._settle_trigger_without_intervention(
+                pending, _receipt_result_id(receipt), "monitor_stopped_before_sine"
             )
-            if not admitted:
-                self._cleanup_errors.append(
-                    "Committed pending trigger could not be admitted"
-                )
-                return
-            self.services.trigger.record_intervention_fact(
-                {
-                    "kind": "MONITOR_STOPPED_BEFORE_SINE",
-                    "candidate_uid": pending.candidate_uid,
-                    "operational_event_id": event_id,
-                }
-            )
-            self._clear_pending_trigger()
             return
 
         rejected = self.services.trigger.reject_candidate(

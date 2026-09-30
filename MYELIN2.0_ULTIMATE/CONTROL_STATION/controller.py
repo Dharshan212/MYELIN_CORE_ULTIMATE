@@ -30,7 +30,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Final
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QTimer, Qt, pyqtSignal
+from collections import deque
+from uuid import uuid4
 
 
 LOGGER = logging.getLogger(__name__)
@@ -44,9 +46,13 @@ STARTUP_TIMEOUT_SECONDS: Final = 15.0
 
 # These are replace-in-place views, not history rows.  Keeping only the newest
 # copy prevents a slow UI from receiving hundreds of obsolete snapshots.
+CRITICAL_SECANT_KINDS: Final = frozenset({"secant_popup", "secant_close", "secant_action_result", "pause_ack", "normal_surface_fence", "secant_break_selection"})
+
 LIVE_VIEW_KINDS: Final = frozenset(
     {
         "control_view",
+        "secant_projection",
+        "pause_eligibility",
         "study_runtime_view",
         "cosecant_view",
         "cosine_live_status",
@@ -64,6 +70,7 @@ LIVE_VIEW_KINDS: Final = frozenset(
 TERMINAL_KINDS: Final = frozenset(
     {
         "session",
+        "study_start_transition",
         "returned",
         "timeout",
         "trigger_processing_failed",
@@ -143,6 +150,13 @@ class _TelemetryInbox(queue.Queue):
         kind = item.get("kind") if isinstance(item, Mapping) else None
 
         with self.not_full:
+            if kind in CRITICAL_SECANT_KINDS:
+                # Dedicated low-volume lifecycle facts retain custody under
+                # queue pressure; only replaceable projections are coalesced.
+                self.queue.append(item)
+                self.unfinished_tasks += 1
+                self.not_empty.notify()
+                return True
             if kind in LIVE_VIEW_KINDS:
                 for index in range(len(self.queue) - 1, -1, -1):
                     queued = self.queue[index]
@@ -180,7 +194,7 @@ class _TelemetryInbox(queue.Queue):
                 queued_kind = (
                     queued.get("kind") if isinstance(queued, Mapping) else None
                 )
-                if queued_kind not in TERMINAL_KINDS:
+                if queued_kind not in TERMINAL_KINDS and queued_kind not in CRITICAL_SECANT_KINDS:
                     removable_index = index
                     break
 
@@ -213,9 +227,15 @@ class ControlStationController(QObject):
     current_session_id_changed = pyqtSignal(object)
 
     # Append-only telemetry and replace-in-place prepared views are separate.
+    study_prepare_result = pyqtSignal(object)
+    study_start_transition_changed = pyqtSignal(object)
     telemetry_received = pyqtSignal(object)  # TelemetryEvent
     control_view_changed = pyqtSignal(object)
     study_view_changed = pyqtSignal(object)
+    secant_projection_changed = pyqtSignal(object)
+    secant_break_selection_requested = pyqtSignal(object)
+    pause_eligibility_changed = pyqtSignal(object)
+    normal_surface_fence_requested = pyqtSignal(object)
     cosine_live_status_changed = pyqtSignal(object)
     handover_live_status_changed = pyqtSignal(object)
     handover_family_signal_received = pyqtSignal(object)
@@ -242,6 +262,15 @@ class ControlStationController(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
 
+        self._pending_study_prepare = None
+        self._secant_presenter = None
+        self._secant_visual_projection = None
+        self._pending_secant_presentation = deque()
+        self._pause_eligibility = None
+        self._pause_pending = None
+        self._critical_commands = deque()
+        self._mine_dispatcher = self._cosine_dispatcher = None
+        self.normal_surface_fence_requested.connect(self._ack_normal_surface_fence, Qt.ConnectionType.QueuedConnection)
         self._status = EngineStatus.IDLE
         self._profile_type = "general"
         self._is_monitoring = False
@@ -295,6 +324,7 @@ class ControlStationController(QObject):
         self._sine_presenter = None
         self._normal_break_presenter = None
         self._study_confirmation_presenter = None
+        self._pending_study_confirmation_actions: dict[str, queue.Queue] = {}
         self._popup_dispatchers_installed = False
 
     @property
@@ -367,9 +397,16 @@ class ControlStationController(QObject):
         from MINE.popup import install_mine_dispatcher
         from SINE.popup import NormalBreakPresenter, SinePopupPresenter
 
-        install_cosine_dispatcher(app, owner=owner)
-        install_mine_dispatcher(app, owner=owner)
-        install_study(app)
+        self._cosine_dispatcher = install_cosine_dispatcher(app, owner=owner)
+        self._mine_dispatcher = install_mine_dispatcher(app, owner=owner)
+        study_dispatcher = install_study(app)
+        study_dispatcher.popup_withdrawn.connect(self._cosecant_surface_withdrawn)
+        from SECANT.popup import create_qt_presenter
+        self._secant_presenter = create_qt_presenter(self._send_secant_receipt, parent=owner)
+        self._secant_presenter.host.set_projection(self._secant_visual_projection)
+        while self._pending_secant_presentation:
+            kind, envelope = self._pending_secant_presentation.popleft()
+            self._route_prepared_view(kind, envelope)
         presenter = SinePopupPresenter(owner=owner, parent=self)
         presenter.popup_shown.connect(
             lambda request_id, occurred_ns, hwnd: self._send_sine_callback(
@@ -430,6 +467,54 @@ class ControlStationController(QObject):
         except queue.Full:
             return False
         return True
+
+    def _send_critical_command(self, kind, payload):
+        self._critical_commands.append((kind, payload))
+        self._flush_critical_commands()
+        return True  # Controller retains custody until the worker queue accepts.
+
+    def _flush_critical_commands(self):
+        while self._critical_commands:
+            kind, payload = self._critical_commands[0]
+            if payload.get("session_id") != self._current_session_id:
+                self._critical_commands.popleft()
+                continue
+            if not self._enqueue_command(kind, payload):
+                break
+            self._critical_commands.popleft()
+
+    def _send_secant_receipt(self, receipt):
+        from dataclasses import replace
+        return self._send_critical_command("secant_receipt", {
+            "session_id": self._current_session_id,
+            "receipt": replace(receipt, received_at_ns=time.monotonic_ns())})
+
+    def _cosecant_surface_withdrawn(self, value):
+        snapshot, occurred_ns = value
+        self._send_critical_command("cosecant_popup_closed", {
+            "session_id": self._current_session_id, "break_id": snapshot.break_id,
+            "study_block_id": snapshot.study_block_id, "generation": snapshot.generation,
+            "occurred_monotonic_ns": occurred_ns})
+
+    def _ack_normal_surface_fence(self, raw):
+        if raw.get("session_id") != self._current_session_id:
+            return
+        clear = True
+        for dispatcher, names in ((self._mine_dispatcher, ("_mine1_popup", "_mine2_popup")),
+                (self._cosine_dispatcher, ("_intent_popup", "_duration_popup", "_break_ack_popup", "_final_popup"))):
+            if dispatcher is None:
+                clear = False
+                continue
+            for name in names:
+                if not hasattr(dispatcher, name):
+                    clear = False
+                    continue
+                popup = getattr(dispatcher, name)
+                if popup is not None and popup.isVisible():
+                    clear = False
+        self._send_critical_command("normal_surface_clearance", {
+            "session_id": self._current_session_id, "request_id": raw.get("request_id"),
+            "clear": clear, "occurred_monotonic_ns": time.monotonic_ns()})
 
     def _send_sine_callback(self, kind: str, request_id: str, occurred_ns: int, **fields) -> bool:
         payload = {
@@ -545,8 +630,11 @@ class ControlStationController(QObject):
         expected_study_context_token: str,
         expected_resource_key: str,
     ) -> bool:
-        """Transport one exact Case-1 clarification action with acknowledgement."""
+        """Queue one exact Case-1 action without blocking the GUI on Monitor."""
 
+        request_id = str(request_id)
+        if request_id in self._pending_study_confirmation_actions:
+            return True
         acknowledgement: queue.Queue = queue.Queue(maxsize=1)
         payload = {
             "request_id": str(request_id),
@@ -555,24 +643,38 @@ class ControlStationController(QObject):
             "expected_study_context_token": str(expected_study_context_token),
             "expected_resource_key": str(expected_resource_key),
         }
-        accepted = self._enqueue_command(
+        queued = self._enqueue_command(
             "study_confirmation_user_action",
             payload,
             acknowledgement,
         )
-        if accepted:
-            try:
-                accepted = bool(acknowledgement.get(timeout=1.5))
-            except queue.Empty:
-                accepted = False
-        if not accepted:
+        if queued:
+            self._pending_study_confirmation_actions[request_id] = acknowledgement
+        else:
             presenter = self._study_confirmation_presenter
             if presenter is not None:
                 presenter.show_action_rejection(
                     str(request_id),
                     "CLARIFICATION NOT ACCEPTED · CHECK THE CURRENT RESOURCE",
                 )
-        return bool(accepted)
+        return bool(queued)
+
+    def _drain_study_confirmation_acknowledgements(self) -> None:
+        """Resolve backend replies on the GUI timer; never guess from delay."""
+
+        for request_id, acknowledgement in tuple(
+            self._pending_study_confirmation_actions.items()
+        ):
+            try:
+                accepted = bool(acknowledgement.get_nowait())
+            except queue.Empty:
+                continue
+            del self._pending_study_confirmation_actions[request_id]
+            if not accepted and self._study_confirmation_presenter is not None:
+                self._study_confirmation_presenter.show_action_rejection(
+                    request_id,
+                    "CLARIFICATION NOT ACCEPTED · CHECK THE CURRENT RESOURCE",
+                )
 
     def submit_cosine_command(self, command):
         """Synchronously obtain the exact backend CommandResult for a popup.
@@ -629,23 +731,54 @@ class ControlStationController(QObject):
         important_keywords: object = (),
     ) -> bool:
         del break_seconds  # break duration is chosen explicitly when a break starts
+        if self._pending_study_prepare is not None:
+            return False
+        if self._status not in {EngineStatus.ACTIVE, EngineStatus.PAUSED}:
+            self.study_prepare_result.emit({
+                "accepted": False, "message": "Start the Core Engine before preparing Study."
+            })
+            return False
         # The expected pair names the Study generation this PREPARE was issued
         # against.  It is deliberately NOT forwarded as ``block_id``: that
         # field is the optional identity OF THE NEW BLOCK, and normal Study
         # preparation must keep letting StudyRuntime mint it.
-        return self._enqueue_command(
-            "study_prepare",
-            {
-                "subject": subject,
-                "task": task,
-                "planned_seconds": int(planned_seconds),
-                "keywords": keywords,
-                "important_keywords": important_keywords,
-                **self._expected_study_identity(
-                    expected_study_block_id, expected_study_generation
-                ),
-            },
-        )
+        payload = {
+            "subject": subject,
+            "task": task,
+            "planned_seconds": planned_seconds,
+            "keywords": keywords,
+            "important_keywords": important_keywords,
+            **self._expected_study_identity(
+                expected_study_block_id, expected_study_generation
+            ),
+        }
+        reply = queue.SimpleQueue()
+        self._pending_study_prepare = reply
+        accepted = self._enqueue_command("study_prepare", payload, response_queue=reply)
+        if not accepted:
+            self._pending_study_prepare = None
+        self.study_prepare_result.emit({
+            "pending": accepted,
+            "accepted": None if accepted else False,
+            "message": "Preparing Study…" if accepted else "PREPARE was not queued. Please try again.",
+        })
+        return accepted
+
+    def _drain_study_prepare_result(self) -> None:
+        reply = self._pending_study_prepare
+        if reply is None:
+            return
+        try:
+            result = reply.get_nowait()
+        except queue.Empty:
+            return
+        self._pending_study_prepare = None
+        snapshot = result.get("snapshot")
+        if snapshot is not None:
+            # Also refresh a stale screen after identity rejection. This is
+            # authoritative display truth, never an automatic retry.
+            self.study_view_changed.emit(snapshot)
+        self.study_prepare_result.emit(result)
 
     def request_study_action(
         self,
@@ -787,6 +920,14 @@ class ControlStationController(QObject):
             pass
 
     def _prepare_new_session(self) -> None:
+        self._pause_pending = self._pause_eligibility = None
+        self._critical_commands.clear()
+        self._pending_secant_presentation.clear()
+        self._secant_visual_projection = None
+        if self._secant_presenter is not None:
+            self._secant_presenter.host.set_projection(None)
+        self.secant_projection_changed.emit(None)
+        self.pause_eligibility_changed.emit(None)
         """Reset transport state before creating the only worker thread."""
 
         self._stop_event = threading.Event()
@@ -798,6 +939,7 @@ class ControlStationController(QObject):
         self._telemetry_queue = _TelemetryInbox()
         self._command_queue = queue.Queue(maxsize=32)
         self._worker_errors = queue.SimpleQueue()
+        self._pending_study_confirmation_actions.clear()
 
         self._emergency_latched = False
         self._startup_failure_reported = False
@@ -852,26 +994,32 @@ class ControlStationController(QObject):
     # ------------------------------------------------------------------
     # Pause, resume, stop and emergency
     # ------------------------------------------------------------------
-    def pause(self) -> bool:
-        """Request pause only from the factual ACTIVE state."""
-
-        if self._is_shutting_down or self._status is not EngineStatus.ACTIVE:
+    def pause_control_allowed(self) -> bool:
+        if self._is_shutting_down or self._pause_pending:
             return False
-        self._accumulate_active_time()
-        self._pause_event.set()
-        self._set_status(EngineStatus.PAUSED)
-        self.engine_paused.emit()
-        return True
+        if self._status is EngineStatus.PAUSED:
+            return True
+        value = self._pause_eligibility
+        return bool(self._status is EngineStatus.ACTIVE and value is not None
+            and value.session_id == self._current_session_id and value.allowed)
+
+    def pause(self) -> bool:
+        return self._request_pause(True)
 
     def resume(self) -> bool:
-        """Resume only the currently paused worker."""
+        return self._request_pause(False)
 
-        if self._is_shutting_down or self._status is not EngineStatus.PAUSED:
+    def _request_pause(self, paused: bool) -> bool:
+        if (not self.pause_control_allowed() or self._current_session_id is None
+                or self._status is not (EngineStatus.ACTIVE if paused else EngineStatus.PAUSED)):
             return False
-        self._pause_event.clear()
-        self._last_active_tick = time.monotonic()
-        self._set_status(EngineStatus.ACTIVE)
-        self.engine_resumed.emit()
+        payload = {"request_id": "global-pause-" + uuid4().hex,
+            "session_id": self._current_session_id, "paused": paused,
+            "occurred_monotonic_ns": time.monotonic_ns()}
+        if not self._enqueue_command("global_pause_request", payload):
+            return False
+        self._pause_pending = payload
+        self.pause_eligibility_changed.emit(self._pause_eligibility)
         return True
 
     def stop(self) -> bool:
@@ -929,6 +1077,9 @@ class ControlStationController(QObject):
     # GUI-thread polling and telemetry routing
     # ------------------------------------------------------------------
     def _poll_worker(self) -> None:
+        self._flush_critical_commands()
+        if self._secant_presenter is not None:
+            self._secant_presenter.flush_receipts()
         """Convert worker Events into factual GUI-thread lifecycle signals."""
 
         thread = self._worker_thread
@@ -962,6 +1113,8 @@ class ControlStationController(QObject):
     def _drain_telemetry(self, *, drain_all: bool = False) -> int:
         """Deliver a bounded telemetry batch on the Qt GUI thread."""
 
+        self._drain_study_confirmation_acknowledgements()
+        self._drain_study_prepare_result()
         processed = 0
         limit = None if drain_all else TELEMETRY_BATCH_SIZE
 
@@ -991,14 +1144,64 @@ class ControlStationController(QObject):
             )
             self.telemetry_received.emit(event)
 
+        self._drain_study_confirmation_acknowledgements()
         return processed
 
     def _route_prepared_view(self, kind: str, raw: Mapping) -> bool:
         """Route engine-prepared views without interpreting their meaning."""
 
+        if kind in CRITICAL_SECANT_KINDS | {"secant_projection", "pause_eligibility"}:
+            if raw.get("session_id") != self._current_session_id or self._current_session_id is None:
+                return True
+            if kind == "pause_eligibility":
+                from SECANT.read_model import PauseEligibility
+                value = raw.get("live_view")
+                if (isinstance(value, PauseEligibility) and value.session_id == self._current_session_id
+                        and (self._pause_eligibility is None or value.revision > self._pause_eligibility.revision)):
+                    self._pause_eligibility = value
+                    self.pause_eligibility_changed.emit(value)
+            elif kind == "pause_ack":
+                pending = self._pause_pending
+                if pending and raw.get("request_id") == pending["request_id"]:
+                    if raw.get("accepted") is True:
+                        if pending["paused"]:
+                            self._accumulate_active_time()
+                            self._set_status(EngineStatus.PAUSED)
+                            self.engine_paused.emit()
+                        else:
+                            self._last_active_tick = time.monotonic()
+                            self._set_status(EngineStatus.ACTIVE)
+                            self.engine_resumed.emit()
+                    self._pause_pending = None
+                    self.pause_eligibility_changed.emit(self._pause_eligibility)
+            elif kind == "secant_projection":
+                self._secant_visual_projection = raw.get("live_view")
+                if self._secant_presenter is not None:
+                    self._secant_presenter.host.set_projection(self._secant_visual_projection)
+                self.secant_projection_changed.emit(raw.get("live_view"))
+            elif kind == "secant_break_selection":
+                self.secant_break_selection_requested.emit(dict(raw))
+            elif kind == "normal_surface_fence":
+                self.normal_surface_fence_requested.emit(dict(raw))
+            elif self._secant_presenter is None:
+                # Retain custody until the GUI host exists; no invented failure
+                # or closure acknowledgement for an unobserved surface.
+                self._pending_secant_presentation.append((kind, dict(raw)))
+            elif self._secant_presenter is not None:
+                presenter = self._secant_presenter
+                if kind == "secant_popup":
+                    presenter.deliver(raw.get("request"))
+                elif kind == "secant_close":
+                    presenter.request_close(raw.get("request_id"),raw.get("occurred_monotonic_ns"))
+                elif kind == "secant_action_result":
+                    presenter.host.action_result(raw.get("request_id"),bool(raw.get("accepted")),
+                        action_sequence=raw.get("action_sequence"))
+            return True
+
         routes = {
             "control_view": self.control_view_changed,
             "study_runtime_view": self.study_view_changed,
+            "study_start_transition": self.study_start_transition_changed,
             "cosecant_view": self.study_view_changed,
             "cosine_live_status": self.cosine_live_status_changed,
             "handover_live_status": self.handover_live_status_changed,
@@ -1147,6 +1350,19 @@ class ControlStationController(QObject):
         """Publish STOPPED only when Core Engine cleanup is factual."""
 
         self._drain_telemetry(drain_all=True)
+        pending_confirmation_ids = tuple(self._pending_study_confirmation_actions)
+        self._pending_study_confirmation_actions.clear()
+        if self._study_confirmation_presenter is not None:
+            for request_id in pending_confirmation_ids:
+                self._study_confirmation_presenter.show_action_rejection(
+                    request_id, "CLARIFICATION NOT ACCEPTED · ENGINE STOPPED"
+                )
+        self.study_start_transition_changed.emit({})
+        if self._pending_study_prepare is not None:
+            self._pending_study_prepare = None
+            self.study_prepare_result.emit({
+                "accepted": False, "message": "Engine stopped before PREPARE completed."
+            })
         errors = self._drain_worker_errors()
         if self._startup_failure_reported:
             errors = (*errors, "Core Engine startup did not complete")
@@ -1220,6 +1436,7 @@ class ControlStationController(QObject):
         self._worker_timer.stop()
         self._telemetry_timer.stop()
         self._elapsed_timer.stop()
+        self._pending_study_confirmation_actions.clear()
 
         thread_alive = bool(
             self._worker_thread is not None and self._worker_thread.is_alive()

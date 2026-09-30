@@ -45,7 +45,7 @@ WHITE: Final = colors.white
 
 _RECOVERED_OUTCOME: Final = "RETURNED"
 _MILESTONE_NAMES: Final = (
-    "episode_created", "sine_displayed", "sine_response_recorded",
+    "episode_created", "sine_displayed", "sine_terminated", "sine_response_recorded",
     "return_intent_recorded", "return_verification_started",
     "return_verification_completed", "return_verified",
     "return_verification_interrupted", "relapse_detected", "episode_resumed",
@@ -423,6 +423,8 @@ def _recorded(value) -> str:
 
 def _humanize(value, empty: str = "Unavailable") -> str:
     text = _pdf_text(value)
+    if text == "STUDY_MODE_ACTIVATED":
+        return "Study Mode started"
     return text.replace("_", " ").title() if text else empty
 
 
@@ -440,6 +442,8 @@ def _status_text(row) -> str:
 
 
 def _outcome(row) -> str:
+    if row.final_outcome == "ABORTED" and getattr(row, "terminal_reason", "") == "STUDY_MODE_ACTIVATED":
+        return "Study Mode started"
     return "In Progress" if row.final_outcome is None else _humanize(row.final_outcome)
 
 

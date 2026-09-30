@@ -1,0 +1,498 @@
+
+
+MYELIN | Pre-edit database and data-availability audit
+
+======================================================
+
+Read-only forensic report | 26 September 2026 | SECANT / Study focus
+
+Conclusion: database structural checks passed. Existing public projections expose useful SECANT facts and Study-resource observations, but they do not constitute a guaranteed, complete durable event stream. No database or production source edits were made.
+
+Project: C:\Users\Dharshan\Downloads\MYELIN_GENALOGY\MYELIN2.0_ULTIMATE_TRIAL
+
+Database: C:\Users\Dharshan\AppData\Roaming\MYELIN\myelin2.0_session.db
+
+Evidence snapshot: 2026-09-26T10:10:46.360449+00:00 (15:40 IST). This is a point-in-time audit, not a live behavioral acceptance test.
+
+
+
+1. Scope and authority
+
+======================
+
+The user requested an audit before database editing, delivered as TXT and PDF. The pasted Phase 1 document was treated as a reference checklist for the SECANT / Study data map, not as an independent instruction to implement changes, contact another agent, or edit any organ. No migration, recorder, telemetry, test hook, or runtime launch was performed.
+
+Read-only scope: persistence schema/storage/connection ownership, Controller routes, launcher subscription seam, application and Study consumers, and the public SECANT / Resource Intent / Study contracts plus narrow producer tracing needed to establish their meaning. This is not a complete security, performance, or physiological correctness audit of all 99 Python files.
+
+The 99 existing Python files were hashed for preservation checks. Source files were read as text, not imported. Scratch audit code and a local snapshot are outside the project under the workspace tmp directory. Only the requested reports are written in the project AUDIT_REPORTS folder. The user-specified report location takes precedence over the ancestor AGENTS.md production-report placement guidance; no implementation phase is being executed.
+
+
+
+2. Executive findings
+
+=====================
+
+PASS: myelin_meta.schema_version = 7, matching PERSISTENCE/schema.py:11. PRAGMA user_version = 0; this application uses myelin_meta as its version authority.
+
+PASS: integrity_check returned ok; foreign_key_check returned zero rows. Study-resource table and PRIMARY partial-index SQL exactly match the source contract.
+
+AVAILABLE: SECANT timeline facts have original monotonic at_ns and episode identity. Completed episode projections retain their timeline. No original UTC timestamp exists on TimelineFact.
+
+PARTIAL: Resource Intent titles, classification and confirmation state are public. The dedicated live signal has no timestamp; the composite control_view lane supplies coherent observation timestamps when its source metadata validates.
+
+GAP: raw secant_fact and resource_intent_fact payloads are not exposed intact through the generic telemetry_received signal. Its TelemetryEvent drops fact, identity and factual monotonic fields.
+
+GAP: no dedicated SECANT event table or Resource Intent event table exists. Current Study-resource records are qualification facts, not a full browsing/classification history.
+
+CAUTION: source-level routes are proven; lossless delivery across coalescing, overload, reset and process failure is not proven. Structural integrity is not approval of a future migration.
+
+
+
+3. Database evidence and preservation
+
+=====================================
+
+Byte-identical local snapshot, no WAL/SHM/journal present, source hashes stable; snapshot opened mode=ro&immutable=1 with query_only=ON. Direct mode=ro source read failed because SQLite could not open required files; no source writes requested.
+
+No source sidecars were present at capture. The snapshot connection used an explicit read transaction. PRAGMA query_only returned 1. Immutable snapshot mode reports journal_mode=delete; this is not evidence that the production database is configured for DELETE journaling. Production writable connections request WAL (PERSISTENCE/database.py:111-133).
+
+Source size: 4,763,648 bytes. Source SHA-256 before capture, after capture and at report generation matched:
+
+274cdfe398f9fc5dac0a54743420ededb5ca783c6f61945b6fd1a8b4cf24e148
+
+Source preservation: 99/99 existing Python hashes unchanged. Application behavior tests: NOT RUN. Windows UI acceptance: NOT RUN. No application startup or production writer was invoked; launcher startup would bootstrap schema at launcher.py:97.
+
+Check | Result | Interpretation
+
+--------------------------------------------------------------------------------------------------------------
+
+integrity_check | PASS: ok | SQLite structural consistency for the captured database.
+
+foreign_key_check | PASS: zero rows | No declared FK violations; does not validate undeclared logical relationships.
+
+Schema authority | PASS: version 7 | myelin_meta, not PRAGMA user_version.
+
+Study schema/index comparison | PASS: exact SQL match | Compared to literals parsed with AST; no production module imports.
+
+Study-resource JSON/time checks | PASS: all zero violations | Valid identity/provenance JSON; qualification not before first alignment; no duplicate PRIMARY scope.
+
+Source/database preservation | PASS: hashes unchanged | Point-in-time preservation, not a guarantee against later external app writes.
+
+
+
+Table inventory
+
+===============
+
+Table | Rows | Table | Rows
+
+--------------------------------------------------------------------------------------------------------------
+
+cosecant_events | 138 | cosine_events | 273
+
+emergency_events | 4 | emergency_followup | 1
+
+mine_events | 533 | mirl_events | 1176
+
+myelin_meta | 1 | normal_break_events | 53
+
+notes | 1 | pie_session_time | 0
+
+planner_blocks | 0 | profile_learning_state | 2
+
+science_lab_experiments | 14 | sessions | 197
+
+sine_facts | 1761 | sqlite_sequence | 6
+
+study_events | 474 | study_resources | 11
+
+triggers | 97 |  | 
+
+19 tables includes sqlite_sequence, which is SQLite-managed. The absence of SECANT-named tables is a schema finding; this audit does not claim that every JSON payload was exhaustively searched for incidental SECANT mentions.
+
+
+
+4. Public data lanes and existing consumers
+
+===========================================
+
+Lane | Producer / transport / signal | Exact output | Current consumers / meaning | Source references
+
+--------------------------------------------------------------------------------------------------------------
+
+SECANT | SecantAuthority.snapshot() -> Monitor._drain_secant -> secant_projection envelope -> Controller.secant_projection_changed | SecantProjection | Study timer card; Resource Intent panel; _SecantAtmosphereCoordinator. | monitor.py:2441-2468; controller.py:1177-1181; view.py:3276-3285; application.py:15490
+
+Study | StudyRuntime.snapshot() -> study_runtime_view -> Controller.study_view_changed | StudySnapshot | StudyView.render; Science Lab runtime consumer; SECANT atmosphere. | monitor.py:5222-5234; controller.py:1201-1215; application.py:15436,15470,15491
+
+Resource Intent | ResourceIntentAuthority.live_view() -> resource_intent_live_status -> Controller.resource_intent_live_status_changed | ResourceIntentLiveView | StudyView.set_resource_intent / ResourceIntentTelemetryPanel. | resource_intent.py:1328-1371; controller.py:1208; view.py:3290-3295
+
+Composite observation | Monitor control_view dict -> Controller.control_view_changed | dict: session_id, foreground, resource_intent, study_app_category | ResourceIntentTelemetryPanel.render_category_payload. | monitor.py:5246-5265; controller.py:1202; view.py:3296-3298,1036-1088
+
+Session identity | Monitor session envelope -> Controller.current_session_id_changed | int | None | Science Lab; atmosphere reset; Study category session binding. | controller.py:1319-1327,1378-1380; application.py:15422,15493; view.py:3285-3289
+
+Lifecycle/reset | Controller worker/lifecycle -> engine_started, engine_paused, engine_resumed, engine_stopped, engine_failed, engine_status_changed | no payload / str / EngineStatus | Application and presentation consumers; atmosphere reset/status. | controller.py:215-227,925-955; application.py:15492-15495
+
+Generic telemetry | Monitor raw envelope -> Controller._drain_telemetry -> telemetry_received | TelemetryEvent(time,kind,app,title,message,badge,feed_text,tone) | Live telemetry UI; fact object is not preserved. | controller.py:111-121,1109-1145,1258-1265
+
+study_view_changed carries both StudySnapshot and CosecantSnapshot (cosecant_view); a subscriber must discriminate types. Cosecant break-return facts are not interchangeable with SECANT return/recovery facts. Dedicated raw SINE/MIRL/COSECANT signals do not imply equivalent SECANT/RI signals exist.
+
+
+
+5. Requested SECANT data matrix
+
+===============================
+
+S = Controller.secant_projection_changed, exact type SecantProjection, timeline and completed[].timeline entries of TimelineFact (SECANT/read_model.py:32-113). I = episode_id plus enclosing StudyScope.context_id. T = original at_ns, monotonic only; no UTC. YES means the delivered fact is usable, not that all facts survive shutdown or queue loss. Confidence YES = directly supported by inspected code; PARTIAL = incomplete guarantee. See section 8.
+
+Requested datum | Public source | Object/type | Exact fields / mapping | Identity | Factual time | Passive use | Confidence | Notes
+
+--------------------------------------------------------------------------------------------------------------
+
+SECANT_EPISODE_FOUNDED | S | TimelineFact | name=SECANT_EPISODE_FOUNDED; episode_id; at_ns | YES (I) | YES (T) | YES | YES | Founding is tied to factual display acknowledgement; not the popup request.
+
+SECANT_1_DISPLAYED | S | TimelineFact | name=SECANT_DISPLAYED; stage=SECANT_1; request_id; at_ns | YES (I) | YES (T) | YES | YES | Stage filter required. Repeated displays can occur; retain request identity.
+
+SECANT_2_DISPLAYED | S | TimelineFact | name=SECANT_DISPLAYED; stage=SECANT_2; request_id; at_ns | YES (I) | YES (T) | YES | YES | Stage filter required. Repeated displays can occur; retain request identity.
+
+SECANT_3_DISPLAYED | S | TimelineFact | name=SECANT_DISPLAYED; stage=SECANT_3; request_id; at_ns | YES (I) | YES (T) | YES | YES | Stage filter required. Repeated displays can occur; retain request identity.
+
+RETURN_TO_STUDY_INTENT | S | TimelineFact | name=SECANT_ACTION_INTENT; reason=RETURN TO STUDY | YES (I) | YES (T) | YES | YES | Do not treat SECANT_ACTION_REJECTED as accepted intent or intent as verified recovery.
+
+UNCERTAINTY_FROZEN | S | TimelineFact | name=SECANT_FROZEN; reason=uncertainty | YES (I) | YES (T) | YES | YES | Filter reason: break, recovery and global holds are different.
+
+UNCERTAINTY_RESUMED | S | TimelineFact | name=SECANT_RESUMED; reason=uncertainty | YES (I) | YES (T) | YES | YES | Releasing this hold does not prove all other holds ended.
+
+RETURN_VERIFICATION_STARTED | S | TimelineFact | name=SECANT_RETURN_STARTED; attempt_id; evidence_id | YES (I) | YES (T) | YES | YES | Public native name differs from requested presentation label.
+
+RETURN_VERIFICATION_COMPLETED | S | TimelineFact | name=SECANT_RETURN_VERIFIED; attempt_id | YES (I) | YES (T) | YES | YES | ClosureProof.verified_ns also available after successful recovery.
+
+CLOSURE_CONFIRMATION_STARTED | S | TimelineFact | name=SECANT_RETURN_VERIFIED; attempt_id | YES (I) | YES (T) | YES | YES | Same transition enters CONFIRMING. There is no separate native start fact.
+
+CLOSURE_CONFIRMATION_COMPLETED | S | TimelineFact | name=SECANT_RECOVERY_CLOSED; attempt_id | YES (I) | YES (T) | YES | YES | ClosureProof.closed_ns corroborates completed recovery.
+
+RECOVERY_INTERRUPTED | S | TimelineFact | name=SECANT_RECOVERY_INTERRUPTED; reason; attempt_id | YES (I) | YES (T) | YES | YES | Interruption is not episode closure.
+
+SECANT_EPISODE_CLOSED | S | TimelineFact | name=SECANT_EPISODE_CLOSED; reason | YES (I) | YES (T) | YES | YES | Completed EpisodeProjection also has closed_ns and terminal_reason.
+
+SECANT_EPISODE_CLOSURE_REASON | S | TimelineFact | SECANT_EPISODE_CLOSED.reason; terminal_reason | YES (I) | YES (T) | YES | YES | Examples in source: recovered, study_complete, emergency, session_end. Preserve exact value.
+
+Mapping evidence: SECANT/secant.py:303-312,374-383,427-433,637-648,686-687; SECANT/recovery.py:167-201. Labels in this report are mappings onto existing native facts; no new events have been added.
+
+
+
+6. Requested Study-resource data matrix
+
+=======================================
+
+R = resource_intent_live_status_changed / ResourceIntentLiveView. C = control_view_changed / dict with the same ResourceIntentLiveView and ForegroundObservation. D = persisted study_resources / StudyResourceFact. Resource identity is resource_key + study_context_token, scoped to session; D supplies authoritative block/generation. Snapshot values may be recorded, but missing transitions must remain unknown.
+
+Requested datum | Public source | Object/type | Exact fields / mapping | Identity | Factual time | Passive use | Confidence | Notes
+
+--------------------------------------------------------------------------------------------------------------
+
+Resource title | R / C | ResourceIntentLiveView | display_title | YES | PARTIAL | YES | YES | Normalized title, truncated to 240 characters; not guaranteed full video title.
+
+Resource key | R / C / D | LiveView / StudyResourceFact | resource_key; resource.key | YES | PARTIAL | YES | YES | Opaque keys remain opaque; never derive a display title from them.
+
+Application/process | R / C | LiveView / ForegroundObservation | process_name; foreground.process_id | YES | PARTIAL | YES | YES | RI canonical name can differ from raw foreground name.
+
+Platform/resource surface | R / C / D | LiveView / ResourceObservation / ExactResource | resource_surface; source_observation.browser_platform; resource.platform_key | YES | PARTIAL | PARTIAL | YES | Surface is public. Platform only when available/certified; browser and desktop differ.
+
+STUDY_ALIGNED | R / C | ResourceIntentLiveView | classification; effective_operational_state | YES | PARTIAL | PARTIAL | YES | Observed state; distinguish measured versus effective.
+
+UNCERTAIN | R / C | ResourceIntentLiveView | classification; measured_classification; uncertainty_active | YES | PARTIAL | PARTIAL | YES | Uncertainty episode UID is not a SECANT episode ID.
+
+DISTRACTION | R / C | ResourceIntentLiveView | classification; effective_operational_state=CONFIRMED_DISTRACTION | YES | PARTIAL | PARTIAL | YES | Preserve actual enum spelling; do not conflate OFF_TASK and the classification enum.
+
+Measured classification | R / C | ResourceIntentLiveView | measured_classification; measured_confidence | YES | PARTIAL | YES | YES | Measured state can disagree with a user-confirmed effective state.
+
+Effective classification/state | R / C | ResourceIntentLiveView | classification; effective_operational_state | YES | PARTIAL | YES | YES | Record both separately, not a single overloaded label.
+
+Confidence | R / C | ResourceIntentLiveView | confidence; measured_confidence | YES | PARTIAL | YES | YES | Use actual supplied numbers; no reclassification.
+
+User confirmation | R / C | ResourceIntentLiveView | user_confirmation | YES | PARTIAL | PARTIAL | YES | Confirmation state is public; original response time is not on this view.
+
+Confirmation source | None proven | IntentVerdict has field; not LiveView | confirmation_source not exported by R / C | PARTIAL | NO | NO | YES | UNAVAILABLE UNDER ORGAN FREEZE on inspected public lanes. Durable provenance has no such key.
+
+PRIMARY / first resource | D | StudyResourceFact | role=PRIMARY; session_id; study_block_id; study_generation; resource.key | YES | YES | YES | YES | Authoritative qualified PRIMARY; not necessarily first resource ever visited.
+
+LATER / later resource | D | StudyResourceFact | role=LATER; same composite scope | YES | YES | YES | YES | No explicit visit ordinal. LATER alone does not prove 2nd resource.
+
+Factual event UTC timestamp | D / C; no S UTC | StudyResourceFact / ForegroundObservation | first_aligned_at_utc; qualified_at_utc; observed_wall_time_utc | YES | PARTIAL | PARTIAL | YES | D timestamps are qualification facts. C is observation time, not exact classification-change time.
+
+Factual monotonic timestamp | S / D / C | TimelineFact / StudyResourceFact / ForegroundObservation | at_ns; first_aligned_monotonic_ns; qualified_monotonic_ns; observed_monotonic_ns | YES | PARTIAL | PARTIAL | YES | Original SECANT time and resource qualification time available; RI response/transition time absent.
+
+
+
+7. Resource title, identity and role correlation
+
+================================================
+
+ResourceIntentAuthority.live_view() copies identity.normalised_title[:240] into display_title (resource_intent.py:1328-1341). Human-readable text is therefore usable when supplied. It is normalized and potentially truncated; availability does not establish exact video-title fidelity. No browser sensing was widened, and no example titles were fabricated or searched as acceptance criteria.
+
+The composite control_view includes session_id, foreground, resource_intent and study_app_category. Its metadata exposes source_observation (ResourceObservation), observation_sequence, observed_monotonic_ns, resource_key, study_context_token and observation_token. The existing consumer validates same-sample identity/coherence (view.py:1036-1088). A future observer can preserve this already-public evidence without reading private authority state. A mismatched or unavailable metadata bundle cannot be assigned factual RI event time.
+
+Read PRIMARY/LATER from durable study_resources, using session_id + study_block_id + study_generation + resource_key and identity kind/version where relevant. StudySnapshot supplies block_id, generation and context_token. SECANT scope.context_id is constructed as str(session_id) + ":" + study.context_token (monitor.py:2640); scope.target_resource_id is the PRIMARY resource key. Prefer exact context/token matching rather than heuristic title or proximity matching.
+
+Existing read_study_resources(session_id=..., study_block_id=...) returns immutable StudyResourceFact values and orders by qualified_monotonic_ns, resource_fact_id (storage.py:2847-2866). It does not filter generation; a caller must enforce exact generation itself. The persistence writer uses immutable fact IDs and rejects conflicting retries (storage.py:1251-1271). Pending runtime resources are not proof of a durable commit.
+
+Snapshot findings: 11 qualified BROWSER records across 9 session/block/generation scopes; 9 PRIMARY, 2 LATER. No DESKTOP qualification rows in this snapshot. All provenance JSON keys observed: classification, effective_state, observation_id. This does not supply explicit confirmation_source or a full resource-visit order.
+
+The role describes authoritative qualification. A display may say PRIMARY or LATER, but "first visit" or "2nd resource" would add unsupported semantics. A chronological rank of qualified records would need to be explicitly labeled as such and is not an existing authoritative ordinal.
+
+
+
+8. Timestamp and delivery limitations
+
+=====================================
+
+Source | Original time available | What must not be claimed
+
+--------------------------------------------------------------------------------------------------------------
+
+SECANT timeline | TimelineFact.at_ns; PresentationLifecycle.occurred_at_ns versus received_at_ns; proof return_started_ns / verified_ns / closed_ns. | No original occurred_at_utc. Do not stamp receipt UTC as event UTC or use monotonic values across unrelated runtime epochs.
+
+Resource Intent dedicated view | No original timestamp field. | Signal receipt time is an observation by the recorder, not original classification/confirmation time.
+
+Composite control_view | foreground.observed_monotonic_ns and observed_wall_time_utc; metadata/source-observation coherence. | These date the foreground observation, not necessarily the instant a persistent RI verdict or confirmation changed.
+
+Study runtime | published_monotonic_ns; active_epoch_monotonic_ns; started/paused/completed_wall_time_utc. | Publication time is not a generic per-event occurrence time. Filter out CosecantSnapshot on the shared signal.
+
+Study-resource durable fact | first_aligned_* and qualified_* in monotonic and UTC forms; inserted_at_utc separately. | Insertion time is not qualification time. These records cannot reconstruct every uncertain/distraction transition.
+
+Existing study_events | occurred_monotonic_ns plus created_at_utc; payload snapshot. | storage.py:1273-1284 reads observed_monotonic_ns, absent on StudySnapshot, and falls back to time.monotonic_ns(). Column name alone does not prove original occurrence time.
+
+Generic telemetry / lifecycle | TelemetryEvent.time is Monitor publication UTC; lifecycle signals have no original timestamp. | Not a lossless fact stream. Do not parse prose into authoritative identities or recovery decisions.
+
+Queue coalescing: Controller.LIVE_VIEW_KINDS includes SECANT, Study, RI and control views; a queued view can be replaced by a newer one (controller.py:49-64,142-175). Cumulative SECANT timelines and completed histories reduce losses while the authority remains alive, but do not guarantee persistence through reset, shutdown, overload or crash. secant_fact is not listed in TERMINAL_KINDS; its raw object is also stripped by generic TelemetryEvent conversion.
+
+TimelineFact has no dedicated event_id or sequence. A future recorder needs a documented deduplication strategy for repeated cumulative projections, without collapsing distinct equal-valued facts. No claim of exactly-once, lossless, or retroactive recovery is supported by this audit. No live overload/reset test was executed.
+
+
+
+9. Existing persistence patterns, indexes and FKs
+
+=================================================
+
+Existing event patterns are precedents, not permission to copy their semantics. SINE and COSECANT store monotonic occurrence plus creation UTC; MIRL uses event IDs and episode sequence; COSINE and MINE provide explicit occurrence UTC plus monotonic time and uniqueness constraints. Study-resource facts are already a separate immutable qualification contract.
+
+Event table | Rows | Columns (payload_json omitted) | Indexes including automatic
+
+--------------------------------------------------------------------------------------------------------------
+
+sine_facts | 1761 | id, session_id, episode_uid, candidate_uid, kind, popup_request_id, occurred_monotonic_ns, created_at_utc | ix_sine_facts_session_time
+
+mirl_events | 1176 | event_id, session_id, episode_id, episode_sequence, event_name, occurred_monotonic_ns, created_at_utc | ix_mirl_events_session_time; sqlite_autoindex_mirl_events_1
+
+cosine_events | 273 | event_id, cosine_session_id, generation, sequence, event_name, event_class, occurred_at_utc, monotonic_ns, platform_key, content_title, request_id, evidence_token, schema_version, session_id | ix_cosine_events_parent_session_sequence; ix_cosine_events_session_sequence; sqlite_autoindex_cosine_events_2; sqlite_autoindex_cosine_events_1
+
+mine_events | 533 | event_id, session_id, mine_episode_id, generation, sequence, event_name, event_class, occurred_at_utc, monotonic_ns, platform_key, platform_label, request_id, evidence_token, schema_version | ix_mine_events_episode_sequence; sqlite_autoindex_mine_events_2; sqlite_autoindex_mine_events_1
+
+study_events | 474 | id, session_id, study_block_id, action, occurred_monotonic_ns, created_at_utc | (none)
+
+cosecant_events | 138 | id, session_id, break_id, sequence, kind, occurred_monotonic_ns, created_at_utc | sqlite_autoindex_cosecant_events_1
+
+normal_break_events | 53 | event_id, session_id, break_id, generation, sequence, episode_uid, candidate_uid, kind, occurred_monotonic_ns, created_at_utc, schema_version | ix_normal_break_events_session_time; sqlite_autoindex_normal_break_events_2; sqlite_autoindex_normal_break_events_1
+
+
+
+Declared foreign keys (complete inventory)
+
+==========================================
+
+Child table | Column | Referenced parent | Update / delete action
+
+--------------------------------------------------------------------------------------------------------------
+
+cosecant_events | session_id | sessions.id | NO ACTION / NO ACTION
+
+cosine_events | session_id | sessions.id | NO ACTION / NO ACTION
+
+emergency_events | session_id | sessions.id | NO ACTION / NO ACTION
+
+emergency_followup | emergency_event_id | emergency_events.id | NO ACTION / NO ACTION
+
+mine_events | session_id | sessions.id | NO ACTION / NO ACTION
+
+mirl_events | session_id | sessions.id | NO ACTION / NO ACTION
+
+normal_break_events | session_id | sessions.id | NO ACTION / NO ACTION
+
+pie_session_time | session_id | sessions.id | NO ACTION / NO ACTION
+
+profile_learning_state | last_learning_session_id | sessions.id | NO ACTION / NO ACTION
+
+science_lab_experiments | parent_session_id | sessions.id | NO ACTION / NO ACTION
+
+sine_facts | session_id | sessions.id | NO ACTION / NO ACTION
+
+study_events | session_id | sessions.id | NO ACTION / NO ACTION
+
+study_resources | session_id | sessions.id | NO ACTION / NO ACTION
+
+triggers | session_id | sessions.id | NO ACTION / NO ACTION
+
+Tables without declared foreign keys: myelin_meta, notes, planner_blocks, sessions, sqlite_sequence. Foreign-key enforcement is connection-local; production connect_database enables it. Audit foreign_key_check validates declared relationships regardless of whether a different historical writer enabled enforcement.
+
+
+
+10. Study-resource schema and explicit index inventory
+
+======================================================
+
+study_resources: 17 columns. Required identity, role, JSON and timing constraints were read from SQLite, not assumed from source. Unique resource scope includes session_id, study_block_id, study_generation, identity_kind, identity_version, resource_key. study_resources_one_primary enforces one PRIMARY per session/block/generation.
+
+Column | SQLite type | Required | Primary key
+
+--------------------------------------------------------------------------------------------------------------
+
+resource_fact_id | TEXT | YES | YES
+
+session_id | INTEGER | YES | NO
+
+study_block_id | TEXT | YES | NO
+
+study_generation | INTEGER | YES | NO
+
+study_context_token | TEXT | YES | NO
+
+resource_key | TEXT | YES | NO
+
+identity_kind | TEXT | YES | NO
+
+identity_version | INTEGER | YES | NO
+
+identity_json | TEXT | YES | NO
+
+role | TEXT | YES | NO
+
+first_aligned_monotonic_ns | INTEGER | YES | NO
+
+qualified_monotonic_ns | INTEGER | YES | NO
+
+first_aligned_at_utc | TEXT | YES | NO
+
+qualified_at_utc | TEXT | YES | NO
+
+provenance_json | TEXT | YES | NO
+
+contract_version | INTEGER | YES | NO
+
+inserted_at_utc | TEXT | YES | NO
+
+CHECK constraints: generation is integer > 0; identity kind is BROWSER/DESKTOP; identity_version=1; identity_json/provenance_json valid JSON; role PRIMARY/LATER; first alignment integer >= 0; qualification integer >= first alignment; contract_version=1. UTC columns are required TEXT, without an explicit UTC-format CHECK. This audit did not claim universal timestamp-format validity.
+
+
+
+Explicit index inventory (continued)
+
+====================================
+
+Explicit index | Table | Definition
+
+--------------------------------------------------------------------------------------------------------------
+
+ix_cosine_events_parent_session_sequence | cosine_events | CREATE INDEX ix_cosine_events_parent_session_sequence ON cosine_events(session_id, cosine_session_id, generation, sequence)
+
+ix_cosine_events_session_sequence | cosine_events | CREATE INDEX ix_cosine_events_session_sequence
+    ON cosine_events(cosine_session_id, generation, sequence)
+
+ix_mine_events_episode_sequence | mine_events | CREATE INDEX ix_mine_events_episode_sequence
+    ON mine_events(mine_episode_id, generation, sequence)
+
+ix_mirl_events_session_time | mirl_events | CREATE INDEX ix_mirl_events_session_time
+    ON mirl_events(session_id, occurred_monotonic_ns, event_id)
+
+ix_normal_break_events_session_time | normal_break_events | CREATE INDEX ix_normal_break_events_session_time
+    ON normal_break_events(session_id, occurred_monotonic_ns, event_id)
+
+ix_science_lab_experiments_parent_start | science_lab_experiments | CREATE INDEX ix_science_lab_experiments_parent_start
+    ON science_lab_experiments(
+        parent_session_id,
+        started_monotonic_ns,
+        experiment_id
+    )
+
+ix_sine_facts_session_time | sine_facts | CREATE INDEX ix_sine_facts_session_time
+    ON sine_facts(session_id, occurred_monotonic_ns, id)
+
+study_resources_one_primary | study_resources | CREATE UNIQUE INDEX study_resources_one_primary
+    ON study_resources(session_id, study_block_id, study_generation) WHERE role = 'PRIMARY'
+
+ux_science_lab_one_running | science_lab_experiments | CREATE UNIQUE INDEX ux_science_lab_one_running
+    ON science_lab_experiments(status)
+    WHERE status = 'RUNNING'
+
+Automatic indexes: sqlite_autoindex_cosecant_events_1 [cosecant_events], sqlite_autoindex_cosine_events_1 [cosine_events], sqlite_autoindex_cosine_events_2 [cosine_events], sqlite_autoindex_mine_events_1 [mine_events], sqlite_autoindex_mine_events_2 [mine_events], sqlite_autoindex_mirl_events_1 [mirl_events], sqlite_autoindex_myelin_meta_1 [myelin_meta], sqlite_autoindex_normal_break_events_1 [normal_break_events], sqlite_autoindex_normal_break_events_2 [normal_break_events], sqlite_autoindex_notes_1 [notes], sqlite_autoindex_planner_blocks_1 [planner_blocks], sqlite_autoindex_profile_learning_state_1 [profile_learning_state], sqlite_autoindex_science_lab_experiments_1 [science_lab_experiments], sqlite_autoindex_science_lab_experiments_2 [science_lab_experiments], sqlite_autoindex_study_resources_1 [study_resources], sqlite_autoindex_study_resources_2 [study_resources], sqlite_autoindex_triggers_1 [triggers]. Full constraints are preserved in the audit evidence JSON outside production.
+
+
+
+11. Smallest future non-organ implementation allowlist
+
+======================================================
+
+Recommendation only; nothing implemented. For recording the proven subset, the candidate allowlist is PERSISTENCE/schema.py (a separately reviewed additive persistence contract), PERSISTENCE/storage.py (existing serialized writer ownership), one new passive recorder module, and CONTROL_STATION/launcher.py for subscription/lifetime wiring.
+
+Launcher seam is concretely present: startup_completed(exit_code, window) receives ControlStationWindow at launcher.py:109-118; window.engine is created at application.py:14902. The recorder can subscribe there before user-driven monitoring begins and seed current_session_id() (controller.py:363). Because the current launcher has no recorder subscription, this external composition seam is necessary within the restricted allowlist. A future implementation must retain recorder lifetime and address orderly flushes; neither is implemented or runtime-tested here.
+
+The allowlist cannot recover a missing raw fact contract, historical data already lost, or an original UTC stamp absent from the public SECANT fact. Do not widen it to controller.py, application.py or any organ. A recorder using only these seams must advertise its bounded observation coverage and missing-data cases.
+
+Before an actual database change: preserve a consistent backup including any active WAL state, review the exact intended schema/data diff, validate migration and rollback on a disposable copy, and recheck integrity and declared FKs. The snapshot kept for this audit is evidence, not a claim that a future live database has been backed up.
+
+
+
+12. Inspected files and verification boundary
+
+=============================================
+
+File (relative to project path on page 1) | Inspected purpose
+
+--------------------------------------------------------------------------------------------------------------
+
+CONTROL_STATION/controller.py | Signals, routes, queue coalescing, telemetry conversion, session/reset paths.
+
+CONTROL_STATION/application.py | Existing consumers; window.engine; no application logic edits.
+
+CONTROL_STATION/launcher.py | Startup bootstrap and concrete window callback seam.
+
+PERSISTENCE/schema.py | Version, event tables, Study-resource SQL and verifier.
+
+PERSISTENCE/storage.py | Study-resource immutable writer/reader; Study snapshot timestamp fallback.
+
+PERSISTENCE/database.py | Canonical path and read/write connection ownership.
+
+SECANT/read_model.py | Public immutable projection and fact definitions.
+
+SECANT/secant.py | Public snapshot assembly and narrow native fact mappings.
+
+SECANT/recovery.py | Native recovery transition fact meanings.
+
+SECANT/popup.py | Public action/receipt types; occurrence versus receipt time.
+
+CORE_ENGINE/resource_intent.py | Public types and live-view field construction.
+
+CORE_ENGINE/monitor.py | Producer-to-transport trace, scope identity and foreground time contract.
+
+COSECANT_STUDY_MODE/study.py | Public StudySnapshot/StudyTargetSnapshot and context-token contract.
+
+COSECANT_STUDY_MODE/view.py | Existing subscribers and same-sample coherence validation.
+
+CORE_ENGINE/browser.py and ME/*.py were searched for public observation definitions; no browser sensing changes or broad organ redesign was investigated. No nested AGENTS.md was found in accessible project paths; a cache directory denied enumeration. Ancestor Downloads/AGENTS.md and the pasted reference were read. The ancestor seven-roadmap editing prerequisite was not triggered because no code editing was performed.
+
+Verification: SQLite integrity, FK check, table counts, SQL contract comparisons, resource JSON/time-order/PRIMARY checks and hash preservation passed. Behavioral tests and Windows acceptance remain not run. Scope does not include replaying all production events or exhaustively validating every JSON payload in other organs.
+
+
+
+13. Final data availability groups
+
+==================================
+
+A. RECORDABLE NOW: native SECANT founding/display/intent/hold/recovery/closure facts present in a delivered timeline, with episode identity and original monotonic time; durable Study-resource qualification and PRIMARY/LATER roles; supplied title/key/process/classification/confidence/confirmation-state snapshots. Preserve native names and label observations as observations. All are possible with zero organ changes; future durability still needs implementation.
+
+B. RECORDABLE PARTIALLY: complete chronological RI/classification/confirmation history; platform identity when uncertified; original UTC for SECANT; lifecycle timing; deduplicated continuous capture through queue coalescing/reset; original Study snapshot event timing. Coherent control_view provides resource observation UTC/monotonic timestamps, not exact times for every semantic transition. SECANT timeline facts are usable but a lossless recording contract is not proven.
+
+C. UNAVAILABLE UNDER ORGAN FREEZE: confirmation_source and original confirmation-response timestamps through inspected public RI lanes; an authoritative full visit ordinal; original SECANT UTC absent from TimelineFact; reconstruction of past lost SECANT/RI history; a guaranteed exactly-once complete stream from the current generic telemetry signal. No organ changes are proposed to obtain these facts.
+
+PHASE 1 INCOMPLETE - PUBLIC DATA CONTRACT NOT PROVEN
+
+This status applies to the reference document's complete/lossless future recording contract. The requested read-only audit and its data map are complete; the limitations above are the findings for review. Database editing and implementation have not started.

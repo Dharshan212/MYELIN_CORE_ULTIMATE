@@ -1240,7 +1240,7 @@ def _page_sp2(c, fx) -> None:
 
 def _page_sp3(c, fx) -> None:
     top, _ = _page_frame(c, page_code="SP3", chapter_label="SP3  |  Chapter 2 Context-Specific Regulation Organs")
-    y = _chapter_title(c, top, "2", "CONTEXT-SPECIFIC REGULATION ORGANS: COSINE AND COSECANT")
+    y = _chapter_title(c, top, "2", "OTT REGULATION: COSINE")
     y = _callout(c, y, fx.sp3_intro)
 
     y = _organ_block(
@@ -1269,6 +1269,30 @@ def _page_sp3(c, fx) -> None:
     _rule(c, MARGIN, y, PAGE_WIDTH - MARGIN, LINE, 0.5)
     y -= 6 * mm
 
+    _footer(c, caption="", page_label=_page_label(fx, 4))
+
+
+def _page_study_organs(c, fx):
+    top, _ = _page_frame(c, page_code="STUDY_ORGANS", chapter_label="Chapter 2 Study regulation")
+    y = _chapter_title(c, top, "2", "STUDY REGULATION: SECANT AND COSECANT")
+    y = _callout(c, y, "SECANT describes Study off-task regulation and recovery. COSECANT is the approved-break "
+                 "branch in this conceptual architecture, with independent runtime authority.")
+    y = _organ_block(c, y, icon="book", name="SECANT", subtitle="STUDY OFF-TASK AND RECOVERY REGULATION",
+        body="Confirmed Study off-task evidence supports 5:00 dwell. The episode begins only on factual SECANT-1 display. "
+             "Continued qualifying off-task behaviour can escalate the same episode to SECANT-2, then SECANT-3.",
+        core_purpose="Regulates confirmed Study off-task behaviour and independently verifies Study return.",
+        distinctive_features="Return may start at any applicable stage. A button press is intent, not proof. "
+                             "Approved COSECANT breaks are not ordinary SECANT escalation.",
+        workflow_boxes=[
+            {"label": "STUDY OFF-TASK", "caption": "5:00 supported dwell", "icon": "book"},
+            {"label": "SECANT-1", "caption": "Factual display founds episode", "icon": "bell"},
+            {"label": "SECANT-2", "caption": "+10:00 qualifying off-task", "icon": "clock"},
+            {"label": "SECANT-3", "caption": "+13:15 eligible escalation", "icon": "lock"},
+        ], figure_num=5, figure_caption="SECANT escalation and return branches",
+        figure_note="Return from any applicable stage: return process -> 10s supported verification -> 60s confirmation -> recovery closure. "
+                    "Interrupted attempts retain evidence_gap / return_away reasons. Not every episode reaches stage 3 or recovers.",
+        workflow_box_h=23 * mm)
+    y -= 5 * mm
     y = _organ_block(
         c, y, icon="cap", name="COSECANT", subtitle="CONTEXT-ORIENTED STUDY ESCALATION, CONFIRMATION AND NAVIGATION TOOL",
         body=fx.cosecant_body,
@@ -1285,9 +1309,9 @@ def _page_sp3(c, fx) -> None:
             {"label": "EXACT RESOURCE CONFIRMATION", "caption": "3 continuous seconds", "icon": "doc", "ring": CYAN, "glyph": NAVY},
             {"label": "STUDY RESUMED", "caption": "User continues studying", "icon": "chart", "ring": CYAN, "glyph": NAVY},
         ],
-        figure_num=5, figure_caption="COSECANT workflow",
-        figure_note="COSECANT can be understood as the opposite boundary of SINE: SINE escalates during "
-                    "off-task drift, whereas COSECANT begins from a permitted break and governs the "
+        figure_num=6, figure_caption="COSECANT workflow",
+        figure_note="SECANT governs confirmed Study off-task recovery. COSECANT independently governs "
+                    "approved breaks and the "
                     "countdown back to study continuity.",
         workflow_box_h=27 * mm,
     )
@@ -1381,26 +1405,22 @@ def _page_sp4(c, fx) -> None:
     left_x, right_x, col_w = MARGIN, MARGIN + CONTENT_WIDTH * 0.62 + 4 * mm, CONTENT_WIDTH * 0.62
     _icon_circle(c, left_x + 4 * mm, y - 4 * mm, 4 * mm, "flow")
     _text(c, "SOURCE COVERAGE", left_x + 10 * mm, y - 2 * mm, 10.5, CYAN, bold=True, spacing=0.3)
-    y2 = _paragraph(c, fx.source_coverage_intro, left_x, y - 7.5 * mm, col_w, 8 * mm, size=7.2, leading=8.6, color=INK) - 2 * mm
+    y2 = _paragraph(c, fx.source_coverage_intro, left_x, y - 7.5 * mm, CONTENT_WIDTH, 8 * mm, size=7.2, leading=8.6, color=INK) - 2 * mm
     sources = [
         {"label": "SINE", "icon": "bell", "body": "Intervention evidence"},
         {"label": "MINE", "icon": "chat", "body": "Messaging evidence"},
         {"label": "COSINE", "icon": "play", "body": "OTT evidence"},
-        {"label": "MIRL", "icon": "refresh", "body": "Recovery evidence"},
+        {"label": "MIRL", "icon": "refresh", "body": "SINE recovery evidence"},
+        {"label": "SECANT", "icon": "book", "body": "Study off-task / recovery evidence"},
         {"label": "COSECANT", "icon": "cap", "body": "Study-break return evidence"},
         {"label": "RESOURCE INTENT", "icon": "doc", "body": "Task-context evidence"},
         {"label": "STUDY", "icon": "people", "body": "Study-context evidence"},
         {"label": "NORMAL BREAK", "icon": "cup", "body": "Break evidence"},
     ]
-    _grid_cards(c, left_x, y2, col_w, sources, columns=4, card_h=21 * mm, render_cell=_small_source_card)
-
-    box_w = CONTENT_WIDTH - col_w - 4 * mm
-    box_h = 44 * mm
-    _rrect(c, right_x, y - box_h, box_w, box_h, 2 * mm, fill=PALE_BLUE)
-    _icon_circle(c, right_x + 5 * mm, y - 5 * mm, 3.6 * mm, "info")
-    _text(c, "IMPORTANT BOUNDARY", right_x + 10.5 * mm, y - 4 * mm, 8, NAVY, bold=True)
-    _paragraph(c, fx.important_boundary, right_x + 4.5 * mm, y - 10 * mm, box_w - 9 * mm, box_h - 12 * mm,
-               size=7.2, leading=9, color=INK)
+    source_bottom = _grid_cards(c, left_x, y2, CONTENT_WIDTH, sources, columns=5, card_h=21 * mm,
+                                render_cell=_small_source_card)
+    _paragraph(c, "IMPORTANT BOUNDARY: " + fx.important_boundary, MARGIN, source_bottom - 3 * mm,
+               CONTENT_WIDTH, 13 * mm, size=7.2, leading=9, color=INK)
 
     _footer(c, caption=fx.sp4_footer, page_label=_page_label(fx, 5))
 
@@ -1523,7 +1543,7 @@ def _page_sp6(c, fx) -> None:
                        body_size=8.0, body_height=13 * mm)
     y -= 3 * mm
     _icon_circle(c, MARGIN + 4 * mm, y - 4 * mm, 4 * mm, "chart")
-    _text(c, "SESSION-LEVEL OVERVIEW", MARGIN + 10 * mm, y - 2 * mm, 11, CYAN, bold=True, spacing=0.3)
+    _text(c, "OVERALL EXPERIMENT | ORGAN AVAILABILITY", MARGIN + 10 * mm, y - 2 * mm, 11, CYAN, bold=True)
     y = _paragraph(c, fx.session_level_intro, MARGIN, y - 7.5 * mm, CONTENT_WIDTH, 10 * mm, size=7.6, leading=9, color=INK) - 3 * mm
 
     def _overview_card(c, x, y, w, h, item):
@@ -1532,9 +1552,9 @@ def _page_sp6(c, fx) -> None:
         c.circle(x + w / 2, y - 6 * mm, 2.6 * mm, fill=1, stroke=0)
         _text(c, item["organ"], x + w / 2, y - 12.5 * mm, 9, NAVY, bold=True, align="center")
         _status_pill(c, x + w / 2 - 15 * mm, y - 20 * mm, 30 * mm, item["status"], bg=item["status_bg"], fg=item["status_fg"])
-        _paragraph(c, item["caption"], x + 2.5 * mm, y - h + 8 * mm, w - 5 * mm, h - 9 * mm, size=6.0, leading=7.2, color=MUTED, align="center")
+        _paragraph(c, item["caption"], x + 2.5 * mm, y - 24 * mm, w - 5 * mm, h - 25 * mm, size=6.0, leading=7.2, color=MUTED, align="center")
 
-    y = _grid_cards(c, MARGIN, y, CONTENT_WIDTH, fx.organ_overview_cards, columns=5, card_h=32 * mm, render_cell=_overview_card) - 2 * mm
+    y = _grid_cards(c, MARGIN, y, CONTENT_WIDTH, [item for item in fx.organ_overview_cards if item["organ"] != "OVERALL EXPERIMENT"], columns=5, card_h=38 * mm, render_cell=_overview_card) - 2 * mm
 
     _icon_circle(c, MARGIN + 4 * mm, y - 4 * mm, 4 * mm, "list")
     _text(c, "AVAILABLE RESULT TYPES", MARGIN + 10 * mm, y - 2 * mm, 11, CYAN, bold=True, spacing=0.3)
@@ -1543,7 +1563,7 @@ def _page_sp6(c, fx) -> None:
         {"label": "Behavioural journey map", "icon": "route", "body": "Chronological view of user behaviour."},
         {"label": "Episode tables", "icon": "doc", "body": "List of episodes with key details."},
         {"label": "Stage / escalation tables", "icon": "chart", "body": "Progression through stages and levels."},
-        {"label": "Trend graph", "icon": "growth", "body": "Patterns and trends across time."},
+        {"label": "Recovery attempts", "icon": "growth", "body": "Verified return, interruptions and closure."},
         {"label": "Break timing analysis", "icon": "clock", "body": "Timing and duration of breaks."},
         {"label": "Unavailable data flag", "icon": "warn", "body": 'Shown when evidence cannot support a value; never means unused.'},
     ]
@@ -1556,9 +1576,10 @@ def _page_sp6(c, fx) -> None:
         {"organ": "SINE", "items": ["Behavioural journey map", "MIRL table", "SINE stage table", "Trend graph"]},
         {"organ": "MINE", "items": ["Messaging pathway", "Response options", "Episode table", "Trend graph"]},
         {"organ": "COSINE", "items": ["OTT pathway", "Break/watch decisions", "Callback summary", "Trend graph"]},
+        {"organ": "SECANT", "items": ["Study recovery", "Stage chronology", "Return attempts", "Interruptions / closure"]},
         {"organ": "COSECANT", "items": ["Study-break route", "Reminder / final-lock levels", "Break timing table", "Return latency"]},
     ]
-    y = _grid_cards(c, MARGIN, y, CONTENT_WIDTH, organ_pages, columns=4, card_h=28 * mm, render_cell=_organ_availability_card) - 2 * mm
+    y = _grid_cards(c, MARGIN, y, CONTENT_WIDTH, organ_pages, columns=5, card_h=32 * mm, render_cell=_organ_availability_card) - 2 * mm
 
     y = _callout(c, y, fx.important_reading_rule)
     y = _callout(c, y, fx.mixed_membership_scope_note, size=7.6)
@@ -1709,6 +1730,22 @@ def _page_sp9(c, fx) -> None:
     _footer(c, caption=fx.footer, page_label=_page_label(fx, 10))
 
 
+def _page_secant(c, fx):
+    y = _results_page_header(c, page_code="SECANT_RESULTS", chapter_label="Chapter 4 Results and Discussion",
+                            chapter_num="4", chapter_title="SECANT RESULTS AND DISCUSSION", intro=fx.intro)
+    y = _grid_cards(c, MARGIN, y, CONTENT_WIDTH, fx.snapshot_cards, columns=5, card_h=30 * mm,
+                    render_cell=_snapshot_card) - 7 * mm
+    y = _callout(c, y, fx.discussion_note, size=8)
+    y = _table_block(c, y, number=1, title=fx.table1_title, desc=fx.table1_desc,
+                     rows=fx.table1_rows, widths_mm=fx.table1_widths, row_h=14 * mm) - 6 * mm
+    y = _table_block(c, y, number=2, title=fx.table2_title, desc=fx.table2_desc,
+                     rows=fx.table2_rows, widths_mm=fx.table2_widths, row_h=14 * mm) - 5 * mm
+    _paragraph(c, "Full episode evidence and chronological events continue on the following pages when needed. "
+               "No generic dwell, relapse, attention or cognitive-recovery score is inferred.",
+               MARGIN, y, CONTENT_WIDTH, 15 * mm, size=8, leading=10, color=MUTED)
+    _footer(c, caption=fx.footer, page_label=_page_label(fx, 0))
+
+
 def _page_sp10(c, fx) -> None:
     y = _results_page_header(c, page_code="SP10", chapter_label="SP10  |  Chapter 4 Results and Discussion",
                               chapter_num="4", chapter_title="COSECANT RESULTS AND DISCUSSION", intro=fx.intro)
@@ -1833,16 +1870,16 @@ def _page_sp11(c, fx) -> None:
     y = _callout(c, y, fx.intro)
 
     y = _section_head(c, MARGIN, y, "doc", "WHAT MYELIN DEMONSTRATES", fx.what_demonstrates_intro, CONTENT_WIDTH,
-                       body_size=8.0, body_height=13 * mm)
+                       body_size=8.0, body_height=8 * mm)
     box_h = 22 * mm
     _rrect(c, MARGIN, y - box_h, CONTENT_WIDTH, box_h, 2 * mm, fill=SOFT, stroke=LINE)
     left_x, right_x, col_w = _two_col(MARGIN + 4 * mm, CONTENT_WIDTH - 8 * mm)
     _bullet_list(c, left_x, y - 4 * mm, col_w, fx.demonstrates_left, size=6.8, leading=8.2)
     _bullet_list(c, right_x, y - 4 * mm, col_w, fx.demonstrates_right, size=6.8, leading=8.2)
-    y -= box_h + 6 * mm
+    y -= box_h + 3 * mm
 
     y = _section_head(c, MARGIN, y, "flow", "RECOVERY AS THE CORE CONTRIBUTION", fx.recovery_core_intro, CONTENT_WIDTH,
-                       body_size=8.0, body_height=10 * mm)
+                       body_size=8.0, body_height=8 * mm)
     y = _workflow_chain(c, MARGIN, y, CONTENT_WIDTH, fx.recovery_chain_boxes, box_h=20 * mm, gap=3.5 * mm) - 4 * mm
     y = _callout(c, y, fx.mirl_statement)
 
@@ -1857,12 +1894,12 @@ def _page_sp11(c, fx) -> None:
     y = _callout(c, y, fx.scientific_boundary_statement, bold=True)
 
     left_x, right_x, col_w = _two_col(MARGIN, CONTENT_WIDTH)
-    box_h2 = 24 * mm
+    box_h2 = 26 * mm
     _verdict_box(c, left_x, y, col_w, box_h2, title="CURRENTLY DEFENSIBLE", icon="check", tone="good", items=fx.currently_defensible)
     _verdict_box(c, right_x, y, col_w, box_h2, title="NOT YET ESTABLISHED", icon="warn", tone="bad", items=fx.not_yet_established)
     y -= box_h2 + 4 * mm
 
-    y = _callout(c, y, fx.closing_remark, bold=True)
+    y = _paragraph(c, fx.closing_remark, MARGIN, y, CONTENT_WIDTH, 12 * mm, size=9.3, leading=11, color=NAVY, bold=True)
     _footer(c, caption="", page_label=_page_label(fx, 12))
 
 
@@ -1980,7 +2017,7 @@ def _build_report_fixtures(*, report_model: ReportRenderModel | None = None) -> 
             "the hidden biology generating that behaviour.",
     )
     sp2 = _NS(
-        sp2_intro="SINE and MINE are MYELIN's two primary drift-intervention organs. Both regulate "
+        sp2_intro="SINE and MINE regulate general and messaging drift outside the Study SECANT pathway. Both regulate "
                   "off-task digital behaviour, but MINE introduces a branch pathway for messaging the "
                   "user considers important.",
         sine_body="SINE is MYELIN's general drift-regulation organ. It responds when software-observed "
@@ -1993,19 +2030,16 @@ def _build_report_fixtures(*, report_model: ReportRenderModel | None = None) -> 
                   "ordinary messaging drift from communication the user considers important.",
     )
     sp3 = _NS(
-        sp3_intro="COSINE and COSECANT regulate specialised contexts within MYELIN. COSINE manages OTT "
-                  "streaming pathways, whereas COSECANT governs return from an approved Study break to "
-                  "the exact registered learning resource.",
+        sp3_intro="COSINE manages OTT streaming pathways. Study off-task regulation and approved-break return "
+                  "are described separately on the following SECANT / COSECANT page.",
         cosine_body="COSINE is MYELIN's OTT and streaming-regulation organ. It is designed for prolonged "
                     "entertainment-streaming contexts rather than ordinary web drift or messaging. COSINE "
                     "first asks about the user's intention, then manages either return intention or an "
                     "intentionally chosen leisure interval before guiding the user back toward task "
                     "resumption.",
-        cosecant_body="COSECANT is the return-regulation organ of Study Mode. Study Mode begins by "
-                      "defining study time and task-relevant keywords or resources. When the user remains "
-                      "on the exact validated study resource, SINE may be withheld; movement to an "
-                      "unrelated resource can restore SINE eligibility. If the user takes an approved "
-                      "break, COSECANT manages the route back to the exact registered study resource.",
+        cosecant_body="COSECANT independently governs the approved Study-break branch. A permitted break has a selected "
+                      "allowance, then reminder and final-lock stages if return remains unconfirmed. SECANT owns confirmed "
+                      "Study off-task recovery outside that approved-break interval; COSECANT confirms exact Study-resource return.",
     )
     sp4 = _NS(
         sp4_intro="This chapter explains the behavioural data MYELIN can record from certified software "
@@ -2065,13 +2099,14 @@ def _build_report_fixtures(*, report_model: ReportRenderModel | None = None) -> 
                   "the selected experiment (development preview fixture). When an organ has no certified "
                   "result data, its evidence is shown clearly as unavailable.",
         how_organised="This chapter contains an overview of the certified behavioural results, followed "
-                      "by separate organ pages for SINE, MINE, COSINE and COSECANT when data exists.",
+                      "by separate organ pages for SINE, MINE, COSINE, SECANT and COSECANT when data exists.",
         session_level_intro="This section shows which MYELIN organs have certified results for the "
                             "selected experiment (development preview fixture, not real experiment data).",
         organ_overview_cards=[
             _overview_card("SINE", "AVAILABLE", BLUE_MED, "CERTIFIED VALUE"),
             _overview_card("MINE", "AVAILABLE", GREEN, "CERTIFIED VALUE"),
             _overview_card("COSINE", "UNAVAILABLE", PURPLE, "UNAVAILABLE"),
+            _overview_card("SECANT", "NO_EVIDENCE", CYAN_DARK, "DEV FIXTURE: no SECANT rows"),
             _overview_card("COSECANT", "AVAILABLE", AMBER, "CERTIFIED VALUE"),
             _overview_card("MIRL / OVERALL", "AVAILABLE", CYAN, "Summary pathway"),
         ],
@@ -2305,7 +2340,7 @@ def _build_report_fixtures(*, report_model: ReportRenderModel | None = None) -> 
         demonstrates_left=[
             "Observes the full behavioural trajectory: task engagement, drift, intervention, return, "
             "relapse and closure.",
-            "Distinguishes SINE, MINE, COSINE and COSECANT, each with clear meanings and evidence.",
+            "Distinguishes SINE, MINE, COSINE, SECANT and COSECANT, each with clear meanings and evidence.",
         ],
         demonstrates_right=[
             "Records certified behavioural evidence from real digital activity.",
@@ -2322,10 +2357,9 @@ def _build_report_fixtures(*, report_model: ReportRenderModel | None = None) -> 
             _journey_box("VERIFIED RETURN", "chart", ring=CYAN, glyph=NAVY),
             _journey_box("RELAPSE OR CLOSURE", "refresh", fill=RED_BG, ring=RED, glyph=RED),
         ],
-        mirl_statement="MYELIN separates return intention from verified behavioural return. A user's "
-            "intention to return is recorded, but recovery is only confirmed when subsequent behaviour "
-            "shows a return to the original task. MIRL is the pathway that carries this recovery "
-            "evidence -- verification, relapse detection, and closure -- through to a confirmed return.",
+        mirl_statement="Return intent alone is not recovery. MIRL carries SINE recovery evidence; "
+            "SECANT owns Study off-task recovery; COSECANT governs approved-break return. "
+            "Each pathway requires its own recorded evidence of supported return.",
         hci_significance_intro="MYELIN provides practical insights for human-computer interaction by "
                                "showing:",
         hci_cards=[
@@ -2442,6 +2476,16 @@ def _build_report_fixtures(*, report_model: ReportRenderModel | None = None) -> 
 
     fixtures = dict(sp1=sp1, sp2=sp2, sp3=sp3, sp4=sp4, sp5=sp5, sp6=sp6, sp7=sp7, sp8=sp8, sp9=sp9,
                     sp10=sp10, sp11=sp11, sp12=sp12, sp13=sp13, sp14=sp14)
+    fixtures["study_organs"] = _NS(**vars(sp3))
+    fixtures["secant_results"] = _NS(
+        intro="DEVELOPMENT PREVIEW: no SECANT quantitative evidence in this fixture.",
+        snapshot_cards=[{"label": "Data status", "icon": "book", "value": NO_EVIDENCE, "value_color": MUTED, "caption": "DEV FIXTURE"}],
+        table1_title="SECANT EPISODE EVIDENCE", table1_desc="Development fixture only.",
+        table1_rows=[("EPISODE", "FIELD", "RECORDED VALUE")], table1_widths=(35, 35, 104),
+        table2_title="SECANT EVENT CHRONOLOGY", table2_desc="No synthetic result is certified.",
+        table2_rows=[("EPISODE", "OFFSET", "ATTEMPT", "EVENT / REASON")], table2_widths=(35, 21, 18, 100),
+        discussion_note="SECANT recovery is independent of MIRL; COSECANT keeps approved-break authority.",
+        footer="DEVELOPMENT PREVIEW ONLY")
     if report_model is not None:
         fixtures.update(_integration_result_fixtures(report_model))
     return fixtures
@@ -2469,9 +2513,9 @@ def _integration_result_fixtures(model: ReportRenderModel) -> dict:
 
     available = {page.organ: page for page in model.organ_pages}
     unavailable = {item.organ: item for item in model.unavailable_organs}
-    organ_dots = {"SINE": BLUE_MED, "MINE": GREEN, "COSINE": PURPLE, "COSECANT": AMBER}
+    organ_dots = {"SINE": BLUE_MED, "MINE": GREEN, "COSINE": PURPLE, "SECANT": CYAN_DARK, "COSECANT": AMBER}
     overview_cards = []
-    for organ in ("SINE", "MINE", "COSINE", "COSECANT"):
+    for organ in ("SINE", "MINE", "COSINE", "SECANT", "COSECANT"):
         if organ in available:
             page = available[organ]
             caption = page.overlap_note or page.reason
@@ -2576,6 +2620,8 @@ def _integration_result_fixtures(model: ReportRenderModel) -> dict:
                 chart_unit=page.chart.unit,
             )
             dynamic["sp9"] = _NS(**values)
+        elif page.organ == "SECANT":
+            dynamic["secant_results"] = _NS(**values)
         elif page.organ == "COSECANT":
             values.update(
                 pathway_intro="Only certified COSECANT stages actually reached in this experiment are shown.",
@@ -2597,6 +2643,7 @@ _ORGAN_OVERVIEW_TO_RESULTS_PAGE: Final = {
     "SINE": "sp7",
     "MINE": "sp8",
     "COSINE": "sp9",
+    "SECANT": "secant_results",
     "COSECANT": "sp10",
 }
 
@@ -2658,7 +2705,7 @@ def _page_continuation(c, organ: OrganRenderModel, planned) -> None:
     top, _ = _page_frame(c, page_code="CONTINUED", chapter_label="Chapter 4 Results and Discussion")
     y = _chapter_title(c, top, "4", f"{organ.organ} RESULTS AND DISCUSSION -- CONTINUED")
     y = _callout(c, y, f"TABLE {table.number} | {table.title}. Certified rows continue below.")
-    _table(c, MARGIN, y - 3 * mm, table.widths_mm, [table.headers, *planned.rows], row_h=7.6 * mm)
+    _table(c, MARGIN, y - 3 * mm, table.widths_mm, [table.headers, *planned.rows], row_h=(14 if organ.organ == "SECANT" else 7.6) * mm)
     _footer(c, caption=f"Continuation of {organ.page_code}; table headers are repeated.",
             page_label=f"-- {planned.physical_page}")
 
@@ -2683,11 +2730,11 @@ def generate_report_pdf(source, output_path: str | Path) -> Path:
         c.setAuthor("MYELIN")
         c.setSubject(f"MYELIN certified integration preview -- experiment {model.experiment_id}")
         static_functions = {
-            "SP1": _page_sp1, "SP2": _page_sp2, "SP3": _page_sp3, "SP4": _page_sp4, "SP5": _page_sp5,
+            "STUDY_ORGANS": _page_study_organs, "SP1": _page_sp1, "SP2": _page_sp2, "SP3": _page_sp3, "SP4": _page_sp4, "SP5": _page_sp5,
             "SP11": _page_sp11, "SP12": _page_sp12, "SP13": _page_sp13, "SP14": _page_sp14,
         }
-        organ_functions = {"SINE": _page_sp7, "MINE": _page_sp8, "COSINE": _page_sp9, "COSECANT": _page_sp10}
-        organ_keys = {"SINE": "sp7", "MINE": "sp8", "COSINE": "sp9", "COSECANT": "sp10"}
+        organ_functions = {"SINE": _page_sp7, "MINE": _page_sp8, "COSINE": _page_sp9, "SECANT": _page_secant, "COSECANT": _page_sp10}
+        organ_keys = {"SINE": "sp7", "MINE": "sp8", "COSINE": "sp9", "SECANT": "secant_results", "COSECANT": "sp10"}
         for planned in plan.pages:
             if planned.kind == "cover":
                 _draw_cover(c, title="MYELIN REPORT",
@@ -2751,11 +2798,12 @@ def generate_dev_preview_pdf(output_path: str | Path) -> Path:
     c.showPage()
 
     pages = [
-        _page_sp1, _page_sp2, _page_sp3, _page_sp4, _page_sp5, _page_sp6, _page_sp7,
-        _page_sp8, _page_sp9, _page_sp10, _page_sp11, _page_sp12, _page_sp13, _page_sp14,
+        _page_sp1, _page_sp2, _page_sp3, _page_study_organs, _page_sp4, _page_sp5, _page_sp6, _page_sp7,
+        _page_sp8, _page_sp9, _page_secant, _page_sp10, _page_sp11, _page_sp12, _page_sp13, _page_sp14,
     ]
-    keys = ["sp1", "sp2", "sp3", "sp4", "sp5", "sp6", "sp7", "sp8", "sp9", "sp10", "sp11", "sp12", "sp13", "sp14"]
-    for page_fn, key in zip(pages, keys):
+    keys = ["sp1", "sp2", "sp3", "study_organs", "sp4", "sp5", "sp6", "sp7", "sp8", "sp9", "secant_results", "sp10", "sp11", "sp12", "sp13", "sp14"]
+    for physical, (page_fn, key) in enumerate(zip(pages, keys), start=2):
+        fixtures[key]._physical_page = physical
         page_fn(c, fixtures[key])
         c.showPage()
 

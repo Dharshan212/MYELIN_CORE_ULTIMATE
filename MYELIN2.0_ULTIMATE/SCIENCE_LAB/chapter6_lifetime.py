@@ -12,7 +12,7 @@ removed entirely (product decision, not an engineering gap -- neither had a
 durable lifetime ledger to read). TOP DISTRACTION PLATFORM and TOP OTT
 PLATFORM are now real dynamic lifetime aggregations, each reusing an
 existing durable read authority:
-- TOP DISTRACTION PLATFORM counts every durable lifetime trigger record
+- TOP DISTRACTION PLATFORM counts each durable SINE operational admission
   that carries a certified structured ``platform_key``
   (``PERSISTENCE.storage.read_trigger_platform_keys``, added alongside this
   patch -- the same trigger ledger ``read_trigger_identities`` already
@@ -324,8 +324,8 @@ def _distraction_platform_label(platform_key: str) -> str:
 
 def _top_distraction_platform(*, read_trigger_platform_keys) -> LifetimeMetricResult:
     """TOP DISTRACTION PLATFORM = the platform_key with the greatest number
-    of valid durable lifetime distraction-trigger records (locked product
-    definition -- count of certified structured platform_key occurrences,
+    of exact durable SINE admissions matched to lifetime trigger records
+    (count of certified structured platform_key occurrences,
     never dwell time, never foreground/title inference)."""
 
     try:

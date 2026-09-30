@@ -30,7 +30,7 @@ new certified-data consumption beyond what Phase 2 already established.
 
 Phase 4 adds a single Future Scope section, "Mi -- MYELIN Intelligence":
 a conceptual adaptive-intelligence layer envisioned to sit above SINE,
-MINE, COSINE and COSECANT, an Ask Mi conversational concept, a local-LLM
+MINE, COSINE, SECANT and COSECANT, an Ask Mi conversational concept, a local-LLM
 architecture concept, and a late-night/rest-aware guidance concept. Every
 sentence is static presentation copy, clearly badged FUTURE SCOPE /
 CONCEPT / ILLUSTRATIVE FUTURE EXAMPLE / FUTURE BEHAVIORAL GUIDANCE as
@@ -68,7 +68,7 @@ Final Four-Card Evidence Completion (20260915) removes PRIMARY REGULATION
 DOMAIN and TOP FOCUS PLATFORM entirely (no durable lifetime ledger exists
 for either) and wires the two remaining cards to real durable lifetime
 evidence: TOP DISTRACTION PLATFORM (the platform_key with the greatest
-number of certified durable lifetime trigger records) and TOP OTT PLATFORM
+number of certified durable lifetime SINE admissions) and TOP OTT PLATFORM
 (the OTT platform with the greatest cumulative durable supported time
 across closed lifetime COSINE history). Both aggregations happen entirely
 in ``SCIENCE_LAB.chapter6_lifetime``; this view still only formats and
@@ -153,7 +153,7 @@ def _section_heading(text: str, *, role: str = "cyan") -> QLabel:
     return heading
 
 
-#: The four regulation pathways (Chapter 6 Phase 1 spec).  Presentation
+#: The five regulation pathways (Chapter 6 Phase 1 spec).  Presentation
 #: copy only -- names and taglines never redefine an organ; the underlying
 #: SINE/MINE/COSINE/COSECANT behaviour is documented in Chapter 2 and stays
 #: authoritative there.
@@ -172,6 +172,11 @@ _PATHWAYS: Final = (
         "key": "COSINE",
         "tagline": "OTT / streaming activity",
         "purpose": "Streaming check-ins and prolonged entertainment-use regulation.",
+    },
+    {
+        "key": "SECANT",
+        "tagline": "Study-resource drift",
+        "purpose": "Factual intervention and supported Study-return recovery.",
     },
     {
         "key": "COSECANT",
@@ -258,17 +263,10 @@ def _format_latency_ns(value_ns: int) -> str:
 #: ``raw_title`` (captured, but Resource Intent itself is architecturally
 #: UNAVAILABLE and never reaches certified Science Lab evidence -- the
 #: same finding Phase 2 already established for
-#: ``SourceCoverage["RESOURCE_INTENT"]``). None of these three ever reach
-#: ``Chapter3ResultPackage`` -- confirmed by the Phase 2 audit that no
-#: field on ``Chapter3Metric``, ``WholeMyelinRow``, ``SourceCoverage``,
-#: ``DerivedFinding`` or ``CertifiedPattern`` carries title or content
-#: text.
-#:
-#: Because window-title text IS observed by the reader (even though it is
-#: excluded from classification and from certified evidence), this module
-#: never claims MYELIN "never reads" or "cannot access" window titles --
-#: only the narrower, audit-backed claim that raw content is not required
-#: as, and does not reach, certified Science Lab evidence.
+#: ``SourceCoverage["RESOURCE_INTENT"]``). SECANT can carry validated,
+#: observation-bound display captions into its result package. Captions
+#: are presentation metadata, never classification or alias authority.
+#: Private message and document bodies are not required as evidence.
 #:
 #: LOCAL / NETWORK -- a repository-wide search found no network client
 #: import (no ``requests``, ``urllib.request``, ``socket``, ``aiohttp``,
@@ -354,7 +352,7 @@ _RESEARCH_RESPONSIBILITY_POINTS: Final = (
 #: only. Nothing below is wired to a model, a network call, or live data;
 #: every list is presentation copy describing a possible future
 #: architecture, badged accordingly on screen.
-_MI_ARCHITECTURE_ORGANS: Final = ("SINE", "MINE", "COSINE", "COSECANT")
+_MI_ARCHITECTURE_ORGANS: Final = ("SINE", "MINE", "COSINE", "SECANT", "COSECANT")
 
 _MI_EVIDENCE_AUTHORITY_STEPS: Final = (
     "OBSERVED BEHAVIOR",
@@ -621,7 +619,7 @@ _FOUNDATIONS: Final = (
             "return changes as time away grows; it does not imply that "
             "memory itself is being measured by MYELIN."
         ),
-        "maps_to": "SINE · MINE · COSINE · COSECANT → Mi",
+        "maps_to": "SINE · MINE · COSINE · SECANT · COSECANT → Mi",
     },
     {
         "name": "JITAI",
@@ -763,6 +761,10 @@ _INTEGRATION_FIGURE_SVG: Final = (
     '<rect x="830" y="508.0" width="170" height="74" rx="10" fill="#0f2744" stroke="#5ec8f0" stroke-width="2.4"/>'
     '<text x="915.0" y="552.4" text-anchor="middle" font-size="21" font-weight="700" fill="#eaf4ff">'
     'COSINE</text>'
+    '<rect x="830" y="610.0" width="170" height="74" rx="10" fill="#0f2744" stroke="#5ec8f0" stroke-width="2.4"/>'
+    '<text x="915.0" y="654.4" text-anchor="middle" font-size="21" font-weight="700" fill="#eaf4ff">SECANT</text>'
+    '<path d="M784,130 C805,130 805,647 826,647" fill="none" stroke="#4a7fa8" stroke-width="1.6" marker-end="url(#arrow)"/>'
+    '<path d="M1004,647 C1042,647 1042,440 1080,440" fill="none" stroke="#4a7fa8" stroke-width="1.6" marker-end="url(#arrow)"/>'
     '<rect x="830" y="713.0" width="170" height="74" rx="10" fill="#0f2744" stroke="#5ec8f0" stroke-width="2.4"/>'
     '<text x="915.0" y="757.4" text-anchor="middle" font-size="21" font-weight="700" fill="#eaf4ff">'
     'COSECANT</text>'
@@ -770,8 +772,8 @@ _INTEGRATION_FIGURE_SVG: Final = (
     '<line x1="949.0" y1="167.0" x2="949.0" y2="298.0" stroke="#4a7fa8" stroke-width="1.6" marker-start="url(#arrow)" marker-end="url(#arrow)" opacity="0.6"/>'
     '<line x1="881.0" y1="372.0" x2="881.0" y2="508.0" stroke="#4a7fa8" stroke-width="1.6" marker-start="url(#arrow)" marker-end="url(#arrow)" opacity="0.6"/>'
     '<line x1="949.0" y1="372.0" x2="949.0" y2="508.0" stroke="#4a7fa8" stroke-width="1.6" marker-start="url(#arrow)" marker-end="url(#arrow)" opacity="0.6"/>'
-    '<line x1="881.0" y1="582.0" x2="881.0" y2="713.0" stroke="#4a7fa8" stroke-width="1.6" marker-start="url(#arrow)" marker-end="url(#arrow)" opacity="0.6"/>'
-    '<line x1="949.0" y1="582.0" x2="949.0" y2="713.0" stroke="#4a7fa8" stroke-width="1.6" marker-start="url(#arrow)" marker-end="url(#arrow)" opacity="0.6"/>'
+    '<line x1="881.0" y1="582.0" x2="881.0" y2="610.0" stroke="#4a7fa8" stroke-width="1.6" marker-start="url(#arrow)" marker-end="url(#arrow)" opacity="0.6"/>'
+    '<line x1="949.0" y1="684.0" x2="949.0" y2="713.0" stroke="#4a7fa8" stroke-width="1.6" marker-start="url(#arrow)" marker-end="url(#arrow)" opacity="0.6"/>'
     '<path d="M424,335 C645.1,335 645.1,130 826,130" fill="none" stroke="#4a7fa8" stroke-width="1.6" opacity="0.75" marker-end="url(#arrow)"/>'
     '<path d="M424,335 C645.1,335 645.1,335 826,335" fill="none" stroke="#4a7fa8" stroke-width="1.6" opacity="0.75" marker-end="url(#arrow)"/>'
     '<path d="M424,335 C645.1,335 645.1,545 826,545" fill="none" stroke="#4a7fa8" stroke-width="1.6" opacity="0.75" marker-end="url(#arrow)"/>'
@@ -825,7 +827,7 @@ _INTEGRATION_FIGURE_CAPTION_V2: Final = (
 
 _CURRENTLY_DEFENSIBLE_ITEMS: Final = (
     "MYELIN can observe software-visible behavioral context.",
-    "MYELIN can deliver distinct regulation pathways through SINE, MINE, COSINE and COSECANT.",
+    "MYELIN can deliver distinct regulation pathways through SINE, MINE, COSINE, SECANT and COSECANT.",
     "MYELIN can preserve certified event evidence for supported sources.",
     "MYELIN can distinguish return-related events where the underlying organ evidence supports them.",
     "MYELIN's Science Lab can preserve UNAVAILABLE as UNAVAILABLE rather than inventing a result.",
@@ -2153,7 +2155,7 @@ class Chapter6ConclusionView(QWidget):
             ),
             (
                 "One framework, four pathways",
-                "SINE, MINE, COSINE and COSECANT allow different forms of digital "
+                "SINE, MINE, COSINE, SECANT and COSECANT allow different forms of digital "
                 "behavior to be regulated through separate pathways while remaining "
                 "part of one common MYELIN framework.",
             ),
@@ -2661,8 +2663,8 @@ class Chapter6ConclusionView(QWidget):
                 "platform and route-level context for behavioral "
                 "classification. An OS-level window title is also read by the "
                 "foreground reader, but it is deliberately excluded from "
-                "platform/classification certification and never reaches the "
-                "certified analysis package that Science Lab consumes -- the "
+                "platform/classification certification. SECANT may preserve a "
+                "validated observation-bound caption for display only. The "
                 "raw browser address, query text, account names and content "
                 "identifiers are likewise never returned by the browser "
                 "reader.",
@@ -2813,7 +2815,7 @@ class Chapter6ConclusionView(QWidget):
                 "MYELIN Intelligence (Mi) is envisioned as a future adaptive "
                 "layer that learns from longitudinal MYELIN behavioral "
                 "evidence and helps coordinate personalized guidance across "
-                "SINE, MINE, COSINE and COSECANT while remaining constrained "
+                "SINE, MINE, COSINE, SECANT and COSECANT while remaining constrained "
                 "by approved MYELIN policy."
             )
         )
@@ -2889,7 +2891,7 @@ class Chapter6ConclusionView(QWidget):
 
         layout.addWidget(
             _paragraph(
-                "Mi is not a fifth organ. SINE, MINE, COSINE and COSECANT "
+                "Mi is not a sixth organ. SINE, MINE, COSINE, SECANT and COSECANT "
                 "retain their individual functions -- Mi would sit above "
                 "them as a future adaptive intelligence layer, not replace "
                 "any of them.",
@@ -3746,7 +3748,7 @@ class Chapter6ConclusionView(QWidget):
                 "digital distraction as a behavioral process rather than "
                 "only as accumulated usage time. Its current architecture "
                 "separates social, messaging, OTT and break-return "
-                "regulation through SINE, MINE, COSINE and COSECANT, while "
+                "regulation through SINE, MINE, COSINE, SECANT and COSECANT, while "
                 "the Science Lab preserves evidence surrounding "
                 "intervention, return and recovery where those events can "
                 "be certified."

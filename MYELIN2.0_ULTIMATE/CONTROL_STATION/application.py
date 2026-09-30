@@ -88,6 +88,9 @@ from COSECANT_STUDY_MODE.cosecant import CosecantFactKind, CosecantState
 from COSECANT_STUDY_MODE.notes import NoteSession, NotesWorkspace
 from COSECANT_STUDY_MODE.planner import StudyPlanner
 from COSECANT_STUDY_MODE.view import StudyView
+from SECANT.dashboard_view import SecantCosecantDashboard
+from SECANT.dashboard_integration import DashboardIntegration
+from PERSISTENCE.database import database_path as dashboard_database_path
 from PERSISTENCE.storage import EngineStorage
 from PROFILES.profiles import ProfileController
 from SCIENCE_LAB.engine import ScienceLabCoordinator
@@ -164,6 +167,7 @@ PAGE_SCIENCE_LAB: Final = "science-lab"
 PAGE_LIVE_MIRL: Final = "live-mirl"
 PAGE_MINE: Final = "mine"
 PAGE_COSINE: Final = "cosine"
+PAGE_SECANT_DASHBOARD: Final = "secant-dashboard"
 
 PAGE_ORDER: Final = (
     PAGE_CONTROL,
@@ -173,6 +177,7 @@ PAGE_ORDER: Final = (
     PAGE_LIVE_MIRL,
     PAGE_MINE,
     PAGE_COSINE,
+    PAGE_SECANT_DASHBOARD,
 )
 
 
@@ -193,6 +198,7 @@ class ControlStationPages:
     live_mirl: QWidget
     mine: QWidget
     cosine: QWidget
+    secant_dashboard: QWidget
 
     def by_name(self) -> dict[str, QWidget]:
         return {
@@ -203,6 +209,7 @@ class ControlStationPages:
             PAGE_LIVE_MIRL: self.live_mirl,
             PAGE_MINE: self.mine,
             PAGE_COSINE: self.cosine,
+            PAGE_SECANT_DASHBOARD: self.secant_dashboard,
         }
 
 
@@ -263,11 +270,12 @@ class ControlStationSidebar(QFrame):
         PAGE_LIVE_MIRL: "Live MIRL",
         PAGE_MINE: "MINE",
         PAGE_COSINE: "COSINE",
+        PAGE_SECANT_DASHBOARD: "SECANT Dashboard",
     }
 
     GROUPS: Final = (
         ("Core", (PAGE_CONTROL, PAGE_STUDY, PAGE_METRIC_HUB)),
-        ("Research", (PAGE_SCIENCE_LAB, PAGE_LIVE_MIRL, PAGE_MINE, PAGE_COSINE)),
+        ("Research", (PAGE_SCIENCE_LAB, PAGE_LIVE_MIRL, PAGE_MINE, PAGE_COSINE, PAGE_SECANT_DASHBOARD)),
     )
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -13277,6 +13285,7 @@ class ControlPage(QWidget):
         root.addLayout(right, 105)
 
         engine.engine_status_changed.connect(self._engine_status_changed)
+        engine.pause_eligibility_changed.connect(self._pause_eligibility_changed)
         self._profile_changed(self._profile.currentIndex())
         self._engine_status_changed("IDLE")
 
@@ -13595,6 +13604,10 @@ class ControlPage(QWidget):
             return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
         return f"{minutes:02d}:{seconds:02d}"
 
+    def _pause_eligibility_changed(self, value) -> None:
+        self._buttons["pause"].setEnabled(self._engine.pause_control_allowed())
+        self._buttons["pause"].setToolTip(str(getattr(value, "reason", "") or ""))
+
     def _pause_resume_clicked(self) -> None:
         """Route the single Pause/Resume button to the correct engine call."""
 
@@ -13631,14 +13644,14 @@ class ControlPage(QWidget):
         self._engine_paused = paused
         focused = QApplication.focusWidget()
         if running and focused is self._buttons["start"]:
-            self._buttons["pause"].setEnabled(True)
+            self._buttons["pause"].setEnabled(self._engine.pause_control_allowed())
             self._buttons["pause"].setFocus(Qt.FocusReason.OtherFocusReason)
         elif not running and focused is self._buttons["stop"]:
             self._buttons["start"].setEnabled(True)
             self._buttons["start"].setFocus(Qt.FocusReason.OtherFocusReason)
 
         self._buttons["start"].setEnabled(not running)
-        self._buttons["pause"].setEnabled(running)
+        self._buttons["pause"].setEnabled(running and self._engine.pause_control_allowed())
         self._buttons["pause"].setText("RESUME" if paused else "PAUSE")
         self._buttons["stop"].setEnabled(running)
         self._emergency.setEnabled(running)
@@ -14201,6 +14214,13 @@ class ControlPage(QWidget):
             self._ring.set_progress(0.0)
             return
 
+        if bool(self._value(blacklist, "sine_watch_inhibited", False)):
+            # Blacklist still describes the resource, but its dwell has no
+            # Normal SINE authority during Study/COSECANT ownership.
+            self._dwell_track.set_progress(0.0)
+            self._dwell_value.setText("\u2014 / \u2014")
+            self._ring.set_progress(0.0)
+            return
         blacklist_state = self._enum_text(
             self._value(blacklist, "state"), "INACTIVE"
         ).upper()
@@ -14361,6 +14381,68 @@ class _PendingSineAtmosphere:
     pending_atmosphere: "Atmosphere | None" = None
 
 
+class _SecantAtmosphereCoordinator:
+    """Latch our cosmetic claim to the factual SECANT episode, not its popup."""
+
+    def __init__(self, theme):
+        self._theme = theme
+        self._claim = None
+        self._enabled = False
+        self._completed_contexts = set()
+
+    def reset(self, *_args):
+        self._release()
+        self._completed_contexts.clear()
+
+    def _release(self):
+        if self._claim is not None:
+            self._theme.release_atmosphere(self._claim)
+            self._claim = None
+
+    def handle_engine_status(self, status):
+        value = str(getattr(status, "value", status))
+        self._enabled = value in {"ACTIVE", "PAUSED"}
+        if not self._enabled:
+            self.reset()
+
+    def handle_study_view(self, value):
+        from COSECANT_STUDY_MODE.study import StudySnapshot, StudyState
+        if value is None:
+            self.reset()
+        elif isinstance(value, StudySnapshot):
+            if value.state in (StudyState.COMPLETED, StudyState.SHUTDOWN):
+                self._completed_contexts.add(value.context_token)
+                self._release()
+
+    def handle_projection(self, value):
+        from SECANT.read_model import SecantProjection, Stage
+        if value is None:
+            self.reset()
+            return
+        if not isinstance(value, SecantProjection):
+            return
+        completed = (value.scope is not None and any(
+            value.scope.context_id.partition(":")[2] == token
+            for token in self._completed_contexts))
+        if (not self._enabled or completed or not value.scope or not value.episode_id
+                or value.terminal_reason):
+            self._release()
+            return
+        # stage is factual DISPLAYED authority; requested_stage is not activation.
+        # RETURN, recovery, holds and surface withdrawal do not close the episode.
+        atmosphere = {Stage.SECANT_2: Atmosphere.AMBER_ALERT,
+            Stage.SECANT_3: Atmosphere.RED_ALERT}.get(value.stage)
+        if atmosphere is None:
+            self._release()
+            return
+        claim = "secant:" + value.scope.context_id + ":" + value.episode_id
+        old = self._claim
+        self._theme.claim_atmosphere(claim, atmosphere)
+        self._claim = claim
+        if old is not None and old != claim:
+            self._theme.release_atmosphere(old)
+
+
 class _NormalSinePresentationCoordinator:
     """Translates raw SINE and MIRL facts into common-theme atmosphere claims.
 
@@ -14381,14 +14463,6 @@ class _NormalSinePresentationCoordinator:
     Green, which only the Break acknowledgement releases.  All of this is
     cancelled/resolved/reset exactly as Amber alone was in Phase 2B.
 
-    Phase 3A+3B: stage 2 and stage 3 both activate for a STUDY episode (a
-    non-empty ``study_context_token``) through the exact same path as a
-    Normal one -- Study SINE is still SINE, still the same organ, still the
-    same common body, with no separate Study identity in the claim.  Phase
-    3C/3D certified (with zero code required) that the same generic
-    MIRL-release and terminal-cancellation handling below already covers a
-    Study-owned Amber/Red claim, because neither ever inspects
-    ``study_context_token``.
 
     Phase 3E: a factual "this exact COSECANT continuity-popup snapshot was
     visibly presented" receipt for a popup-required state (BREAK_COMPLETE,
@@ -14831,6 +14905,7 @@ class ControlStationWindow(QMainWindow):
         self.settings = SettingsController(parent=self)
         self.theme = ThemeController(parent=self)
         self._sine_presentation = _NormalSinePresentationCoordinator(self.theme)
+        self._secant_atmosphere = _SecantAtmosphereCoordinator(self.theme)
         self.profiles = ProfileController(self.settings)
         self.engine = ControlStationController(parent=self)
         self.lifecycle = LifecycleController(
@@ -14941,6 +15016,8 @@ class ControlStationWindow(QMainWindow):
             # CosineLivePage is wired to the shared durable COSINE read model;
             # CURRENT arrives independently through the live COSINE signal.
             cosine=self.analytics._create_page(PAGE_COSINE, CosineLivePage),
+            # Pure presentation specimen. No analytics lane or runtime signal.
+            secant_dashboard=SecantCosecantDashboard(),
         )
 
         self.page_stack = QStackedWidget(self)
@@ -15235,7 +15312,20 @@ class ControlStationWindow(QMainWindow):
         # COSINE.report.CosineReadAuthority).  Opening the NEW live page must
         # not silently execute that old route.
         self.navigation.page_opened.connect(self._analytics_page_opened)
-        self.navigation.page_opened.connect(self.settings.set_last_page)
+        self._dashboard_integration = DashboardIntegration(
+            self.pages.secant_dashboard,
+            dashboard_database_path(create_parent=False),
+            self._current_parent_session_id,
+            lambda: self.settings.snapshot().clock_timezone,
+        )
+        self.pages.secant_dashboard.close_requested.connect(
+            lambda: self.navigation.open_page(PAGE_CONTROL)
+        )
+        # The dummy dashboard is deliberately absent from persisted preferences.
+        self.navigation.page_opened.connect(
+            lambda page_name: self.settings.set_last_page(page_name)
+            if page_name != PAGE_SECANT_DASHBOARD else None
+        )
         self.lifecycle.navigation_enabled.connect(self.navigation.set_enabled)
         self.lifecycle.exit_authorized.connect(self._finish_shutdown)
 
@@ -15420,6 +15510,13 @@ class ControlStationWindow(QMainWindow):
         self.pages.study.return_intent_requested.connect(self.engine.request_cosecant_return_intent)
 
         self.theme.theme_changed.connect(self._apply_theme)
+        self.engine.secant_projection_changed.connect(self._secant_atmosphere.handle_projection)
+        self.engine.secant_projection_changed.connect(self._science_lab_receive_secant_projection)
+        self.engine.study_view_changed.connect(self._secant_atmosphere.handle_study_view)
+        self.engine.engine_status_changed.connect(self._secant_atmosphere.handle_engine_status)
+        self.engine.current_session_id_changed.connect(self._secant_atmosphere.reset)
+        self.engine.engine_stopped.connect(self._secant_atmosphere.reset)
+        self.engine.engine_failed.connect(self._secant_atmosphere.reset)
         self.engine.sine_fact_received.connect(self._sine_presentation.handle_sine_fact)
         self.engine.sine_fact_received.connect(
             self._observe_sine_fact_for_escalation_selection
@@ -15596,6 +15693,11 @@ class ControlStationWindow(QMainWindow):
     def _science_lab_receive_study_view(self, view: object) -> None:
         self._render_science_lab_live_updates(
             self.science_lab_live_timeline.receive_study_view(view)
+        )
+
+    def _science_lab_receive_secant_projection(self, projection: object) -> None:
+        self._render_science_lab_live_updates(
+            self.science_lab_live_timeline.receive_secant_projection(projection)
         )
 
     def _science_lab_receive_sine_fact(self, fact: object) -> None:
@@ -16008,6 +16110,8 @@ class ControlStationWindow(QMainWindow):
 
     def _analytics_page_opened(self, page_name: str) -> None:
         """All analytics destinations use the existing coalesced reader lane."""
+        if page_name == PAGE_SECANT_DASHBOARD:
+            self._dashboard_integration.refresh()
         self.analytics.page_opened(page_name)
 
     def _restore_preferences(self) -> None:

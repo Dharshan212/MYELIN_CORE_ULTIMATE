@@ -116,12 +116,13 @@ _STAGE_WEIGHTS: Final = {
 
 # Chapter 3's four-organ presentation selector (spec section 26) -- a
 # filter over which example annotation is shown, never a runtime control.
-_ORGANS: Final = ("SINE", "MINE", "COSINE", "COSECANT")
+_ORGANS: Final = ("SINE", "MINE", "COSINE", "SECANT", "COSECANT")
 
 # Organ-specific EXAMPLE annotation for the Trigger boundary (spec sections
 # 16/19/21/23) -- demonstration copy only, never imported from the organ
 # runtime.  The bar's structure above never changes; only this line does.
 _ORGAN_TRIGGER_NOTES: Final = {
+    "SECANT": "EXAMPLE: factual SECANT-1 display founds the Study off-task episode.",
     "SINE": "EXAMPLE: durable trigger admission -- first factual SINE display boundary.",
     "MINE": "EXAMPLE: MINE-1 factual display -- initial messaging-gate boundary.",
     "COSINE": "EXAMPLE: COSINE intention-gate display, or the final callback on break re-entry.",
@@ -246,6 +247,7 @@ _EVENT_STAGE_KINDS: Final = (
 # Phase-4 frozen source roster (spec section 35) -- presentation order
 # only, not a coverage ranking.
 _SOURCE_COVERAGE_ROSTER: Final = (
+    "SECANT",
     "MINE",
     "COSINE",
     "MIRL",
@@ -1719,6 +1721,7 @@ _WHOLE_MYELIN_ROSTER: Final = (
     ("MINE", "Completed episodes"),
     ("COSINE", "Completed episodes"),
     ("MIRL", "Verified recoveries"),
+    ("SECANT", "Completed episodes"),
     ("COSECANT", "Completed returns"),
     ("STUDY", "Completed study blocks"),
     ("NORMAL BREAK", "Completed break events"),

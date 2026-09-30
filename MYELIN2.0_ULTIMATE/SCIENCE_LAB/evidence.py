@@ -134,6 +134,7 @@ class ScienceLabEvidenceSnapshot:
     cosecant: PersistedFactSourceEvidence | None
     resource_intent: None
     limitations: tuple[str, ...]
+    secant: object | None = None
 
 
 def _utc_now() -> str:
@@ -360,6 +361,13 @@ def gather_session_evidence(
         limitations=limitations,
     )
 
+    from .secant_adapter import read_secant_source
+    secant = read_secant_source(parent_session_id)
+    coverage.append(SourceCoverage("SECANT", secant.status, secant.reason,
+        len(secant.episodes) if secant.status != COVERAGE_UNAVAILABLE else None))
+    if secant.status == COVERAGE_UNAVAILABLE:
+        limitations.append("SECANT: " + secant.reason)
+
     for source_system, reason in _UNAVAILABLE_SOURCES:
         coverage.append(SourceCoverage(source_system, COVERAGE_UNAVAILABLE, reason, None))
         limitations.append(
@@ -371,6 +379,7 @@ def gather_session_evidence(
         parent_session_id=parent_session_id,
         generated_at_utc=_utc_now(),
         source_coverage=tuple(coverage),
+        secant=secant,
         sine=sine_evidence,
         normal_break=normal_break_evidence,
         mine=mine_evidence,

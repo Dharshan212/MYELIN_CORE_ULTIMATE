@@ -272,6 +272,10 @@ class AnalyticsSheetRequest:
     include_mine: bool
     include_study_mode: bool
     presentation_timezone: str = "local"
+    # Study Mode includes both child authorities unless a compatibility caller
+    # explicitly opts out of one or both.
+    include_secant: bool = True
+    include_cosecant: bool = True
 
     def selected_sections(self) -> tuple[str, ...]:
         selected: list[str] = []
@@ -283,6 +287,10 @@ class AnalyticsSheetRequest:
             selected.append(PAGE_MINE)
         if self.include_study_mode:
             selected.append(PAGE_STUDY_MODE)
+            if self.include_secant:
+                selected.append("secant")
+            if self.include_cosecant:
+                selected.append("cosecant")
         return tuple(selected)
 
 
@@ -565,7 +573,7 @@ class MetricHubPage(DashboardPage):
         self._replace_cards(
             (
                 ("Sessions", _display_number(_field(projection, "total_session_count")), "Recorded sessions"),
-                ("Operational triggers", _display_number(_field(projection, "total_trigger_count")), "Committed trigger evidence"),
+                ("Operational triggers", _display_number(_field(projection, "total_trigger_count")), "Durable SINE admissions; display is separate"),
                 ("Native MIRL episodes", _display_number(_field(projection, "native_episode_count")), "Native population only"),
                 ("Stable recovery rate", _display_number(_field(projection, "verified_stable_recovery_rate_percent"), suffix="%"), "Prepared native metric"),
                 ("Episode closure rate", _display_number(_field(projection, "episode_closure_rate_percent"), suffix="%"), "Prepared native metric"),
@@ -846,7 +854,7 @@ _ORGAN_CHOICES: Final = (
     (PAGE_LIVE_MIRL, "MIRL", "Recovery episodes", "#38bdf8"),
     (PAGE_COSINE, "COSINE", "OTT episodes", "#a855f7"),
     (PAGE_MINE, "MINE", "Messaging episodes", "#ec4899"),
-    (PAGE_STUDY_MODE, "STUDY MODE", "Study records", "#34d399"),
+    (PAGE_STUDY_MODE, "STUDY MODE", "Study Context, SECANT and COSECANT", "#34d399"),
 )
 
 
@@ -886,7 +894,7 @@ class _OrganChoice(QFrame):
 
 
 class AnalyticsSheetDialog(QDialog):
-    """Compose one date-specific, four-organ Analytics Sheet."""
+    """Compose one date-specific Analytics Sheet with one Study family."""
 
     export_requested = pyqtSignal(object)
 
@@ -902,7 +910,7 @@ class AnalyticsSheetDialog(QDialog):
         root.setSpacing(14)
         title = QLabel("MYELIN Analytics Sheet")
         title.setObjectName("analyticsPageTitle")
-        subtitle = QLabel("Four individual organs \u00b7 Selected dates only")
+        subtitle = QLabel("Report sections \u00b7 Selected dates only")
         subtitle.setObjectName("analyticsPageSubtitle")
         root.addWidget(title)
         root.addWidget(subtitle)
@@ -962,7 +970,7 @@ class AnalyticsSheetDialog(QDialog):
         hint_title = QLabel("No episode recorded")
         hint_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hint_title.setStyleSheet("font-size: 15px; font-weight: 700;")
-        hint_body = QLabel("When an available organ has zero episodes in the selected period, its chapter says so.")
+        hint_body = QLabel("When an available report section has no records in the selected period, its chapter says so.")
         hint_body.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hint_body.setWordWrap(True)
         hint_layout.addWidget(hint_title)
@@ -1009,9 +1017,11 @@ class AnalyticsSheetDialog(QDialog):
             include_cosine=self.sections[PAGE_COSINE].isChecked(),
             include_mine=self.sections[PAGE_MINE].isChecked(),
             include_study_mode=self.sections[PAGE_STUDY_MODE].isChecked(),
+            include_secant=self.sections[PAGE_STUDY_MODE].isChecked(),
+            include_cosecant=self.sections[PAGE_STUDY_MODE].isChecked(),
         )
         if not request.selected_sections():
-            self.show_error("Select at least one organ.")
+            self.show_error("Select at least one report section.")
             return
         self.export_requested.emit(request)
 

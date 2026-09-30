@@ -8,7 +8,7 @@ from typing import Final
 from PERSISTENCE.database import connect_database
 
 
-SCHEMA_VERSION: Final = 6
+SCHEMA_VERSION: Final = 9
 MANAGED_TABLES: Final = frozenset(
     {
         "myelin_meta",
@@ -21,6 +21,9 @@ MANAGED_TABLES: Final = frozenset(
         "cosine_events",
         "mine_events",
         "study_events",
+        "study_resources",
+        "secant_events",
+        "study_resource_events",
         "cosecant_events",
         "science_lab_experiments",
         "notes",
@@ -28,6 +31,7 @@ MANAGED_TABLES: Final = frozenset(
         "emergency_events",
         "emergency_followup",
         "profile_learning_state",
+        "presentation_aliases",
     }
 )
 
@@ -647,14 +651,258 @@ def _migrate_profile_learning_state_return_latency(connection: sqlite3.Connectio
     )
 
 
+# Phase-1 corrections were independently versioned on v8; aliases advance to v9.
+_OWNERSHIP_GUARD_SQL = """CREATE TRIGGER IF NOT EXISTS myelin_schema_no_downgrade
+BEFORE UPDATE OF value ON myelin_meta
+WHEN OLD.key = 'schema_version'
+ AND CAST(NEW.value AS INTEGER) < CAST(OLD.value AS INTEGER)
+BEGIN
+    SELECT RAISE(ABORT, 'Schema downgrade prohibited');
+END;"""
+_FOUNDING_SOURCE_SQL = """CREATE TABLE IF NOT EXISTS secant_founding_source (
+    event_id TEXT NOT NULL PRIMARY KEY REFERENCES secant_events(event_id),
+    source_extension_version INTEGER NOT NULL CHECK (source_extension_version = 1),
+    source_evidence_id TEXT NOT NULL CHECK (length(source_evidence_id) > 0),
+    source_resource_id TEXT NOT NULL CHECK (length(source_resource_id) > 0),
+    source_observed_monotonic_ns INTEGER NOT NULL CHECK (typeof(source_observed_monotonic_ns) = 'integer' AND source_observed_monotonic_ns >= 0),
+    source_evidence_json TEXT NOT NULL CHECK (json_valid(source_evidence_json))
+);"""
+
+
+# Observation endpoints, not inferred switch instants or supported durations.
+_STUDY_BOUNDARY_SQL = """CREATE TABLE IF NOT EXISTS study_resource_boundaries (
+    boundary_id TEXT NOT NULL PRIMARY KEY,
+    contract_version INTEGER NOT NULL CHECK (contract_version = 1),
+    session_id INTEGER NOT NULL REFERENCES sessions(id),
+    capture_id TEXT NOT NULL,
+    boundary_ordinal INTEGER NOT NULL CHECK (boundary_ordinal > 0),
+    study_context_token TEXT NOT NULL,
+    study_block_id TEXT,
+    study_generation INTEGER,
+    from_observation_id TEXT NOT NULL,
+    from_resource_key TEXT NOT NULL,
+    from_observation_ordinal INTEGER NOT NULL,
+    from_observed_monotonic_ns INTEGER NOT NULL,
+    from_observed_at_utc TEXT NOT NULL,
+    from_identity_json TEXT NOT NULL CHECK (json_valid(from_identity_json)),
+    to_observation_id TEXT NOT NULL,
+    to_resource_key TEXT NOT NULL,
+    to_observation_ordinal INTEGER NOT NULL,
+    to_observed_monotonic_ns INTEGER NOT NULL,
+    to_observed_at_utc TEXT NOT NULL,
+    to_identity_json TEXT NOT NULL CHECK (json_valid(to_identity_json)),
+    capture_gap_reasons_json TEXT NOT NULL CHECK (json_valid(capture_gap_reasons_json)),
+    continuity TEXT NOT NULL CHECK (continuity IN ('CONTIGUOUS_OBSERVED_CHANGE', 'CHANGE_ACROSS_EVIDENCE_GAP')),
+    gap_reasons_json TEXT NOT NULL CHECK (json_valid(gap_reasons_json)),
+    CHECK (from_resource_key != to_resource_key),
+    CHECK (from_observation_ordinal >= 0 AND to_observation_ordinal > from_observation_ordinal),
+    CHECK (from_observed_monotonic_ns >= 0 AND to_observed_monotonic_ns > from_observed_monotonic_ns),
+    UNIQUE (capture_id, boundary_ordinal)
+);"""
+
+
+def _verify_study_boundary_schema(connection, *, required=False):
+    rows = connection.execute("SELECT type,name,tbl_name,sql FROM sqlite_master "
+        "WHERE tbl_name='study_resource_boundaries' AND name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
+    if not rows and not required:
+        return
+    expected = [("table", "study_resource_boundaries", "study_resource_boundaries",
+        _stored_correction_sql(_STUDY_BOUNDARY_SQL))]
+    if [tuple(row) for row in rows] != expected:
+        raise RuntimeError("Study boundary schema contract mismatch")
+    if connection.execute("PRAGMA foreign_key_check(study_resource_boundaries)").fetchall():
+        raise RuntimeError("Study boundary parent-session violation")
+
+
+def install_correction2_schema(connection):
+    """Explicit additive installation after the post-Correction-1 backup."""
+    if not connection.in_transaction:
+        raise RuntimeError("Correction-2 installation requires an active transaction")
+    version = connection.execute("SELECT value FROM myelin_meta WHERE key='schema_version'").fetchone()
+    if version is None or str(version[0]) != "8":
+        raise RuntimeError("Correction-2 installation requires schema version 8")
+    _verify_recorder_schema(connection)
+    _verify_founding_source_schema(connection, required=True)
+    _verify_no_interfering_triggers(connection)
+    connection.execute(_STUDY_BOUNDARY_SQL)
+    _verify_study_boundary_schema(connection, required=True)
+
+
+_STUDY_INTERVAL_SQL = """CREATE TABLE IF NOT EXISTS study_resource_intervals (
+    interval_id TEXT NOT NULL PRIMARY KEY,
+    interval_extension_version INTEGER NOT NULL CHECK (interval_extension_version = 1),
+    session_id INTEGER NOT NULL REFERENCES sessions(id),
+    capture_id TEXT NOT NULL,
+    span_ordinal INTEGER NOT NULL CHECK (span_ordinal > 0),
+    study_context_token TEXT NOT NULL,
+    study_block_id TEXT,
+    study_generation INTEGER,
+    resource_key TEXT NOT NULL,
+    first_observation_id TEXT NOT NULL,
+    last_observation_id TEXT NOT NULL,
+    first_observation_ordinal INTEGER NOT NULL CHECK (first_observation_ordinal >= 0),
+    last_observation_ordinal INTEGER NOT NULL,
+    first_observed_monotonic_ns INTEGER NOT NULL CHECK (first_observed_monotonic_ns >= 0),
+    last_observed_monotonic_ns INTEGER NOT NULL,
+    observation_count INTEGER NOT NULL CHECK (observation_count > 0),
+    continuity_max_gap_ns INTEGER NOT NULL CHECK (continuity_max_gap_ns > 0),
+    supported_duration_ns INTEGER NOT NULL CHECK (supported_duration_ns >= 0),
+    continuity_status TEXT NOT NULL CHECK (continuity_status IN ('SUPPORTED_SPAN', 'SINGLE_OBSERVATION')),
+    close_reason TEXT NOT NULL,
+    CHECK (last_observation_ordinal - first_observation_ordinal = observation_count - 1),
+    CHECK (last_observed_monotonic_ns - first_observed_monotonic_ns = supported_duration_ns),
+    CHECK ((observation_count = 1 AND supported_duration_ns = 0 AND continuity_status = 'SINGLE_OBSERVATION'
+            AND first_observation_id = last_observation_id)
+        OR (observation_count > 1 AND supported_duration_ns > 0 AND continuity_status = 'SUPPORTED_SPAN'
+            AND first_observation_id != last_observation_id)),
+    CHECK ((study_block_id IS NULL AND study_generation IS NULL)
+        OR (study_block_id IS NOT NULL AND study_generation IS NOT NULL AND study_generation > 0)),
+    UNIQUE (capture_id, span_ordinal)
+);"""
+
+
+def _verify_study_interval_schema(connection, *, required=False):
+    rows = connection.execute("SELECT type,name,tbl_name,sql FROM sqlite_master "
+        "WHERE tbl_name='study_resource_intervals' AND name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
+    if not rows and not required:
+        return
+    expected = [("table", "study_resource_intervals", "study_resource_intervals",
+        _stored_correction_sql(_STUDY_INTERVAL_SQL))]
+    if [tuple(row) for row in rows] != expected:
+        raise RuntimeError("Study interval schema contract mismatch")
+    if connection.execute("PRAGMA foreign_key_check(study_resource_intervals)").fetchall():
+        raise RuntimeError("Study interval parent-session violation")
+
+
+def install_correction3_schema(connection):
+    """Explicit additive installation; never backfill inferred durations."""
+    if not connection.in_transaction:
+        raise RuntimeError("Correction-3 installation requires an active transaction")
+    version = connection.execute("SELECT value FROM myelin_meta WHERE key='schema_version'").fetchone()
+    if version is None or str(version[0]) != "8":
+        raise RuntimeError("Correction-3 installation requires schema version 8")
+    _verify_recorder_schema(connection)
+    _verify_founding_source_schema(connection, required=True)
+    _verify_study_boundary_schema(connection, required=True)
+    _verify_no_interfering_triggers(connection)
+    connection.execute(_STUDY_INTERVAL_SQL)
+    _verify_study_interval_schema(connection, required=True)
+
+
+_STUDY_OBSERVATION_EVIDENCE_SQL = """CREATE TABLE IF NOT EXISTS study_resource_observation_evidence (
+    evidence_id TEXT NOT NULL PRIMARY KEY,
+    extension_version INTEGER NOT NULL CHECK (extension_version = 1),
+    kind TEXT NOT NULL CHECK (kind IN ('OBSERVATION', 'CONFIRMATION')),
+    session_id INTEGER NOT NULL REFERENCES sessions(id),
+    interval_capture_id TEXT NOT NULL,
+    boundary_capture_id TEXT NOT NULL,
+    study_context_token TEXT NOT NULL,
+    study_block_id TEXT,
+    study_generation INTEGER,
+    resource_key TEXT NOT NULL,
+    identity_json TEXT NOT NULL CHECK (json_valid(identity_json)),
+    observation_id TEXT NOT NULL,
+    observation_sequence INTEGER NOT NULL CHECK (observation_sequence >= 0),
+    observed_monotonic_ns INTEGER NOT NULL CHECK (observed_monotonic_ns >= 0),
+    interval_id TEXT,
+    request_id TEXT NOT NULL,
+    confirmation_applied_monotonic_ns INTEGER,
+    authority_json TEXT NOT NULL CHECK (json_valid(authority_json)),
+    CHECK ((kind = 'OBSERVATION' AND request_id = ''
+            AND confirmation_applied_monotonic_ns IS NULL)
+        OR (kind = 'CONFIRMATION' AND interval_id IS NULL AND request_id != ''
+            AND confirmation_applied_monotonic_ns >= observed_monotonic_ns)),
+    CHECK ((study_block_id IS NULL AND study_generation IS NULL)
+        OR (study_block_id IS NOT NULL AND study_generation IS NOT NULL AND study_generation > 0))
+);"""
+
+
+def _verify_study_observation_evidence_schema(connection, *, required=False):
+    rows = connection.execute("SELECT type,name,tbl_name,sql FROM sqlite_master "
+        "WHERE tbl_name='study_resource_observation_evidence' AND name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
+    if not rows and not required:
+        return
+    expected = [("table", "study_resource_observation_evidence", "study_resource_observation_evidence",
+        _stored_correction_sql(_STUDY_OBSERVATION_EVIDENCE_SQL))]
+    if [tuple(row) for row in rows] != expected:
+        raise RuntimeError("Study observation evidence schema contract mismatch")
+    if connection.execute("PRAGMA foreign_key_check(study_resource_observation_evidence)").fetchall():
+        raise RuntimeError("Study observation evidence parent-session violation")
+
+
+def install_correction4_schema(connection):
+    """Explicit additive authority-evidence installation; no historical inference."""
+    if not connection.in_transaction:
+        raise RuntimeError("Correction-4 installation requires an active transaction")
+    version = connection.execute("SELECT value FROM myelin_meta WHERE key='schema_version'").fetchone()
+    if version is None or str(version[0]) != "8":
+        raise RuntimeError("Correction-4 installation requires schema version 8")
+    _verify_recorder_schema(connection)
+    _verify_founding_source_schema(connection, required=True)
+    _verify_study_boundary_schema(connection, required=True)
+    _verify_study_interval_schema(connection, required=True)
+    _verify_study_resources(connection)
+    _verify_no_interfering_triggers(connection)
+    connection.execute(_STUDY_OBSERVATION_EVIDENCE_SQL)
+    _verify_study_observation_evidence_schema(connection, required=True)
+
+
+def _stored_correction_sql(sql):
+    # SQLite removes IF NOT EXISTS and the final semicolon in sqlite_master.
+    # All remaining definition text must match; names alone grant no exception.
+    return sql.replace(" IF NOT EXISTS", "", 1).rstrip(";")
+
+
+def _verify_founding_source_schema(connection, *, required=False):
+    rows = connection.execute("SELECT type,name,tbl_name,sql FROM sqlite_master "
+        "WHERE (tbl_name='secant_founding_source' OR name='myelin_schema_no_downgrade') "
+        "AND name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
+    if not rows and not required:
+        return  # Pre-installation v8 remains readable; no implicit live migration.
+    expected = [
+        ("trigger", "myelin_schema_no_downgrade", "myelin_meta", _stored_correction_sql(_OWNERSHIP_GUARD_SQL)),
+        ("table", "secant_founding_source", "secant_founding_source", _stored_correction_sql(_FOUNDING_SOURCE_SQL)),
+    ]
+    if [tuple(row) for row in rows] != expected:
+        raise RuntimeError("Correction-1 ownership/source schema contract mismatch")
+    if connection.execute("PRAGMA foreign_key_check(secant_founding_source)").fetchall():
+        raise RuntimeError("Founding-source foreign-key violation")
+    if connection.execute("SELECT 1 FROM secant_founding_source AS s JOIN secant_events AS e "
+            "ON e.event_id=s.event_id WHERE e.event_name!='SECANT_EPISODE_FOUNDED' LIMIT 1").fetchone():
+        raise RuntimeError("Founding source attached to a non-founding event")
+
+
+def install_correction1_schema(connection):
+    """Explicit migration inside the caller's backed-up, exclusive maintenance flow.
+
+    Never commit here: guard and table must share the caller's transaction.
+    This is not called by normal startup on an existing v8 database.
+    """
+    if not connection.in_transaction:
+        raise RuntimeError("Correction-1 installation requires an active transaction")
+    version = connection.execute("SELECT value FROM myelin_meta WHERE key='schema_version'").fetchone()
+    if version is None or str(version[0]) != "8":
+        raise RuntimeError("Correction-1 installation requires schema version 8")
+    _verify_recorder_schema(connection)
+    _verify_no_interfering_triggers(connection)
+    connection.execute(_OWNERSHIP_GUARD_SQL)
+    connection.execute(_FOUNDING_SOURCE_SQL)
+    _verify_founding_source_schema(connection, required=True)
+    _verify_no_interfering_triggers(connection)
+
+
 def _verify_no_interfering_triggers(connection: sqlite3.Connection) -> None:
+    from PERSISTENCE.presentation_aliases import TRIGGERS
+    allowed = {("myelin_schema_no_downgrade", "myelin_meta",
+                _stored_correction_sql(_OWNERSHIP_GUARD_SQL))}
+    allowed.update((name, "presentation_aliases", sql) for name, sql in TRIGGERS.items())
     rows = connection.execute(
         "SELECT name, tbl_name, sql FROM sqlite_master WHERE type='trigger'"
     ).fetchall()
     offenders = [
         str(row[0])
         for row in rows
-        if str(row[1]) in MANAGED_TABLES
+        if tuple(row) not in allowed
     ]
     if offenders:
         raise RuntimeError(
@@ -663,17 +911,102 @@ def _verify_no_interfering_triggers(connection: sqlite3.Connection) -> None:
         )
 
 
-def _verify_required_tables(connection: sqlite3.Connection) -> None:
+def _verify_required_tables(connection: sqlite3.Connection, *, require_aliases=True) -> None:
     rows = connection.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     ).fetchall()
     present = {str(row[0]) for row in rows}
-    missing = sorted(MANAGED_TABLES - present)
+    required = MANAGED_TABLES if require_aliases else MANAGED_TABLES - {"presentation_aliases"}
+    missing = sorted(required - present)
     if missing:
         raise RuntimeError("MYELIN schema is missing table(s): " + ", ".join(missing))
     check = connection.execute("PRAGMA quick_check").fetchone()
     if check is None or str(check[0]).casefold() != "ok":
         raise RuntimeError("SQLite quick_check did not return OK")
+
+
+_STUDY_RESOURCE_SQL = "CREATE TABLE IF NOT EXISTS study_resources (\n    resource_fact_id TEXT NOT NULL PRIMARY KEY,\n    session_id INTEGER NOT NULL REFERENCES sessions(id),\n    study_block_id TEXT NOT NULL,\n    study_generation INTEGER NOT NULL CHECK (typeof(study_generation) = 'integer' AND study_generation > 0),\n    study_context_token TEXT NOT NULL,\n    resource_key TEXT NOT NULL,\n    identity_kind TEXT NOT NULL CHECK (identity_kind IN ('BROWSER', 'DESKTOP')),\n    identity_version INTEGER NOT NULL CHECK (identity_version = 1),\n    identity_json TEXT NOT NULL CHECK (json_valid(identity_json)),\n    role TEXT NOT NULL CHECK (role IN ('PRIMARY', 'LATER')),\n    first_aligned_monotonic_ns INTEGER NOT NULL CHECK (typeof(first_aligned_monotonic_ns) = 'integer' AND first_aligned_monotonic_ns >= 0),\n    qualified_monotonic_ns INTEGER NOT NULL CHECK (typeof(qualified_monotonic_ns) = 'integer' AND qualified_monotonic_ns >= first_aligned_monotonic_ns),\n    first_aligned_at_utc TEXT NOT NULL,\n    qualified_at_utc TEXT NOT NULL,\n    provenance_json TEXT NOT NULL CHECK (json_valid(provenance_json)),\n    contract_version INTEGER NOT NULL CHECK (contract_version = 1),\n    inserted_at_utc TEXT NOT NULL,\n    UNIQUE (session_id, study_block_id, study_generation, identity_kind, identity_version, resource_key)\n);\nCREATE UNIQUE INDEX IF NOT EXISTS study_resources_one_primary\n    ON study_resources(session_id, study_block_id, study_generation) WHERE role = 'PRIMARY';\n"
+
+
+def _verify_study_resources(connection):
+    import re
+    actual = connection.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='study_resources'").fetchone()
+    expected = _STUDY_RESOURCE_SQL.split("CREATE UNIQUE INDEX")[0].strip().rstrip(";")
+    normalize = lambda value: re.sub(r"\s+", "", value.lower().replace("if not exists", ""))
+    if actual is None or normalize(actual[0]) != normalize(expected):
+        raise RuntimeError("study_resources immutable schema contract mismatch")
+    foreign = connection.execute("PRAGMA foreign_key_list(study_resources)").fetchall()
+    if not any(row[2] == "sessions" and row[3] == "session_id" and row[4] == "id" for row in foreign):
+        raise RuntimeError("study_resources parent FK missing")
+    index = connection.execute("SELECT sql FROM sqlite_master WHERE type='index' AND name='study_resources_one_primary'").fetchone()
+    expected_index = "CREATE UNIQUE INDEX" + _STUDY_RESOURCE_SQL.split("CREATE UNIQUE INDEX",1)[1]
+    if index is None or normalize(index[0].rstrip(";")) != normalize(expected_index.strip().rstrip(";")):
+        raise RuntimeError("study_resources PRIMARY uniqueness contract mismatch")
+    if connection.execute("PRAGMA foreign_key_check(study_resources)").fetchall():
+        raise RuntimeError("study_resources FK verification failed")
+
+
+
+
+# Reviewed passive-observation contract. No native event backfill.
+_RECORDER_SQL = "CREATE TABLE secant_events (\n    event_id TEXT NOT NULL PRIMARY KEY CHECK (length(event_id) = 64),\n    contract_version INTEGER NOT NULL CHECK (contract_version = 1),\n    session_id INTEGER NOT NULL REFERENCES sessions(id),\n    study_context_id TEXT NOT NULL CHECK (length(study_context_id) > 0),\n    study_target_resource_id TEXT NOT NULL,\n    episode_id TEXT NOT NULL CHECK (length(episode_id) > 0),\n    fact_digest TEXT NOT NULL CHECK (length(fact_digest) = 64),\n    occurrence_ordinal INTEGER NOT NULL CHECK (\n        typeof(occurrence_ordinal) = 'integer' AND occurrence_ordinal > 0),\n    event_name TEXT NOT NULL CHECK (event_name IN (\n        'SECANT_EPISODE_FOUNDED', 'SECANT_DISPLAYED',\n        'SECANT_ACTION_INTENT', 'SECANT_FROZEN', 'SECANT_RESUMED',\n        'SECANT_RETURN_STARTED', 'SECANT_RETURN_VERIFIED',\n        'SECANT_RECOVERY_CLOSED', 'SECANT_RECOVERY_INTERRUPTED',\n        'SECANT_EPISODE_CLOSED')),\n    stage INTEGER NOT NULL CHECK (typeof(stage) = 'integer' AND stage BETWEEN 0 AND 3),\n    occurred_monotonic_ns INTEGER NOT NULL CHECK (\n        typeof(occurred_monotonic_ns) = 'integer' AND occurred_monotonic_ns >= 0),\n    request_id TEXT NOT NULL,\n    attempt_id TEXT NOT NULL,\n    evidence_id TEXT NOT NULL,\n    reason TEXT NOT NULL,\n    canonical_fact_json TEXT NOT NULL CHECK (json_valid(canonical_fact_json)),\n    recorder_run_id TEXT NOT NULL CHECK (length(recorder_run_id) > 0),\n    recorder_received_monotonic_ns INTEGER NOT NULL CHECK (\n        typeof(recorder_received_monotonic_ns) = 'integer'\n        AND recorder_received_monotonic_ns >= 0),\n    recorder_received_at_utc TEXT NOT NULL,\n    recording_quality TEXT NOT NULL CHECK (recording_quality IN (\n        'BOUNDED_OBSERVATION', 'RECORDING_GAP_DETECTED')),\n    recorded_at_utc TEXT NOT NULL,\n    UNIQUE (session_id, study_context_id, episode_id,\n            fact_digest, occurrence_ordinal),\n    CHECK (event_name != 'SECANT_DISPLAYED' OR stage BETWEEN 1 AND 3),\n    CHECK (event_name != 'SECANT_ACTION_INTENT' OR reason = 'RETURN TO STUDY'),\n    CHECK (event_name NOT IN ('SECANT_FROZEN', 'SECANT_RESUMED')\n           OR reason = 'uncertainty')\n);\nCREATE INDEX ix_secant_events_session_episode_time\n    ON secant_events(session_id, study_context_id, episode_id,\n                     occurred_monotonic_ns, event_id);\nCREATE TABLE study_resource_events (\n    event_id TEXT NOT NULL PRIMARY KEY CHECK (length(event_id) = 64),\n    contract_version INTEGER NOT NULL CHECK (contract_version = 1),\n    session_id INTEGER NOT NULL REFERENCES sessions(id),\n    recorder_run_id TEXT NOT NULL CHECK (length(recorder_run_id) > 0),\n    observation_ordinal INTEGER NOT NULL CHECK (\n        typeof(observation_ordinal) = 'integer' AND observation_ordinal > 0),\n    event_kind TEXT NOT NULL CHECK (event_kind IN (\n        'RESOURCE_STATE_FIRST_OBSERVED', 'RESOURCE_STATE_CHANGE_OBSERVED')),\n    study_context_token TEXT NOT NULL CHECK (length(study_context_token) > 0),\n    study_block_id TEXT,\n    study_generation INTEGER,\n    resource_key TEXT NOT NULL CHECK (length(resource_key) > 0),\n    display_title TEXT NOT NULL,\n    process_name TEXT NOT NULL,\n    resource_surface TEXT NOT NULL,\n    study_app_category TEXT NOT NULL,\n    classification TEXT NOT NULL,\n    measured_classification TEXT NOT NULL,\n    effective_operational_state TEXT NOT NULL,\n    confidence REAL NOT NULL CHECK (\n        typeof(confidence) IN ('integer', 'real') AND confidence BETWEEN 0 AND 1),\n    measured_confidence REAL NOT NULL CHECK (\n        typeof(measured_confidence) IN ('integer', 'real')\n        AND measured_confidence BETWEEN 0 AND 1),\n    user_confirmation TEXT NOT NULL,\n    state_digest TEXT NOT NULL CHECK (length(state_digest) = 64),\n    canonical_state_json TEXT NOT NULL CHECK (json_valid(canonical_state_json)),\n    source_lane TEXT NOT NULL CHECK (source_lane IN (\n        'CONTROL_VIEW', 'RESOURCE_INTENT_LIVE_VIEW')),\n    timestamp_basis TEXT NOT NULL CHECK (timestamp_basis IN (\n        'COHERENT_FOREGROUND_OBSERVATION', 'RECORDER_RECEIPT')),\n    source_observation_sequence INTEGER,\n    source_observed_monotonic_ns INTEGER,\n    source_observed_at_utc TEXT,\n    recorder_received_monotonic_ns INTEGER NOT NULL CHECK (\n        typeof(recorder_received_monotonic_ns) = 'integer'\n        AND recorder_received_monotonic_ns >= 0),\n    recorder_received_at_utc TEXT NOT NULL,\n    provenance_json TEXT NOT NULL CHECK (json_valid(provenance_json)),\n    recording_quality TEXT NOT NULL CHECK (recording_quality IN (\n        'BOUNDED_OBSERVATION', 'RECORDING_GAP_DETECTED')),\n    recorded_at_utc TEXT NOT NULL,\n    UNIQUE (recorder_run_id, session_id, observation_ordinal),\n    CHECK ((study_block_id IS NULL AND study_generation IS NULL) OR\n           (study_block_id IS NOT NULL AND length(study_block_id) > 0\n            AND study_generation IS NOT NULL\n            AND typeof(study_generation) = 'integer' AND study_generation > 0)),\n    CHECK (\n        (timestamp_basis = 'RECORDER_RECEIPT'\n         AND source_observation_sequence IS NULL\n         AND source_observed_monotonic_ns IS NULL\n         AND source_observed_at_utc IS NULL)\n        OR\n        (timestamp_basis = 'COHERENT_FOREGROUND_OBSERVATION'\n         AND source_lane = 'CONTROL_VIEW'\n         AND source_observation_sequence IS NOT NULL\n         AND typeof(source_observation_sequence) = 'integer'\n         AND source_observation_sequence > 0\n         AND source_observed_monotonic_ns IS NOT NULL\n         AND typeof(source_observed_monotonic_ns) = 'integer'\n         AND source_observed_monotonic_ns >= 0\n         AND source_observed_at_utc IS NOT NULL\n         AND length(source_observed_at_utc) > 0)\n    )\n);\nCREATE INDEX ix_study_resource_events_scope_order\n    ON study_resource_events(session_id, study_context_token,\n                             recorder_run_id, observation_ordinal);\nCREATE INDEX ix_study_resource_events_resource\n    ON study_resource_events(session_id, study_context_token, resource_key);"
+_RECORDER_TABLES = frozenset({"secant_events", "study_resource_events"})
+
+
+def _execute_recorder_schema(connection):
+    # execute, not executescript: preserve the caller's migration transaction.
+    for statement in _RECORDER_SQL.split(";"):
+        if statement.strip():
+            connection.execute(statement)
+
+
+def _verify_recorder_schema(connection):
+    # Compare exact installed SQL (including CHECK/UNIQUE/FK contracts) with
+    # SQLite's own normalized representation of the reviewed DDL.
+    expected = sqlite3.connect(":memory:")
+    try:
+        expected.executescript(_RECORDER_SQL)
+        wanted = expected.execute("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
+        actual = connection.execute("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name IN ('secant_events','study_resource_events') AND name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
+        if [tuple(row) for row in actual] != [tuple(row) for row in wanted]:
+            raise RuntimeError("Passive recorder v8 schema contract mismatch")
+        for table in _RECORDER_TABLES:
+            for pragma in ("table_info", "foreign_key_list", "index_list"):
+                a = [tuple(row) for row in connection.execute(f"PRAGMA {pragma}({table})")]
+                b = [tuple(row) for row in expected.execute(f"PRAGMA {pragma}({table})")]
+                if a != b:
+                    raise RuntimeError("Passive recorder structural contract mismatch: " + table)
+            if connection.execute(f"PRAGMA foreign_key_check({table})").fetchall():
+                raise RuntimeError("Passive recorder foreign-key violation")
+    finally:
+        expected.close()
+
+
+def install_presentation_alias_schema(connection: sqlite3.Connection) -> None:
+    """Approved additive v8→v9 migration in the caller's writer transaction.
+
+    Only a complete Phase-1 v8 database is eligible. Existing fact tables and
+    their rows remain untouched. Seed once, then advance the ownership version.
+    """
+    from PERSISTENCE.presentation_aliases import (
+        install_table, seed_foundings, corpus_foundings, verify_schema, verify_coverage)
+    if not connection.in_transaction:
+        raise RuntimeError("Alias migration requires an active writer transaction")
+    row = connection.execute("SELECT value FROM myelin_meta WHERE key='schema_version'").fetchone()
+    if row is None or str(row[0]) != "8":
+        raise RuntimeError("Alias migration requires schema version 8")
+    _verify_recorder_schema(connection)
+    _verify_founding_source_schema(connection, required=True)
+    _verify_study_boundary_schema(connection, required=True)
+    _verify_study_interval_schema(connection, required=True)
+    _verify_study_observation_evidence_schema(connection, required=True)
+    _verify_no_interfering_triggers(connection)
+    install_table(connection)
+    seed_foundings(connection, corpus_foundings(connection))
+    verify_schema(connection)
+    verify_coverage(connection)
+    connection.execute("UPDATE myelin_meta SET value='9' WHERE key='schema_version'")
+    _verify_no_interfering_triggers(connection)
 
 
 def ensure_production_schema() -> None:
@@ -685,8 +1018,44 @@ def ensure_production_schema() -> None:
         # advance in one transaction.  A malformed pre-existing table or an
         # interfering trigger must fail visibly without falsely marking the
         # database as upgraded.
-        connection.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA_SQL)
-        _verify_required_tables(connection)
+        has_meta = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='myelin_meta'").fetchone()
+        row = connection.execute("SELECT value FROM myelin_meta WHERE key='schema_version'").fetchone() if has_meta else None
+        version = int(row[0]) if row else 0
+        if version > SCHEMA_VERSION:
+            raise RuntimeError("Refusing to downgrade a newer schema")
+        if version >= 6:
+            connection.execute("BEGIN IMMEDIATE")
+            if version == 6:
+                for statement in _STUDY_RESOURCE_SQL.split(";"):
+                    if statement.strip():
+                        connection.execute(statement)
+            _verify_study_resources(connection)
+            if version < 8:
+                # Existing names fail instead of masking an unfinished migration.
+                _execute_recorder_schema(connection)
+            _verify_recorder_schema(connection)
+            _verify_required_tables(connection, require_aliases=version >= 9)
+            _verify_no_interfering_triggers(connection)
+            _verify_founding_source_schema(connection)
+            _verify_study_boundary_schema(connection)
+            _verify_study_interval_schema(connection)
+            _verify_study_observation_evidence_schema(connection)
+            if connection.execute("PRAGMA foreign_key_check").fetchall():
+                raise RuntimeError("Foreign-key check failed during v8 migration")
+            if version < 8:
+                connection.execute("UPDATE myelin_meta SET value='8' WHERE key='schema_version'")
+            if version < 9:
+                install_presentation_alias_schema(connection)
+            from PERSISTENCE.presentation_aliases import verify_schema, verify_coverage
+            verify_schema(connection)
+            verify_coverage(connection)
+            connection.commit()
+            return
+        connection.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA_SQL + _STUDY_RESOURCE_SQL)
+        _execute_recorder_schema(connection)
+        _verify_recorder_schema(connection)
+        _verify_study_resources(connection)
+        _verify_required_tables(connection, require_aliases=False)
         _migrate_cosine_parent_session(connection)
         _verify_cosine_events(connection)
         _verify_mine_events(connection)
@@ -698,8 +1067,13 @@ def ensure_production_schema() -> None:
         connection.execute(
             "INSERT INTO myelin_meta(key, value) VALUES('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (str(SCHEMA_VERSION),),
+            ("8",),
         )
+        install_correction1_schema(connection)
+        install_correction2_schema(connection)
+        install_correction3_schema(connection)
+        install_correction4_schema(connection)
+        install_presentation_alias_schema(connection)
         connection.commit()
     except Exception:
         if connection.in_transaction:

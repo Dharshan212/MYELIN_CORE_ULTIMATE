@@ -70,6 +70,7 @@ _WHOLE_ROSTER: Final = (
     ("MINE", "Completed episodes"),
     ("COSINE", "Completed episodes"),
     ("MIRL", "Verified recoveries"),
+    ("SECANT", "Completed episodes"),
     ("COSECANT", "Completed returns"),
     ("STUDY", "Completed study blocks"),
     ("NORMAL_BREAK", "Completed break events"),
@@ -532,6 +533,8 @@ class Chapter3ResultPackage:
     #: One shared table so a SINE stage row and a MIRL recovery sample that
     #: reference the same raw episode always resolve to the same code.
     sine_episode_display_ids: tuple[tuple[str, str], ...] = ()
+    secant_episode_rows: tuple[object, ...] = ()
+    secant_experiment_scope: OrganExperimentScope | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -687,12 +690,34 @@ def _analyze(
     cosecant_break_rows = _build_cosecant_break_rows(snapshot, coverage, start_ns, end_ns)
     mine_experiment_scope = _mine_experiment_scope(snapshot, coverage, start_ns, end_ns)
     cosine_experiment_scope = _cosine_experiment_scope(snapshot, coverage, start_ns, end_ns)
+    from .secant_adapter import classify, validate_package_rows
+    secant_rows, secant_scope = classify(snapshot.secant, start_ns, end_ns)
+    validate_package_rows(secant_rows, secant_scope, sid, start_ns, end_ns)
+    secant_timeline = []
+    for episode in secant_rows:
+        for event in episode.events:
+            stage = {"SECANT_EPISODE_FOUNDED": "TRIGGER", "SECANT_DISPLAYED": "TRIGGER",
+                     "SECANT_ACTION_INTENT": "RETURN", "SECANT_RETURN_STARTED": "RETURN",
+                     "SECANT_RETURN_VERIFIED": "VERIFIED_RETURN", "SECANT_RECOVERY_CLOSED": "EPISODE_CLOSURE",
+                     "SECANT_EPISODE_CLOSED": "EPISODE_CLOSURE"}.get(event.name, "RETURN")
+            ref = EvidenceRef("SECANT", event.event_id, event.at_ns, event.name,
+                              "Fully contained SECANT episode; " + episode.recorder_run_id)
+            label = f"{episode.display_alias}: {event.name.removeprefix('SECANT_').replace('_', ' ')}"
+            if event.name == "SECANT_DISPLAYED":
+                label += f" SECANT-{event.stage}"
+            if event.reason:
+                label += " — " + event.reason
+            secant_timeline.append(Chapter3TimelineEvent("SECANT", stage, event.at_ns,
+                label, event.event_id, MAIN, (ref,)))
+    # Stable ties preserve native SECANT founding/display/recovery event order.
+    timeline = tuple(sorted((*timeline, *secant_timeline), key=lambda e: e.occurred_monotonic_ns))
     sine_episode_display_ids = _resolve_sine_mirl_display_codes(
         snapshot, coverage, sine_stage_rows, return_extrema
     )
     limitations = _dedupe(
         (
             *base_limitations,
+            "SECANT experiment scope: " + secant_scope.reason,
             "The selected experiment may cover only part of its parent MYELIN session.",
             *(
                 f"{metric.label}: {metric.reason}"
@@ -737,6 +762,7 @@ def _analyze(
         mine_experiment_scope,
         cosine_experiment_scope,
     )
+    provenance = _dedupe_refs((*provenance, *secant_scope.provenance))
     package = Chapter3ResultPackage(
         experiment_id=selected.experiment_id,
         parent_session_id=sid,
@@ -745,12 +771,14 @@ def _analyze(
         experiment_start_monotonic_ns=start_ns,
         experiment_end_monotonic_ns=end_ns,
         session_finalized_at_utc=finalized.finalized_at_utc,
-        source_coverage=snapshot.source_coverage,
+        source_coverage=tuple(coverage.values()),
         timeline=timeline,
         key_metrics=metrics,
         whole_myelin_summary=whole,
         derived_findings=findings,
         certified_patterns=patterns,
+        secant_episode_rows=secant_rows,
+        secant_experiment_scope=secant_scope,
         sine_stage_rows=sine_stage_rows,
         mine_episode_rows=mine_episode_rows,
         cosine_episode_rows=cosine_episode_rows,
@@ -809,7 +837,9 @@ def _coverage_by_source(
         if row.status == NO_EVIDENCE and row.item_count != 0:
             raise AnalysisIntegrityError("NO_EVIDENCE source must have zero rows")
         result[row.source_system] = row
-    if set(result) != _REQUIRED_COVERAGE:
+    if "SECANT" not in result:
+        result["SECANT"] = SourceCoverage("SECANT", UNAVAILABLE, "SECANT absent from legacy snapshot", None)
+    if set(result) != _REQUIRED_COVERAGE | {"SECANT"}:
         raise AnalysisIntegrityError("final snapshot source coverage roster is incomplete")
     resource = result["RESOURCE_INTENT"]
     if (
@@ -861,6 +891,15 @@ def _validate_snapshot_evidence(
             raise AnalysisIntegrityError(f"{source} evidence population is mutable")
         if len(population) != row.item_count:
             raise AnalysisIntegrityError(f"{source} evidence count disagrees with coverage")
+    secant = snapshot.secant
+    cov = coverage["SECANT"]
+    if secant is not None:
+        if secant.session_id != snapshot.parent_session_id or secant.status != cov.status:
+            raise AnalysisIntegrityError("SECANT coverage/session mismatch")
+        if cov.status != UNAVAILABLE and cov.item_count != len(secant.episodes):
+            raise AnalysisIntegrityError("SECANT coverage count mismatch")
+    elif cov.status != UNAVAILABLE:
+        raise AnalysisIntegrityError("SECANT readable coverage lacks evidence")
     if snapshot.resource_intent is not None:
         raise AnalysisIntegrityError("Resource Intent evidence must remain unavailable")
 
@@ -1491,6 +1530,9 @@ def _build_whole_myelin(
         "MIRL": lambda: _whole_mirl(snapshot),
         "MINE": lambda: _whole_mine(snapshot),
         "COSINE": lambda: _whole_cosine(snapshot),
+        "SECANT": lambda: (len(snapshot.secant.episodes), tuple(
+            EvidenceRef("SECANT", e.events[-1].event_id, e.closing_ns, "SECANT_EPISODE_CLOSED")
+            for e in snapshot.secant.episodes)),
     }
     rows: list[WholeMyelinRow] = []
     for source, label in _WHOLE_ROSTER:

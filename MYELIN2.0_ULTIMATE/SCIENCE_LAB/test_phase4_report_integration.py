@@ -210,7 +210,9 @@ def page_count(pdf_path: Path) -> int:
 
 class Phase4ReportModelTests(unittest.TestCase):
     def test_organ_combination_page_counts(self):
-        cases = ((1, 1, 1, 1, 15), (1, 1, 1, 0, 15), (1, 1, 0, 0, 14), (1, 0, 0, 0, 13), (0, 0, 0, 0, 12))
+        # Study anatomy adds one page; legacy packages also disclose SECANT
+        # as unavailable, including when all four older organs have results.
+        cases = ((1, 1, 1, 1, 17), (1, 1, 1, 0, 16), (1, 1, 0, 0, 15), (1, 0, 0, 0, 14), (0, 0, 0, 0, 13))
         for sine, mine, cosine, cosecant, expected in cases:
             model = adapt_certified_report_input(make_package(sine=sine, mine=mine, cosine=cosine, cosecant=cosecant))
             self.assertEqual(len(plan_report_pages(model).pages), expected)
@@ -387,7 +389,7 @@ class Phase4PdfTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 output = Path(directory) / "integration.pdf"
                 report.generate_report_pdf(make_package(sine=1, mine=1), output)
-                self.assertEqual(page_count(output), 14)
+                self.assertEqual(page_count(output), 15)
         finally:
             report._build_dev_fixtures = original
 
@@ -399,7 +401,7 @@ class Phase4PdfTests(unittest.TestCase):
             text = "\n".join(page.extract_text() or "" for page in PdfReader(str(output)).pages)
             for forbidden in ("CERTIFIED VALUE", "EPISODE ID", "[X]", "[Y]", "development preview fixture"):
                 self.assertNotIn(forbidden, text)
-            self.assertEqual(page_count(output), 15)
+            self.assertEqual(page_count(output), 17)
 
     def test_failed_generation_preserves_prior_pdf(self):
         with tempfile.TemporaryDirectory() as directory:

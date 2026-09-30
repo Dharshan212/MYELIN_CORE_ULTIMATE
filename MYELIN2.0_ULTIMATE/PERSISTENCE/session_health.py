@@ -9,8 +9,8 @@ It never decides what "today" means. The caller
 converts it to a ``[window_start_utc, window_end_utc)`` UTC pair before
 calling in here -- this file only counts durable facts inside that window.
 
-Sessions and triggers are counted with a direct windowed ``COUNT(*)`` against
-the frozen schema. Returns are read through ``PERSISTENCE.storage`` unchanged
+Sessions use a windowed count. Triggers require an exact durable SINE
+acceptance and use its factual wall time. Returns use PERSISTENCE.storage
 (``read_mirl_events``), which already parses and validates every MIRL
 payload, so a malformed record raises instead of being silently miscounted.
 
@@ -26,7 +26,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from PERSISTENCE.database import connect_database
-from PERSISTENCE.storage import bootstrap_production_schema, read_mirl_events
+from PERSISTENCE.storage import (
+    bootstrap_production_schema, read_mirl_events, _operational_trigger_rows,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,12 +76,11 @@ def _session_count(connection, window_start_utc: str, window_end_utc: str) -> in
 
 
 def _trigger_count(connection, window_start_utc: str, window_end_utc: str) -> int:
-    row = connection.execute(
-        "SELECT COUNT(*) FROM triggers "
-        "WHERE created_at_utc >= ? AND created_at_utc < ?",
-        (window_start_utc, window_end_utc),
-    ).fetchone()
-    return int(row[0])
+    start, end = _parse_utc(window_start_utc), _parse_utc(window_end_utc)
+    return sum(
+        start <= _parse_utc(row["accepted_at_utc"]) < end
+        for row in _operational_trigger_rows(connection)
+    )
 
 
 def _returned_episode_count(window_start_utc: str, window_end_utc: str) -> int:

@@ -47,6 +47,8 @@ from UI_THEMES.theme import make_font
 
 from .chapters import (
     CHAPTER_TWO_ORGANS,
+    SECANT_TIMING_FACTS,
+    SECANT_BOUNDARY_NOTE,
     COSECANT_BRANCH_FACTS,
     COSECANT_POPUP_FACTS,
     COSECANT_TIMING_FACTS,
@@ -3826,6 +3828,77 @@ class CosecantSchematic(QWidget):
         self._popup.stop()
 
 
+class SecantSchematic(QFrame):
+    """Deterministic presentation only; never constructs a SECANT authority."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("chapter2SchematicCard")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(12)
+        heading = QLabel("SECANT · Study off-task and recovery regulation")
+        heading.setFont(make_font(17, 700))
+        heading.setWordWrap(True)
+        root.addWidget(heading)
+        note = QLabel(SECANT_BOUNDARY_NOTE)
+        note.setWordWrap(True)
+        note.setFont(make_font(11, 400))
+        root.addWidget(note)
+        root.addWidget(_info_strip((("DEMONSTRATION ONLY", "No runtime, session or database is controlled here."),)))
+        self._nodes = []
+        row = QHBoxLayout()
+        for title, caption, symbol in (
+            ("STUDY EVIDENCE", "Confirmed off-task · 5:00 supported dwell", _EvidenceSymbol()),
+            ("SECANT-1", "Factual display → episode founded", _StudySymbol()),
+            ("SECANT-2", "+10:00 continued qualifying off-task", _TimerSymbol()),
+            ("SECANT-3", "+13:15 continued escalation eligibility", _StudySymbol()),
+        ):
+            node = _Node(symbol, title, caption, accent="#3DDCFF")
+            row.addWidget(node, 1)
+            self._nodes.append(node)
+        root.addLayout(row)
+        branch = QLabel("Return can begin from any applicable stage. Display-anchored timers respect runtime holds; "
+                        "expiry alone does not found an episode, and a button press does not prove recovery.")
+        branch.setWordWrap(True)
+        root.addWidget(branch)
+        recovery = QHBoxLayout()
+        for title, caption, symbol in (
+            ("RETURN", "Intent / observed Study return process", _ExactResourceSymbol()),
+            ("VERIFIED", "10 seconds supported verification", _CheckSymbol()),
+            ("RECOVERY CLOSED", "60 seconds supported confirmation", _CheckSymbol()),
+        ):
+            symbol.setAccessibleName("SECANT " + title.lower())
+            node = _Node(symbol, title, caption, accent="#48D9A4")
+            recovery.addWidget(node, 1)
+            self._nodes.append(node)
+        root.addLayout(recovery)
+        self._status = QLabel("Select a demonstration pathway below.")
+        self._status.setWordWrap(True)
+        root.addWidget(self._status)
+        buttons = QHBoxLayout()
+        for title, action in (("Escalation", "escalation"), ("Verified recovery", "recovery"),
+                              ("Interrupted evidence", "interrupted"), ("Approved break", "break")):
+            button = QPushButton(title)
+            button.clicked.connect(lambda checked=False, value=action: self._show_path(value))
+            buttons.addWidget(button)
+        root.addLayout(buttons)
+        root.addWidget(_info_strip((("COSECANT BRANCH", "Selected allowance → BREAK COMPLETE → +5 min reminder → +1 min final lock → exact Study-resource confirmation. Independent runtime authority."),)))
+        self._show_path("escalation")
+
+    def _show_path(self, path):
+        active = {"escalation": (0, 1, 2, 3), "recovery": (1, 4, 5, 6),
+                  "interrupted": (1, 4), "break": ()}[path]
+        for i, node in enumerate(self._nodes):
+            node.set_active(i in active)
+        self._status.setText({
+            "escalation": "Demonstration: SECANT-1 → SECANT-2 → SECANT-3, all within the same episode. Not every episode reaches stage 3.",
+            "recovery": "Demonstration: return from SECANT-1 → verification → confirmation → recovery closed. MIRL is not this pathway.",
+            "interrupted": "Demonstration: recovery interrupted by evidence_gap or return_away; the same episode continues under runtime law. A behavioural evidence gap is not recorder loss.",
+            "break": "Demonstration: approved break is governed by COSECANT. Ordinary SECANT escalation does not own the permitted break interval.",
+        }[path])
+
+
 class _OrganStack(QStackedWidget):
     """Sizes to the CURRENT organ pane only -- the same technique as
     lab.py's ``_ChapterStack``, duplicated locally so this module never
@@ -3855,7 +3928,7 @@ class ChapterTwoOrganViewer(QWidget):
     """Chapter 2's own organ selector + living schematic host.
 
     This is Chapter 2's LEVEL 2 navigation (SINE / MINE / COSINE /
-    COSECANT) -- entirely separate from the LAB CHAPTERS drawer (LEVEL 1),
+    SECANT / COSECANT) -- entirely separate from the LAB CHAPTERS drawer (LEVEL 1),
     which this widget never touches.  Presentation-only: selecting an
     organ never reads the current MYELIN session, never touches Science
     Lab evidence, and never starts/commands any engine.
@@ -3884,6 +3957,8 @@ class ChapterTwoOrganViewer(QWidget):
         self._register_organ("mine", self._mine_schematic)
         self._cosine_schematic = CosineSchematic()
         self._register_organ("cosine", self._cosine_schematic)
+        self._secant_schematic = SecantSchematic()
+        self._register_organ("secant", self._secant_schematic)
         self._cosecant_schematic = CosecantSchematic()
         self._register_organ("cosecant", self._cosecant_schematic)
 

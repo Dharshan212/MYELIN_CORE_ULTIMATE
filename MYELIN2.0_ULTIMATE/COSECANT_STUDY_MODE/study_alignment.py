@@ -47,7 +47,7 @@ from enum import Enum
 from typing import Final
 
 
-ALIGNMENT_SCHEMA_VERSION: Final = "myelin-study-evidence-v4"
+ALIGNMENT_SCHEMA_VERSION: Final = "myelin-study-evidence-v5"
 NORMAL_KEYWORD_POINTS: Final = 1
 IMPORTANT_KEYWORD_POINTS: Final = 2
 
@@ -186,7 +186,7 @@ class BackgroundMismatchEvidence:
 class StudyEvidence:
     """Immutable mathematical evidence about one title/target pair.
 
-    Deliberately absent: verdict, basis, study_active, approval_request,
+    Deliberately absent: verdict, study_active, approval_request,
     exact_resource_approved, block_id, generation, resource_id, platform.
     Those are lifecycle or identity facts owned by other organs.
     """
@@ -216,6 +216,8 @@ class StudyEvidence:
     confidence_percent: float
     safety_caps: tuple[str, ...]
     reasons: tuple[str, ...]
+    exact_task_match: bool = False
+    alignment_basis: str = "WEIGHTED_KEYWORDS"
     schema_version: str = ALIGNMENT_SCHEMA_VERSION
 
     @property
@@ -309,9 +311,12 @@ class StudyEvidenceCalculator:
         important_keywords: Iterable[str] = (),
         title: str,
         identity_certified: bool,
+        allow_exact_task_match: bool = False,
     ) -> StudyEvidence:
         if type(identity_certified) is not bool:
             raise TypeError("identity_certified must be a bool")
+        if type(allow_exact_task_match) is not bool:
+            raise TypeError("allow_exact_task_match must be a bool")
 
         raw_score = self._title_scorer.score(
             keywords=keywords,
@@ -371,7 +376,10 @@ class StudyEvidenceCalculator:
             ),
         )
 
-        confidence = max(0.0, effective_title_percent - mismatch_penalty)
+        # Resource Intent supplies eligibility; title text never certifies a platform.
+        exact_task_match = matches_exact_task_title(task, title)
+        exact_qualified = bool(allow_exact_task_match and identity_certified and exact_task_match)
+        confidence = max(0.0, (100.0 if exact_qualified else effective_title_percent) - mismatch_penalty)
         matched_keyword_count = sum(1 for item in eligible_evidence if item.matched)
         eligible_keyword_count = len(eligible_evidence)
 
@@ -407,7 +415,9 @@ class StudyEvidenceCalculator:
                 "Uncertified resource identity cannot receive automatic Study protection"
             )
 
-        if eligible_keyword_count == 0:
+        if exact_qualified:
+            reasons.append("The complete declared task title matches the certified learning resource")
+        elif eligible_keyword_count == 0:
             confidence = 0.0
             reasons.append("No eligible Study keywords remained for scoring")
         elif eligible_keyword_count == 1:
@@ -431,7 +441,7 @@ class StudyEvidenceCalculator:
                 "A single matching keyword cannot automatically prove Study alignment"
             )
 
-        if core_possible_count:
+        if core_possible_count and not exact_qualified:
             if core_matched_count == 0:
                 confidence = _apply_cap(
                     confidence,
@@ -472,6 +482,8 @@ class StudyEvidenceCalculator:
             confidence_percent=confidence,
             safety_caps=tuple(safety_caps),
             reasons=tuple(reasons),
+            exact_task_match=exact_task_match,
+            alignment_basis="EXACT_TASK_TITLE" if exact_qualified else "WEIGHTED_KEYWORDS",
         )
 
 
@@ -498,6 +510,7 @@ def study_evidence(
     important_keywords: Iterable[str] = (),
     title: str,
     identity_certified: bool,
+    allow_exact_task_match: bool = False,
 ) -> StudyEvidence:
     """One-call valve for the complete Study-evidence calculation."""
 
@@ -508,7 +521,23 @@ def study_evidence(
         important_keywords=important_keywords,
         title=title,
         identity_certified=identity_certified,
+        allow_exact_task_match=allow_exact_task_match,
     )
+
+
+def matches_exact_task_title(task: str, title: str) -> bool:
+    """Match the complete task as contiguous words, preserving order and numbers.
+
+    Browser/site prefixes and suffixes are allowed. Case, Unicode presentation
+    and punctuation do not change the match; partial words never qualify.
+    """
+    def words(value: str) -> tuple[str, ...]:
+        return tuple(re.findall(r"[^\W_]+", unicodedata.normalize("NFKC", str(value)).casefold()))
+    task_words, title_words = words(task), words(title)
+    if not task_words or not _meaningful_tokens(task):
+        return False
+    return any(title_words[i:i + len(task_words)] == task_words
+               for i in range(len(title_words) - len(task_words) + 1))
 
 
 def normalize_for_scoring(text: str) -> str:
@@ -621,6 +650,7 @@ __all__ = [
     "TitleScore",
     "UNCERTAIN_CAP",
     "normalize_for_scoring",
+    "matches_exact_task_title",
     "score_title",
     "study_evidence",
 ]

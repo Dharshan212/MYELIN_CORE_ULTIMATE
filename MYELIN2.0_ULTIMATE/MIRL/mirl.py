@@ -636,6 +636,12 @@ class MirlAuthority:
             if type(operational_event_id) is not int or operational_event_id <= 0:
                 return self._reject("operational_event_id must be a positive integer")
 
+            evidence = _field(candidate, "evidence")
+            if (
+                str(_field(evidence, "study_context_token", "") or "")
+                or _enum_value(_field(evidence, "source", "")) == "STUDY_OFF_TASK"
+            ):
+                return None
             candidate_uid = str(_field(candidate, "candidate_uid", "") or "")
             candidate_session = _field(candidate, "session_id")
             if not candidate_uid or candidate_session != self._session_id:
@@ -651,15 +657,12 @@ class MirlAuthority:
                 return self._reject("another first SINE display is already pending")
 
             now_ns = time.monotonic_ns()
-            evidence = _field(candidate, "evidence")
             token = MirlDisplayToken(
                 token_id=f"mirl-display-{secrets.token_hex(16)}",
                 session_id=self._session_id,
                 candidate_uid=candidate_uid,
                 operational_event_id=operational_event_id,
-                study_context_token=str(
-                    _field(evidence, "study_context_token", "") or ""
-                ),
+                study_context_token="",
                 evidence_digest=str(_field(evidence, "evidence_digest", "") or ""),
                 issued_monotonic_ns=now_ns,
                 deadline_monotonic_ns=now_ns
@@ -675,6 +678,39 @@ class MirlAuthority:
                 detail="MIRL is waiting for the matching factual SINE 1 display.",
             )
             return token
+
+    def prepared_token_current(self, token: object, *, now_ns: int) -> bool:
+        """Positive ACK for the exact, still-reserved first-display identity."""
+        with self._lock:
+            return bool(
+                self._ready() and self._pending is not None
+                and isinstance(token, MirlDisplayToken)
+                and self._pending.token == token
+                and token.issued_monotonic_ns <= now_ns < token.deadline_monotonic_ns
+                and not self._active_episode()
+            )
+
+    def abandon_prepared_token(
+        self, *, token: object, reason: str, now_ns: int
+    ) -> bool:
+        """Retire only a matching preparation; never manufacture an episode."""
+        with self._lock:
+            if (
+                self._pending is None or not isinstance(token, MirlDisplayToken)
+                or self._pending.token != token
+            ):
+                return False
+            self._release_pending_display(
+                {
+                    "session_id": token.session_id,
+                    "candidate_uid": token.candidate_uid,
+                    "operational_event_id": token.operational_event_id,
+                    "reason": str(reason),
+                },
+                "PREPARED_HANDOFF_ABANDONED",
+                max(now_ns, token.issued_monotonic_ns),
+            )
+            return self._pending is None
 
     def record_sine_fact(self, fact: object) -> None:
         """Consume factual SINE events; never treat a presentation request as fact."""
@@ -931,7 +967,7 @@ class MirlAuthority:
             session_id=self._session_id,
             candidate_uid=candidate_uid,
             operational_event_id=operational_event_id,
-            study_context_token=pending.token.study_context_token,
+            study_context_token="",
             created_monotonic_ns=now_ns,
             created_wall_time_utc=_wall_time(fact),
             sine_episode_uid=sine_episode_uid,
@@ -1143,18 +1179,6 @@ class MirlAuthority:
 
         if not observation.fresh:
             context = RecoveryContext.NEUTRAL
-        elif self._study_generation_changed(episode, observation):
-            # Causal identity protection, not a second Study classifier.
-            # This episode was opened inside one Study generation; the current
-            # observation belongs to a different, non-empty one.  Its focus
-            # cannot count as recovery for THIS episode, so the cycle is
-            # neutral and nothing advances.  MIRL does not cancel anything --
-            # SINE remains the authority on whether its intervention scope
-            # changed, and monitor.py hands it the same context later in this
-            # very cycle.  Only the opaque Study token is compared; no subject
-            # word, task string or window title is consulted.
-            context = RecoveryContext.NEUTRAL
-            self._diagnostic = "observation belongs to another study generation"
         else:
             context = observation.context
 
@@ -1203,24 +1227,6 @@ class MirlAuthority:
             ):
                 self._complete_closure(observation)
 
-    @staticmethod
-    def _study_generation_changed(
-        episode: _Episode,
-        observation: RecoveryObservation,
-    ) -> bool:
-        """True when this observation belongs to a different Study generation.
-
-        Only guards episodes that were opened *inside* a Study block.  An
-        empty current token means Resource Intent is reporting no study
-        context, which is a scope question owned by SINE, not a generation
-        mismatch owned by MIRL.
-        """
-
-        episode_token = str(episode.study_context_token or "")
-        current_token = str(observation.study_context_token or "")
-        return bool(
-            episode_token and current_token and current_token != episode_token
-        )
 
     def _start_return_verification(self, observation: RecoveryObservation) -> None:
         episode = self._required_episode(MirlPhase.WAITING_FOR_RETURN)
@@ -1602,25 +1608,14 @@ class MirlAuthority:
         foreground = _field(context, "foreground")
         snapshot = _field(context, "resource_intent")
         verdict = _field(snapshot, "verdict")
-        classification = _enum_value(_field(verdict, "classification", ""))
         fresh = bool(_field(snapshot, "fresh", False))
 
-        # Study-aligned focus trusts Resource Intent's published verdict.  A
-        # title, subject word or 50% UNCERTAIN state is still never focus
-        # proof, because none of those produce STUDY_ALIGNED upstream.
-        #
-        # AUTHORITY BOUNDARY: requiring allowance_match/allowance_active here
-        # re-derived WHY the verdict was issued and silently excluded C4's
-        # automatic route, so a genuine certified lecture mapped to NEUTRAL and
-        # recovery verification could never start.  Whether the alignment is
-        # legitimate was already decided upstream -- by C4's certified-identity
-        # rule or by C8.1's allowance-eligibility gate.  MIRL does not re-run
-        # Study evidence, inspect Browser identity, or read allowance fields.
-        if fresh and classification == "STUDY_ALIGNED":
-            recovery_context = RecoveryContext.FOCUS
-        elif fresh and classification == "DISTRACTION":
-            recovery_context = RecoveryContext.DISTRACTION
-        elif fresh and self._normal_mode(snapshot, verdict):
+        if (
+            fresh
+            and not _field(context, "study_owned", False)
+            and not _field(verdict, "study_context_token", "")
+            and self._normal_mode(snapshot, verdict)
+        ):
             # Normal (non-Study) mode.  Resource Intent has said explicitly that
             # no study block exists, so its UNCERTAIN classification carries no
             # recovery meaning.  The certified surface on the same verdict does.
@@ -1646,9 +1641,7 @@ class MirlAuthority:
             ),
             source="resource_intent",
             observation_token=str(_field(verdict, "observation_token", "") or "unknown"),
-            study_context_token=str(
-                _field(verdict, "study_context_token", "") or ""
-            ),
+            study_context_token="",
             fresh=fresh,
         )
 

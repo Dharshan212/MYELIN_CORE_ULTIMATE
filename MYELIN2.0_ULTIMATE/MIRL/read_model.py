@@ -201,6 +201,7 @@ class LiveMirlEpisodeRow:
     #: ``started_at``, which is when SINE-1 displayed about three seconds
     #: later.  Empty when no fire time was supplied.
     trigger_fired_at: str = ""
+    terminal_reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +361,7 @@ class _EpisodeProjectionWork:
     return_verified_event_id: str = ""
     closure_completed_event_id: str = ""
     emergency_event_id: str = ""
+    sine_terminated_event_id: str = ""
     verification_started_ns: int = 0
     closure_started_ns: int = 0
     next_attempt_index: int = 1
@@ -705,6 +707,10 @@ class MirlReadAuthority:
             started_at=started_at,
             episode_status=episode_status,
             final_outcome=outcome,
+            terminal_reason=next(
+                (event.reason for event in reversed(events)
+                 if event.event_name is MirlEventName.SINE_TERMINATED), ""
+            ),
             return_intent_latency_seconds=(
                 _elapsed_seconds(started_ns, return_intent.occurred_monotonic_ns)
                 if return_intent
@@ -888,6 +894,12 @@ class MirlReadAuthority:
                 self._expect(work, event, {"WAITING", "VERIFY", "CLOSURE"})
                 work.emergency_event_id = event.event_id
                 work.state = "EMERGENCY"
+            elif name is MirlEventName.SINE_TERMINATED:
+                self._expect(work, event, {"WAITING", "VERIFY", "CLOSURE"})
+                if not event.reason:
+                    self._issue(work, "MISSING_TERMINAL_REASON", "SINE termination lacks its factual reason.", event)
+                work.sine_terminated_event_id = event.event_id
+                work.state = "SINE_TERMINATED"
             elif name is MirlEventName.EVIDENCE_GAP:
                 self._expect(work, event, {"WAITING", "VERIFY", "CLOSURE"})
             elif name is MirlEventName.EPISODE_CLOSED:
@@ -898,7 +910,7 @@ class MirlReadAuthority:
 
         if work.state == "EXPECT_CREATED":
             self._issue(work, "MISSING_EPISODE_CREATED", "Episode has no episode_created event.")
-        if work.state in {"VERIFY_INTERRUPTED", "CLOSURE_INTERRUPTED", "RELAPSE", "VERIFY_COMPLETED", "RETURN_VERIFIED", "CLOSURE_COMPLETED", "EMERGENCY"}:
+        if work.state in {"VERIFY_INTERRUPTED", "CLOSURE_INTERRUPTED", "RELAPSE", "VERIFY_COMPLETED", "RETURN_VERIFIED", "CLOSURE_COMPLETED", "EMERGENCY", "SINE_TERMINATED"}:
             self._issue(
                 work,
                 "INCOMPLETE_ATOMIC_EVENT_SEQUENCE",
@@ -934,6 +946,10 @@ class MirlReadAuthority:
             self._expect(work, event, {"EMERGENCY"})
             if work.emergency_event_id not in event.supporting_event_ids:
                 self._issue(work, "UNBOUND_EMERGENCY_CLOSE", "Emergency close lacks emergency event.", event)
+        elif event.reason == "ABORTED":
+            self._expect(work, event, {"SINE_TERMINATED"})
+            if work.sine_terminated_event_id not in event.supporting_event_ids:
+                self._issue(work, "UNBOUND_ABORTED_CLOSE", "Nonrecovery close lacks SINE termination.", event)
         else:
             self._issue(work, "UNKNOWN_EPISODE_OUTCOME", f"Unsupported close outcome {event.reason!r}.", event)
 

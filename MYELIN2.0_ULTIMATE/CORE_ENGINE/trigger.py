@@ -38,7 +38,7 @@ from enum import Enum
 from typing import Final
 
 from CORE_ENGINE.blacklist import Disposition
-from CORE_ENGINE.resource_intent import ResourceIntent, SineContribution
+from CORE_ENGINE.resource_intent import ResourceIntent
 
 
 # v4: Executive Blacklist evidence may not found an intervention while Resource
@@ -111,6 +111,7 @@ class TriggerStatus(str, Enum):
     PENDING_DURABILITY = "pending_durability"
     DURABLY_ADMITTED = "durably_admitted"
     REJECTED = "rejected"
+    SETTLED_WITHOUT_INTERVENTION = "settled_without_intervention"
 
 
 class EbbinghausStatus(str, Enum):
@@ -571,6 +572,7 @@ class TriggerAuthority:
         self._session_secret = secrets.token_bytes(32)
         self._candidate_sequence = 0
         self._pending: TriggerCandidate | None = None
+        self._admission_undo: dict[str, tuple] = {}
         self._results: dict[str, TriggerResult] = {}
         self._result_order: list[str] = []
         self._consumed_evidence: set[str] = set()
@@ -609,6 +611,7 @@ class TriggerAuthority:
             self._session_secret = secrets.token_bytes(32)
             self._candidate_sequence = 0
             self._pending = None
+            self._admission_undo.clear()
             self._results.clear()
             self._result_order.clear()
             self._consumed_evidence.clear()
@@ -636,11 +639,8 @@ class TriggerAuthority:
 
             now_ns = self._now_ns()
             self._release_expired_rejections(now_ns)
-            binding = self._study_binding(context, blacklist)
-            reason = "study_off_task_dwell"
-            if binding is None:
-                binding = self._blacklist_binding(context, blacklist)
-                reason = "executive_blacklist_dwell"
+            binding = self._blacklist_binding(context, blacklist)
+            reason = "executive_blacklist_dwell"
             if binding is None:
                 return None
             if any(key in self._consumed_evidence for key in binding.correlation_keys):
@@ -718,6 +718,11 @@ class TriggerAuthority:
                 return False
 
             admitted_ns = self._now_ns()
+            self._admission_undo[uid] = (
+                pending, self._cooldown_anchor_ns,
+                set(pending.evidence.correlation_keys) - self._consumed_evidence,
+                operational_event_id,
+            )
             self._cooldown_anchor_ns = admitted_ns
             self._consumed_evidence.update(pending.evidence.correlation_keys)
             self._pending = None
@@ -734,6 +739,107 @@ class TriggerAuthority:
             )
             self._record_result(result)
             return True
+
+    def settle_without_intervention(
+        self, *, candidate_uid: str, operational_event_id: int, reason: str
+    ) -> bool:
+        """Settle a saved candidate or compensate its uncompleted handoff.
+
+        A committed row remains evidence. Only the exact unfinished admission
+        can release its own consumption and restore the preceding cooldown.
+        """
+        if type(operational_event_id) is not int or operational_event_id <= 0:
+            return False
+        with self._lock:
+            self._require_active()
+            uid = str(candidate_uid or "")
+            pending = self._pending
+            undo = self._admission_undo.get(uid)
+            if pending is not None and pending.candidate_uid == uid:
+                candidate = pending
+                self._pending = None
+            elif undo is not None and undo[3] == operational_event_id:
+                candidate, previous_anchor, added_keys, _event = undo
+                current = self._results.get(uid)
+                if current is None or current.status is not TriggerStatus.DURABLY_ADMITTED:
+                    return False
+                self._cooldown_anchor_ns = previous_anchor
+                self._consumed_evidence.difference_update(added_keys)
+                self._admitted_count -= 1
+                del self._admission_undo[uid]
+            else:
+                return False
+            now_ns = self._now_ns()
+            for key in candidate.evidence.correlation_keys:
+                self._rejected_until_ns[key] = now_ns + int(
+                    self._policy.rejection_retry_seconds * NANOSECONDS_PER_SECOND
+                )
+            self._rejected_count += 1
+            self._record_result(TriggerResult(
+                candidate_uid=uid,
+                status=TriggerStatus.SETTLED_WITHOUT_INTERVENTION,
+                reason=str(reason),
+                operational_event_id=operational_event_id,
+                candidate_created_monotonic_ns=candidate.created_monotonic_ns,
+                resolved_monotonic_ns=now_ns,
+                cooldown_committed=False,
+                recovery_model=candidate.recovery_model,
+            ))
+            return True
+
+    def complete_operational_handoff(
+        self, *, candidate_uid: str, operational_event_id: int
+    ) -> bool:
+        """Retire compensation only after exact SINE acceptance is durable."""
+        with self._lock:
+            undo = self._admission_undo.get(str(candidate_uid or ""))
+            if undo is None or undo[3] != operational_event_id:
+                return False
+            del self._admission_undo[candidate_uid]
+            return True
+
+    def candidate_still_current(
+        self, *, candidate: object, context: object, blacklist: object
+    ) -> bool:
+        """Validate fresh same-cycle evidence without admitting or consuming it."""
+        with self._lock:
+            if not isinstance(candidate, TriggerCandidate):
+                return False
+            if candidate.session_id != self._session_id:
+                return False
+            old = candidate.evidence
+            if old.source is TriggerSource.EXECUTIVE_BLACKLIST:
+                # A threshold offer is emitted only on selected polls. Recheck
+                # the ongoing factual watch, not a second offer or its new UID.
+                foreground = _field(context, "foreground")
+                snapshot = _field(context, "resource_intent")
+                intent = _field(snapshot, "verdict")
+                verdict = _field(blacklist, "verdict")
+                source = _field(blacklist, "source_identity")
+                now_ns = int(_field(foreground, "observed_monotonic_ns", 0) or 0)
+                dwell = float(_field(blacklist, "elapsed_seconds", 0.0) or 0.0)
+                same_watch = abs(
+                    (now_ns - int(round(dwell * 1_000_000_000)))
+                    - (old.observed_monotonic_ns - int(round(old.dwell_seconds * 1_000_000_000)))
+                ) <= 1
+                return bool(
+                    self._context_scope_matches(foreground, snapshot, blacklist)
+                    and not _field(context, "study_owned", False)
+                    and not _field(intent, "study_context_token", "")
+                    and not _field(snapshot, "protected_red_active", False)
+                    and not _field(snapshot, "cosine_active", False)
+                    and _field(intent, "classification") is not ResourceIntent.APPROVED_BREAK
+                    and _field(blacklist, "threshold_reached", False)
+                    and _field(verdict, "actionable", False)
+                    and _field(verdict, "disposition") in {Disposition.ACCUSED, Disposition.UNKNOWN}
+                    and _field(verdict, "platform_key") == old.platform_key
+                    and _field(verdict, "rule_id") == old.source_rule_id
+                    and _field(blacklist, "resource_key") == old.resource_key
+                    and _field(source, "process_id") == old.process_id
+                    and _field(source, "hwnd") == old.hwnd
+                    and dwell >= old.threshold_seconds and same_watch
+                )
+            return False
 
     def reject_candidate(self, *, candidate_uid: str, reason: str) -> bool:
         """Reject exactly one pending candidate without consuming cooldown."""
@@ -946,61 +1052,14 @@ class TriggerAuthority:
         surface = str(binding.surface_class or "").strip().casefold()
         return dict(MODEL_CATEGORY_BY_SURFACE).get(surface, "generic")
 
-    def _study_binding(self, context: object, blacklist: object) -> EvidenceBinding | None:
-        foreground = _field(context, "foreground")
-        intent_snapshot = _field(context, "resource_intent")
-        verdict = _field(intent_snapshot, "verdict")
-        if not self._context_scope_matches(foreground, intent_snapshot, blacklist):
-            return None
-        if bool(_field(intent_snapshot, "protected_red_active", False)):
-            return None
-        if bool(_field(intent_snapshot, "cosine_active", False)):
-            return None
-        if _field(verdict, "sine_contribution") is not SineContribution.READY:
-            return None
-        if _field(verdict, "classification") is not ResourceIntent.DISTRACTION:
-            return None
-
-        study_token = str(_field(verdict, "study_context_token", "") or "")
-        resource_identity = _field(verdict, "resource_identity")
-        resource_key = str(_field(resource_identity, "stable_key", "") or "")
-        observation_token = str(_field(verdict, "observation_token", "") or "")
-        if not study_token or not resource_key or not observation_token:
-            return None
-
-        dwell_seconds = float(_field(verdict, "off_task_dwell_seconds", 0.0) or 0.0)
-        blacklist_target = float(_field(blacklist, "target_seconds", 300.0) or 300.0)
-        if not math.isfinite(dwell_seconds) or dwell_seconds < blacklist_target:
-            return None
-
-        study_episode = self._opaque_evidence_key(
-            "study",
-            study_token,
-            resource_key,
-        )
-        aliases = [study_episode]
-        offer = _field(blacklist, "threshold_offer")
-        offer_uid = str(_field(offer, "offer_uid", "") or "")
-        if offer_uid and self._blacklist_offer_matches(context, blacklist, offer):
-            aliases.append(self._opaque_evidence_key("blacklist", offer_uid))
-
-        return self._make_binding(
-            context=context,
-            source=TriggerSource.STUDY_OFF_TASK,
-            source_rule_id="RI-STUDY-OFF-TASK-READY-001",
-            source_policy_version=str(_field(verdict, "classifier_version", "") or ""),
-            correlation_keys=tuple(dict.fromkeys(aliases)),
-            platform_key=str(_field(resource_identity, "platform_key", "") or ""),
-            surface_class=_canonical_resource_surface(context),
-            resource_key=resource_key,
-            study_context_token=study_token,
-            observation_token=observation_token,
-            dwell_seconds=dwell_seconds,
-            threshold_seconds=blacklist_target,
-        )
 
     def _blacklist_binding(self, context: object, blacklist: object) -> EvidenceBinding | None:
         intent_verdict = _field(_field(context, "resource_intent"), "verdict")
+        if (
+            bool(_field(context, "study_owned", False))
+            or str(_field(intent_verdict, "study_context_token", "") or "")
+        ):
+            return None
 
         # An approved COSECANT break already granted the user temporary
         # behavioural permission, and COSECANT alone owns the return

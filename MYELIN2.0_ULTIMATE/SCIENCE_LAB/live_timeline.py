@@ -34,7 +34,7 @@ STAGES: Final = (
     "VERIFIED_RETURN",
     "EPISODE_CLOSURE",
 )
-ORGANS: Final = ("SINE", "MINE", "COSINE", "COSECANT")
+ORGANS: Final = ("SINE", "MINE", "COSINE", "SECANT", "COSECANT")
 
 
 @dataclass(frozen=True, slots=True)
@@ -547,6 +547,52 @@ class LiveOrganTimelineProjector:
             _complete(values, "EPISODE_CLOSURE", reason="Factual COSINE closed state.")
             stage = "EPISODE_CLOSURE"
         return self._state("COSINE", stage, episode or None, values, break_progress)
+
+    def receive_secant_projection(self, snapshot: object) -> tuple[LiveOrganTimelineState, ...]:
+        if self._mode != MODE_LIVE or snapshot is None:
+            return ()
+        scope = _field(snapshot, "scope")
+        context = str(_field(scope, "context_id", ""))
+        if not context.startswith(str(self._parent_session_id) + ":"):
+            return ()
+        episode = str(_field(snapshot, "episode_id", ""))
+        facts = tuple(_field(snapshot, "timeline", ()))
+        names = {_field(f, "name") for f in facts if _field(f, "episode_id") == episode}
+        values = _pending()
+        frozen = bool(_field(snapshot, "frozen_reasons", ()))
+        stage = "OFF_TASK_DWELL"
+        if not episode:
+            _active(values, stage, paused=frozen, reason="SECANT qualification; no factual episode display yet.")
+        else:
+            if "SECANT_EPISODE_FOUNDED" in names:
+                _complete(values, "OFF_TASK_DWELL", "TRIGGER", reason="SECANT-1 factual display founded this Study episode.")
+            stage = "TRIGGER"
+            recovery = _field(snapshot, "recovery")
+            phase = _value(_field(recovery, "phase"))
+            paused = frozen or bool(_field(recovery, "global_hold_id"))
+            if phase in {"VERIFYING", "CONFIRMING"}:
+                stage = "RETURN" if phase == "VERIFYING" else "VERIFIED_RETURN"
+                if phase == "CONFIRMING":
+                    _complete(values, "RETURN", reason="Native SECANT return verification completed.")
+                elapsed_key, target_key = (("verification_elapsed_ns", "verification_target_ns") if phase == "VERIFYING"
+                                          else ("closure_elapsed_ns", "closure_target_ns"))
+                elapsed, total = _number(_field(recovery, elapsed_key)), _number(_field(recovery, target_key))
+                progress, elapsed, total = _progress(None if elapsed is None else elapsed / 1e9,
+                                                     None if total is None else total / 1e9)
+                _active(values, stage, progress=progress, elapsed=elapsed, total=total, paused=paused,
+                        reason="Native SECANT supported verification / confirmation; independent of MIRL.")
+            elif phase == "CLOSED":
+                stage = "EPISODE_CLOSURE"
+                _complete(values, "RETURN", "VERIFIED_RETURN", "EPISODE_CLOSURE", reason="Native SECANT recovery closure.")
+            elif _field(snapshot, "terminal_reason"):
+                stage = "EPISODE_CLOSURE"
+                _complete(values, stage, reason="Episode terminated: " + str(_field(snapshot, "terminal_reason")))
+            elif "SECANT_RECOVERY_INTERRUPTED" in names:
+                stage = "RETURN"
+                interrupted = next((f for f in reversed(facts) if _field(f, "name") == "SECANT_RECOVERY_INTERRUPTED"), None)
+                _active(values, stage, paused=True, reason="Recovery interrupted: " + str(_field(interrupted, "reason", "")))
+        state = self._state("SECANT", stage, episode or None, values)
+        return (self._store(state),)
 
     def _project_cosecant(self, snapshot: object) -> LiveOrganTimelineState | None:
         if snapshot is None and not self._last_cosecant_fact_break:

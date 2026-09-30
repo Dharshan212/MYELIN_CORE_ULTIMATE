@@ -71,6 +71,12 @@ CHAPTER_TWO_ORGANS: Final = (
         "state": "ready",
     },
     {
+        "key": "secant",
+        "title": "SECANT",
+        "subtitle": "Study off-task and recovery regulation",
+        "state": "ready",
+    },
+    {
         "key": "cosecant",
         "title": "COSECANT",
         "subtitle": "Study-break return regulation",
@@ -78,6 +84,16 @@ CHAPTER_TWO_ORGANS: Final = (
     },
 )
 
+
+SECANT_TIMING_FACTS: Final = {
+    "supported_dwell": "5:00", "stage_2_delay": "+10:00", "stage_3_delay": "+13:15",
+    "verification": "10 seconds", "confirmation": "60 seconds",
+}
+SECANT_BOUNDARY_NOTE: Final = (
+    "SECANT is the Study regulation / off-task recovery system. COSECANT is its "
+    "approved-break branch in this conceptual map, with independent runtime authority. "
+    "An approved COSECANT break is not ordinary SECANT off-task escalation."
+)
 
 #: SINE facts verified directly against SINE/sine.py and SINE/popup.py
 #: (Chapter 2 Phase 1 forensic audit) -- presentation copy only, never

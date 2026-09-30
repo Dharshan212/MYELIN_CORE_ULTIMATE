@@ -49,6 +49,7 @@ PAGE_SCIENCE_LAB: Final = "science-lab"
 PAGE_LIVE_MIRL: Final = "live-mirl"
 PAGE_MINE: Final = "mine"
 PAGE_COSINE: Final = "cosine"
+PAGE_SECANT_DASHBOARD: Final = "secant-dashboard"
 
 PAGE_ORDER: Final = (
     PAGE_CONTROL,
@@ -58,6 +59,7 @@ PAGE_ORDER: Final = (
     PAGE_LIVE_MIRL,
     PAGE_MINE,
     PAGE_COSINE,
+    PAGE_SECANT_DASHBOARD,
 )
 
 
@@ -110,6 +112,12 @@ DESTINATIONS: Final = {
         "COSINE",
         "Preparing COSINE",
         "Loading streaming activity and session insights…",
+    ),
+    PAGE_SECANT_DASHBOARD: Destination(
+        "SECANT Dashboard",
+        "Opening SECANT Dashboard",
+        "Showing static demonstration content…",
+        show_loader=False,
     ),
 }
 

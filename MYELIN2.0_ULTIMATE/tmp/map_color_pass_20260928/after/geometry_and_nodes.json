@@ -1,0 +1,2722 @@
+{
+  "landing": {
+    "cards": [
+      {
+        "tone": "purple",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Founded",
+          "Recorded",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:24:40"
+        ]
+      },
+      {
+        "tone": "yellow",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Interrupted",
+          "Evidence gap",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:24:54"
+        ]
+      },
+      {
+        "tone": "amber",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 2",
+          "21:34:46"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:34:51"
+        ]
+      },
+      {
+        "tone": "red",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 3",
+          "21:48:03"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:48:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Verified",
+          "Recorded",
+          "21:48:20"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Closed",
+          "Recorded",
+          "21:49:24"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Closed",
+          "Recovered",
+          "21:49:24"
+        ]
+      }
+    ],
+    "connectors": [
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      }
+    ],
+    "page_horizontal_overflow": null
+  },
+  "overview": {
+    "cards": [
+      {
+        "tone": "purple",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Founded",
+          "Recorded",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:24:40"
+        ]
+      },
+      {
+        "tone": "yellow",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Interrupted",
+          "Evidence gap",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:24:54"
+        ]
+      },
+      {
+        "tone": "amber",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 2",
+          "21:34:46"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:34:51"
+        ]
+      },
+      {
+        "tone": "red",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 3",
+          "21:48:03"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:48:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Verified",
+          "Recorded",
+          "21:48:20"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Closed",
+          "Recorded",
+          "21:49:24"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Closed",
+          "Recovered",
+          "21:49:24"
+        ]
+      },
+      {
+        "tone": "purple",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Founded",
+          "Recorded",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:24:40"
+        ]
+      },
+      {
+        "tone": "yellow",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Interrupted",
+          "Evidence gap",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:24:54"
+        ]
+      },
+      {
+        "tone": "amber",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 2",
+          "21:34:46"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:34:51"
+        ]
+      },
+      {
+        "tone": "red",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 3",
+          "21:48:03"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:48:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Return Verified",
+          "Recorded",
+          "21:48:20"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Closed",
+          "Recorded",
+          "21:49:24"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Closed",
+          "Recovered",
+          "21:49:24"
+        ]
+      }
+    ],
+    "connectors": [
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      }
+    ],
+    "page_horizontal_overflow": 0
+  },
+  "episodes": {
+    "cards": [
+      {
+        "tone": "purple",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Founded",
+          "Recorded",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:24:40"
+        ]
+      },
+      {
+        "tone": "yellow",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Interrupted",
+          "Evidence gap",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:24:54"
+        ]
+      },
+      {
+        "tone": "amber",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 2",
+          "21:34:46"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:34:51"
+        ]
+      },
+      {
+        "tone": "red",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 3",
+          "21:48:03"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:48:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Verified",
+          "Recorded",
+          "21:48:20"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Closed",
+          "Recorded",
+          "21:49:24"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Closed",
+          "Recovered",
+          "21:49:24"
+        ]
+      },
+      {
+        "tone": "purple",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Founded",
+          "Recorded",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:24:40"
+        ]
+      },
+      {
+        "tone": "yellow",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Interrupted",
+          "Evidence gap",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:24:54"
+        ]
+      },
+      {
+        "tone": "amber",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 2",
+          "21:34:46"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:34:51"
+        ]
+      },
+      {
+        "tone": "red",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 3",
+          "21:48:03"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:48:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Return Verified",
+          "Recorded",
+          "21:48:20"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Closed",
+          "Recorded",
+          "21:49:24"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Closed",
+          "Recovered",
+          "21:49:24"
+        ]
+      }
+    ],
+    "connectors": [
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      }
+    ],
+    "page_horizontal_overflow": 0
+  },
+  "distraction_history": {
+    "cards": [
+      {
+        "tone": "purple",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Founded",
+          "Recorded",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:24:40"
+        ]
+      },
+      {
+        "tone": "yellow",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Interrupted",
+          "Evidence gap",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:24:54"
+        ]
+      },
+      {
+        "tone": "amber",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 2",
+          "21:34:46"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:34:51"
+        ]
+      },
+      {
+        "tone": "red",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 3",
+          "21:48:03"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:48:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Verified",
+          "Recorded",
+          "21:48:20"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Closed",
+          "Recorded",
+          "21:49:24"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Closed",
+          "Recovered",
+          "21:49:24"
+        ]
+      },
+      {
+        "tone": "purple",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Founded",
+          "Recorded",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:24:40"
+        ]
+      },
+      {
+        "tone": "yellow",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Interrupted",
+          "Evidence gap",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:24:54"
+        ]
+      },
+      {
+        "tone": "amber",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 2",
+          "21:34:46"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:34:51"
+        ]
+      },
+      {
+        "tone": "red",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 3",
+          "21:48:03"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:48:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Return Verified",
+          "Recorded",
+          "21:48:20"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Closed",
+          "Recorded",
+          "21:49:24"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Closed",
+          "Recovered",
+          "21:49:24"
+        ]
+      }
+    ],
+    "connectors": [
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      }
+    ],
+    "page_horizontal_overflow": 0
+  },
+  "cosecant": {
+    "cards": [
+      {
+        "tone": "purple",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Founded",
+          "Recorded",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:24:40"
+        ]
+      },
+      {
+        "tone": "yellow",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Interrupted",
+          "Evidence gap",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:24:54"
+        ]
+      },
+      {
+        "tone": "amber",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 2",
+          "21:34:46"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:34:51"
+        ]
+      },
+      {
+        "tone": "red",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 3",
+          "21:48:03"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:48:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Verified",
+          "Recorded",
+          "21:48:20"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Closed",
+          "Recorded",
+          "21:49:24"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Closed",
+          "Recovered",
+          "21:49:24"
+        ]
+      },
+      {
+        "tone": "purple",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "COSECANT",
+          "Break started",
+          "Break active",
+          "21:14:15"
+        ]
+      },
+      {
+        "tone": "yellow",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "COSECANT",
+          "Break complete",
+          "Break complete",
+          "21:24:15"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "COSECANT",
+          "Return intent recorded",
+          "Break complete",
+          "21:24:24"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "COSECANT",
+          "Return confirmation started",
+          "Return confirming",
+          "21:24:35"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "COSECANT",
+          "Return confirmed",
+          "Confirmed",
+          "21:24:38"
+        ]
+      },
+      {
+        "tone": "neutral",
+        "size": [
+          152,
+          102
+        ],
+        "labels": [
+          "COSECANT",
+          "Safe shutdown",
+          "Shutdown",
+          "21:51:16"
+        ]
+      }
+    ],
+    "connectors": [
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      }
+    ],
+    "page_horizontal_overflow": 0
+  },
+  "past_secant_episodes": {
+    "cards": [
+      {
+        "tone": "purple",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Founded",
+          "Recorded",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:24:40"
+        ]
+      },
+      {
+        "tone": "yellow",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Interrupted",
+          "Evidence gap",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:24:54"
+        ]
+      },
+      {
+        "tone": "amber",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 2",
+          "21:34:46"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:34:51"
+        ]
+      },
+      {
+        "tone": "red",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 3",
+          "21:48:03"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:48:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Verified",
+          "Recorded",
+          "21:48:20"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Closed",
+          "Recorded",
+          "21:49:24"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Closed",
+          "Recovered",
+          "21:49:24"
+        ]
+      },
+      {
+        "tone": "purple",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Founded",
+          "Recorded",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:24:40"
+        ]
+      },
+      {
+        "tone": "yellow",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Interrupted",
+          "Evidence gap",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:24:54"
+        ]
+      },
+      {
+        "tone": "amber",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 2",
+          "21:34:46"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:34:51"
+        ]
+      },
+      {
+        "tone": "red",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 3",
+          "21:48:03"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:48:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Verified",
+          "Recorded",
+          "21:48:20"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Closed",
+          "Recorded",
+          "21:49:24"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Closed",
+          "Recovered",
+          "21:49:24"
+        ]
+      }
+    ],
+    "connectors": [
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      }
+    ],
+    "page_horizontal_overflow": 0
+  },
+  "past_study_sessions": {
+    "cards": [
+      {
+        "tone": "purple",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Founded",
+          "Recorded",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:14:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:24:40"
+        ]
+      },
+      {
+        "tone": "yellow",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Interrupted",
+          "Evidence gap",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "blue",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 1",
+          "21:24:47"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:24:54"
+        ]
+      },
+      {
+        "tone": "amber",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 2",
+          "21:34:46"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return to Study Selected",
+          "Return to study",
+          "21:34:51"
+        ]
+      },
+      {
+        "tone": "red",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "SECANT Displayed",
+          "Stage 3",
+          "21:48:03"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Process Started",
+          "Recorded",
+          "21:48:10"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Return Verified",
+          "Recorded",
+          "21:48:20"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Recovery Closed",
+          "Recorded",
+          "21:49:24"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "SECANT",
+          "Episode Closed",
+          "Recovered",
+          "21:49:24"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "PRIMARY",
+          "Title not recorded",
+          "Study-aligned",
+          "21:09:06"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "PRIMARY",
+          "Title not recorded",
+          "Study-aligned",
+          "21:24:45"
+        ]
+      },
+      {
+        "tone": "green",
+        "size": [
+          174,
+          148
+        ],
+        "labels": [
+          "PRIMARY",
+          "Title not recorded",
+          "Study-aligned",
+          "21:49:42"
+        ]
+      }
+    ],
+    "connectors": [
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "",
+        "width": 62,
+        "height": 104
+      },
+      {
+        "caption": "Evidence gap",
+        "width": 172,
+        "height": 104
+      },
+      {
+        "caption": "Interruption recorded",
+        "width": 172,
+        "height": 104
+      }
+    ],
+    "page_horizontal_overflow": 0
+  }
+}

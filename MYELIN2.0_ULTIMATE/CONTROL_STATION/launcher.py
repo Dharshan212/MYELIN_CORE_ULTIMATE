@@ -104,7 +104,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     lifetime: dict[str, object | None] = {
         "startup": None,
         "window": None,
+        "passive_recorder": None,
+        "recorder_storage": None,
     }
+
+    def recorder_diagnostic(quality) -> None:
+        if quality.coverage == "RECORDING_GAP_DETECTED":
+            print("[MYELIN][RECORDER] bounded recording gap: "
+                  + ", ".join(quality.reasons), flush=True)
+
+    def detach_recorder() -> None:
+        recorder = lifetime.get("passive_recorder")
+        if recorder is not None:
+            recorder.begin_shutdown()
+
+    def finish_recorder() -> None:
+        recorder = lifetime.get("passive_recorder")
+        recorder_storage = lifetime.get("recorder_storage")
+        try:
+            if recorder is not None:
+                flush = recorder.finish_shutdown(timeout_seconds=8.0)
+                if flush.state != "COMMITTED":
+                    print(f"[MYELIN][RECORDER] shutdown recording incomplete: {flush.state}", flush=True)
+        except Exception as exc:
+            print(f"[MYELIN][RECORDER] finalization failed: {exc}", flush=True)
+        finally:
+            if recorder_storage is not None:
+                try:
+                    # Release only this facade; never another owner's lane.
+                    recorder_storage.shutdown()
+                except Exception as exc:
+                    print(f"[MYELIN][RECORDER] storage release failed: {exc}", flush=True)
 
     def startup_completed(
         exit_code: int,
@@ -114,13 +144,38 @@ def main(argv: Sequence[str] | None = None) -> int:
         lifetime["window"] = window
         if window is None:
             app.quit()
+            return
+        try:
+            from PERSISTENCE.storage import EngineStorage
+            from PERSISTENCE.secant_recorder import PassiveSecantRecorder
+            recorder_storage = EngineStorage()
+            lifetime["recorder_storage"] = recorder_storage
+            recorder = PassiveSecantRecorder(recorder_storage, parent=app)
+            lifetime["passive_recorder"] = recorder
+            recorder.quality_changed.connect(recorder_diagnostic)
+            recorder.attach(window.engine)
+            recorder.on_session_changed(window.engine.current_session_id())
+            if recorder.quality_snapshot().writer_state == "FAILED":
+                raise RuntimeError("Passive recorder could not attach public signals")
+        except Exception as exc:
+            print(f"[MYELIN][RECORDER] unavailable; application continues: {exc}", flush=True)
+            detach_recorder()
+            finish_recorder()
+            lifetime["passive_recorder"] = None
+            lifetime["recorder_storage"] = None
 
     startup = StartupSequence(app, completed=startup_completed)
     lifetime["startup"] = startup
     startup.start()
 
-    qt_exit_code = int(app.exec())
-    lifetime.clear()
+    app.aboutToQuit.connect(detach_recorder)
+    try:
+        qt_exit_code = int(app.exec())
+    finally:
+        # Window/Monitor may have released their facades already. The
+        # recorder facade keeps the same serialized writer alive until here.
+        finish_recorder()
+        lifetime.clear()
     print(f"[MYELIN][SHUTDOWN] process exiting; qt_code={qt_exit_code}", flush=True)
     if result["exit_code"] == 0 and qt_exit_code != 0:
         return qt_exit_code
@@ -129,4 +184,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -16,6 +16,7 @@ import math
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, replace as dataclasses_replace
 from typing import Final
 
@@ -46,10 +47,18 @@ from PyQt6.QtWidgets import (
 )
 
 from CORE_ENGINE.resource_intent import (
+    IntentReason,
+    NORMAL_FOCUS_SURFACES,
+    ResourceIntent,
+    ResourceSurface,
     ResourceIntentFact,
     ResourceIntentLiveView,
+    ResourceObservation,
+    observation_token,
+    study_context_token,
     StudyConfirmationPopupRequest,
     StudyConfirmationResponse,
+    STUDY_CONFIRMATION_WINDOW_TITLE,
 )
 
 
@@ -156,6 +165,10 @@ class StudyTimerCard(QFrame):
         column.addWidget(self._build_setup_panel())
 
         self._study_snapshot: StudySnapshot | None = None
+        self._prepare_pending = False
+        self._cosecant_snapshot = None
+        self._secant_projection = None
+        self._start_transition = {}
         self._study_projection_timer = QTimer(self)
         self._study_projection_timer.setInterval(200)
         self._study_projection_timer.timeout.connect(self._project_study_countdown)
@@ -261,7 +274,21 @@ class StudyTimerCard(QFrame):
         break_row.addStretch(1)
         root.addSpacing(10)
         root.addLayout(break_row)
+        self.secant_status = QLabel("SECANT inactive", panel)
+        self.secant_status.setObjectName("studySecantStatus")
+        root.addWidget(self.secant_status)
         return panel
+
+    def set_secant_projection(self, projection) -> None:
+        from SECANT.read_model import SecantProjection
+        if projection is not None and not isinstance(projection, SecantProjection):
+            return
+        self._secant_projection = projection
+        if projection is None or not projection.episode_id or projection.terminal_reason:
+            self.secant_status.setText("SECANT inactive")
+        else:
+            self.secant_status.setText(f"SECANT-{int(projection.stage)} · {projection.recovery.phase.value}")
+        self.render(self._study_snapshot, self._cosecant_snapshot)
 
     def _meta_column(self, parent: QWidget, key: str, text: str) -> QVBoxLayout:
         """One ``.sm-timer-meta`` cell: a 10px caption over a mono value."""
@@ -372,6 +399,14 @@ class StudyTimerCard(QFrame):
         root.addSpacing(16)
         root.addLayout(prepare_row)
 
+        self.prepare_feedback = QLabel("", panel)
+        self.prepare_feedback.setObjectName("studyPrepareFeedback")
+        self.prepare_feedback.setTextFormat(Qt.TextFormat.PlainText)
+        self.prepare_feedback.setWordWrap(True)
+        self.prepare_feedback.setAccessibleName("Study preparation result")
+        self.prepare_feedback.hide()
+        root.addWidget(self.prepare_feedback)
+
         # Everything the lock covers, gathered once.  PREPARE is deliberately
         # not in this list: its own enabled-state is decided by the existing
         # frozen gating in render() and must not be touched from here.
@@ -447,15 +482,29 @@ class StudyTimerCard(QFrame):
         keyword = self.keywords_input.text()
         important_keyword = self.important_keywords_input.text()
         if not subject or not task:
-            self.subject_input.setFocus()
+            self.show_prepare_result({"message": "Enter both a subject and a task before preparing Study."})
+            (self.subject_input if not subject else self.task_input).setFocus()
             return
         self.prepare_requested.emit(
             subject,
             task,
             self.study_minutes.value() * 60,
             self.break_minutes.value() * 60,
-            (keyword,) if keyword.strip() else (),
-            (important_keyword,) if important_keyword.strip() else (),
+            tuple(part.strip() for part in keyword.split(",") if part.strip()),
+            tuple(part.strip() for part in important_keyword.split(",") if part.strip()),
+        )
+
+    def show_prepare_result(self, result: object) -> None:
+        self._prepare_pending = bool(result.get("pending", False))
+        message = str(result.get("message", ""))
+        if result.get("accepted") is True:
+            message = "Study is READY. Press START to begin."
+        self.prepare_feedback.setText(message)
+        self.prepare_feedback.setVisible(bool(message))
+        state = self._study_snapshot.state if self._study_snapshot else StudyState.EMPTY
+        self.prepare_button.setEnabled(
+            not self._prepare_pending
+            and state not in {StudyState.ACTIVE, StudyState.PAUSED, StudyState.SHUTDOWN}
         )
 
     def render(
@@ -464,6 +513,7 @@ class StudyTimerCard(QFrame):
         cosecant: CosecantSnapshot | None,
     ) -> None:
         self._study_snapshot = study
+        self._cosecant_snapshot = cosecant
         if study is None:
             self.subject_label.setText("No subject selected")
             self.task_label.setText("Prepare a Study block to begin")
@@ -507,17 +557,43 @@ class StudyTimerCard(QFrame):
         )
         final_lock = bool(cosecant is not None and cosecant.final_locked)
         self.prepare_button.setEnabled(
-            state not in {StudyState.ACTIVE, StudyState.PAUSED, StudyState.SHUTDOWN}
+            not self._prepare_pending
+            and not self._start_transition
+            and state not in {StudyState.ACTIVE, StudyState.PAUSED, StudyState.SHUTDOWN}
         )
-        self.start_button.setEnabled(state is StudyState.READY)
+        self.start_button.setEnabled(state is StudyState.READY and not self._start_transition)
         self.pause_button.setEnabled(state is StudyState.ACTIVE and not break_active)
         self.resume_button.setEnabled(
             state is StudyState.PAUSED and not break_active and not final_lock
         )
         self.complete_button.setEnabled(
-            state in {StudyState.ACTIVE, StudyState.PAUSED} and not final_lock
+            state in {StudyState.ACTIVE, StudyState.PAUSED}
         )
         self.break_button.setEnabled(state is StudyState.ACTIVE and not break_active)
+
+        projection = self._secant_projection
+        episode_active = bool(projection and projection.episode_id and not projection.terminal_reason)
+        pending_break = bool(study and study.break_pause_id)
+        global_hold = bool(study and study.global_hold_id)
+        self.pause_button.setEnabled(state is StudyState.ACTIVE and not (episode_active or break_active or pending_break or global_hold))
+        self.break_button.setEnabled(state is StudyState.ACTIVE and not (break_active or pending_break or global_hold)
+            and bool(study and any(getattr(f, "role", "") == "PRIMARY" for f in study.resources))
+            and not (projection and int(projection.stage) >= 2))
+
+
+
+    def show_start_transition(self, result: object) -> None:
+        result = result if isinstance(result, dict) else {}
+        study = self._study_snapshot
+        if result and study is not None and (
+            result.get("block_id") != study.block_id
+            or result.get("generation") != study.generation
+        ):
+            return
+        self._start_transition = result if result.get("state") in {"COUNTDOWN", "CLOSING"} else {}
+        self.prepare_feedback.setText(str(result.get("message", "")))
+        self.prepare_feedback.setVisible(bool(result))
+        self.render(self._study_snapshot, self._cosecant_snapshot)
 
     def _project_study_countdown(self) -> None:
         """Smooth the ring's countdown between backend StudySnapshot publishes.
@@ -528,6 +604,12 @@ class StudyTimerCard(QFrame):
         reaching zero) waits for the next authoritative snapshot.
         """
 
+        transition = self._start_transition
+        if transition.get("state") == "COUNTDOWN":
+            remaining = max(0, math.ceil((transition["deadline_monotonic_ns"] - time.monotonic_ns()) / 1_000_000_000))
+            self.prepare_feedback.setText(
+                f"Study starts in {remaining}…" if remaining else "Closing current intervention…"
+            )
         study = self._study_snapshot
         if study is None or study.state is not StudyState.ACTIVE:
             return
@@ -634,14 +716,131 @@ class StudyTelemetryPanel(QFrame):
             )
 
 
+def _resource_intent_classification_text(live: ResourceIntentLiveView) -> str:
+    """Format category + Study verdict; never change the supplied authority.
+
+    WEB_CONTENT can also be certified OTT. Only current, certified web
+    evidence from the existing Study-evidence branch earns ACTIVITY here.
+    Missing/ambiguous evidence retains the exact original verdict.
+    """
+
+    verdict = live.classification
+    original = verdict.value
+    if verdict not in {
+        ResourceIntent.STUDY_ALIGNED,
+        ResourceIntent.DISTRACTION,
+        ResourceIntent.UNCERTAIN,
+    }:
+        return original
+
+    reasons = frozenset(live.positive_reason_codes) | frozenset(live.negative_reason_codes)
+    if live.cosine_active or reasons.intersection({
+        IntentReason.ENTERTAINMENT.value,
+        IntentReason.COSINE.value,
+        IntentReason.STUDY_PAUSED.value,
+        IntentReason.STALE_OBSERVATION.value,
+        IntentReason.EMPTY_OBSERVATION.value,
+        IntentReason.BROWSER_EVIDENCE_UNAVAILABLE.value,
+        IntentReason.UNSUPPORTED_SURFACE.value,
+    }):
+        return original
+
+    surface = live.resource_surface
+    has_context = bool(live.study_context_token.strip())
+    if surface in NORMAL_FOCUS_SURFACES:
+        if surface is ResourceSurface.FOCUS_WEB and not live.browser_evidence_certified:
+            return original
+        category = "FOCUS"
+    elif surface is ResourceSurface.WEB_CONTENT:
+        if not has_context or not live.browser_evidence_certified:
+            return original
+        if not reasons.intersection({
+            IntentReason.STUDY_EVIDENCE_ALIGNED.value,
+            IntentReason.STUDY_EVIDENCE_UNCERTAIN.value,
+            IntentReason.STUDY_EVIDENCE_OFF_TASK.value,
+        }):
+            return original
+        category = "ACTIVITY"
+    else:
+        return original
+
+    if IntentReason.NO_ACTIVE_STUDY_BLOCK.value in reasons:
+        if not has_context and verdict is ResourceIntent.UNCERTAIN:
+            return f"{category} · STUDY NOT ASSESSED"
+        return original
+    if not has_context:
+        return original
+    if verdict is ResourceIntent.STUDY_ALIGNED:
+        return f"{category} · STUDY ALIGNED"
+    if verdict is ResourceIntent.DISTRACTION:
+        return f"{category} · STUDY OFF-TASK"
+    if IntentReason.STUDY_EVIDENCE_UNCERTAIN.value in reasons:
+        return f"{category} · STUDY UNCERTAIN"
+    return original
+
+
+def _study_task_match_text(live: ResourceIntentLiveView) -> str:
+    """Translate only the Study assessment; app category is a separate fact."""
+
+    reasons = frozenset(live.positive_reason_codes) | frozenset(
+        live.negative_reason_codes
+    )
+    if IntentReason.STUDY_PAUSED.value in reasons:
+        return "PAUSED"
+    if (
+        live.classification is ResourceIntent.APPROVED_BREAK
+        or IntentReason.APPROVED_BREAK.value in reasons
+    ):
+        return "BREAK"
+    if IntentReason.NO_ACTIVE_STUDY_BLOCK.value in reasons:
+        return "NOT ASSESSED"
+    return {
+        ResourceIntent.STUDY_ALIGNED: "ALIGNED",
+        ResourceIntent.DISTRACTION: "OFF-TASK",
+        ResourceIntent.UNCERTAIN: "UNCERTAIN",
+        ResourceIntent.APPROVED_BREAK: "BREAK",
+        ResourceIntent.BACKGROUND_AUDIO: "BACKGROUND AUDIO",
+    }.get(live.classification, live.classification.value)
+
+
+_CATEGORY_BADGE_STYLES: Final[dict[str, tuple[str, str, str]]] = {
+    "STUDY": ("#68E89A", "#123829", "#21CF6D"),
+    "STUDY_FOCUS": ("#F7B8D7", "#351024", "#FF78B8"),
+    "ACTIVITY": ("#D9F2FF", "#0C2B3B", "#79C9F2"),
+    "OTT": ("#CDEFFF", "#102C3A", "#63C8F2"),
+    "MESSAGING": ("#E6E0FF", "#25194A", "#A99AF5"),
+    "SOCIAL": ("#FFE5B5", "#3A2500", "#E7AE45"),
+    "GAMING": ("#FFD6D6", "#411515", "#ED8E8E"),
+}
+_CATEGORY_BADGE_LABELS: Final[dict[str, str]] = {
+    "STUDY": "[STUDY]",
+    "STUDY_FOCUS": "[STUDY FOCUS]",
+    "ACTIVITY": "[ACTIVITY]",
+    "OTT": "[OTT]",
+    "MESSAGING": "[MESSAGING]",
+    "SOCIAL": "[SOCIAL]",
+    "GAMING": "[GAMING]",
+}
+_CATEGORY_SCHEMA_VERSION: Final = "myelin-study-app-category-v1-prototype"
+
+
 class ResourceIntentTelemetryPanel(QFrame):
-    """Renders the exact Resource Intent live view without reclassification."""
+    """Render Study assessment plus separately prepared app-category metadata."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("resourceIntentTelemetryCard")
         self._latest_resource_intent: ResourceIntentLiveView | None = None
-        self._latest_sine_live_view: object | None = None
+        self._category_session_id: int | None = None
+        self._category_observation_sequence = -1
+        self._category_observed_monotonic_ns = -1
+        self._category_signature: tuple[object, ...] | None = None
+        self._category_record = None
+        self._category_record_matched = False
+        self._category_retired_sequence = -1
+        self._category_study_binding = None
+        self._category_painted = ""
+        self._category_reason = "unclassified"
         layout = QGridLayout(self)
         layout.setContentsMargins(24, 22, 24, 22)
         layout.setHorizontalSpacing(18)
@@ -652,15 +851,17 @@ class ResourceIntentTelemetryPanel(QFrame):
         layout.addWidget(title, 0, 0, 1, 2)
         self._values: dict[str, QLabel] = {}
         rows = (
-            ("Classification", "classification"),
-            ("Confidence", "confidence"),
+            ("App category", "category"),
+            ("Study task match", "classification"),
+            ("Study alignment", "confidence"),
+            ("Match basis", "alignment_basis"),
             ("Resource", "resource"),
             ("Surface", "surface"),
             ("Evidence", "evidence"),
-            ("Off-task dwell", "dwell"),
-            ("SINE contribution", "sine"),
+            ("Clarification", "clarification"),
             ("Study idle", "idle"),
             ("Why no nudge", "reason"),
+            ("SECANT TIMER", "secant_timer"),
         )
         for row, (label, key) in enumerate(rows, start=1):
             name = QLabel(label.upper(), self)
@@ -671,79 +872,291 @@ class ResourceIntentTelemetryPanel(QFrame):
             value.setFont(make_font(12.5, 600))
             value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             value.setWordWrap(True)
+            if key == "category":
+                value.setObjectName("resourceIntentCategoryBadge")
+                value.setAccessibleName("App category unclassified")
             layout.addWidget(name, row, 0)
             layout.addWidget(value, row, 1)
             self._values[key] = value
 
+    def set_secant_projection(self, projection) -> None:
+        from SECANT.read_model import SecantProjection, RecoveryPhase
+        if projection is not None and not isinstance(projection, SecantProjection):
+            return
+        value = self._values["secant_timer"]
+        text, color = "—", ""
+        if projection is not None and not projection.terminal_reason:
+            p = projection
+            stage = int(p.stage)
+            color = {1: "#3b82f6", 2: "#f59e0b", 3: "#ef4444"}.get(stage, "")
+            # Unit/label formatting only. Never extrapolate from wall time.
+            def duration(ns):
+                return _duration(None if ns is None else ns // 1_000_000_000)
+            remaining = duration(p.escalation_remaining_ns)
+            if p.break_pause and p.break_pause.pause_id:
+                text = f"BREAK HOLD · {remaining}"
+            elif p.uncertainty_hold_id or "uncertainty" in p.frozen_reasons:
+                text = f"PAUSED · {remaining}"
+            elif p.global_hold_id or "global" in p.frozen_reasons:
+                text = f"PAUSED · {remaining}"
+            elif p.recovery.phase is RecoveryPhase.VERIFYING:
+                text = f"RETURN VERIFY {duration(p.recovery.verification_elapsed_ns)} / {duration(p.recovery.verification_target_ns)}"
+            elif p.recovery.phase is RecoveryPhase.CONFIRMING:
+                text = f"CLOSURE {duration(p.recovery.closure_elapsed_ns)} / {duration(p.recovery.closure_target_ns)}"
+            elif p.episode_id and stage == 3:
+                text = "SECANT-3 · RED / RETURN REQUIRED"
+            elif p.episode_id and stage in (1, 2):
+                text = f"SECANT-{stage} · {remaining} TO SECANT-{stage + 1}"
+            elif p.dwell_active:
+                text = f"OFF-TASK {duration(p.dwell_elapsed_ns)} / {duration(p.dwell_target_ns)}"
+        value.setText(text)
+        value.setStyleSheet(f"color: {color};" if color else "")
+
     def render(self, live: ResourceIntentLiveView | None) -> None:
         self._latest_resource_intent = live
+        self._reconcile_category()
         if live is None:
-            for value in self._values.values():
-                value.setText("—")
+            for key, value in self._values.items():
+                if key != "secant_timer":
+                    value.setText("—")
             return
-        self._values["classification"].setText(live.classification.value)
-        self._values["confidence"].setText(f"{live.confidence * 100:.0f}%")
+        self._values["classification"].setText(_study_task_match_text(live))
+        # Verdict confidence can rise as alignment falls; never label it as alignment.
+        score = live.study_alignment_percent
+        self._values["confidence"].setText(
+            f"{score:.3f}".rstrip("0").rstrip(".") + "%" if score is not None else "—"
+        )
+        self._values["alignment_basis"].setText({
+            "EXACT_TASK_TITLE": "Exact task title",
+            "WEIGHTED_KEYWORDS": "Weighted keywords",
+        }.get(live.study_alignment_basis, "Not scored"))
         self._values["resource"].setText(live.display_title or "—")
         self._values["surface"].setText(live.resource_surface.value)
         self._values["evidence"].setText(
             "CERTIFIED" if live.browser_evidence_certified else "UNAVAILABLE"
         )
-        self._render_authoritative_dwell()
-        self._values["sine"].setText(live.sine_contribution.value.upper())
+        self._render_clarification()
         self._values["idle"].setText(
             "ALLOWED" if live.study_idle_allowed else "OFF"
         )
         self._values["reason"].setText(live.no_nudge_reason_code or "—")
 
-    def render_sine(self, live: object | None) -> None:
-        """Repaint dwell from SINE's read-only timing projection when active."""
+    def reset_category_epoch(self) -> None:
+        """Drop binding; only the controller's session authority can rebind."""
+        self._category_session_id = None
+        self._category_observation_sequence = -1
+        self._category_observed_monotonic_ns = -1
+        self._category_signature = None
+        self._category_record = None
+        self._category_record_matched = False
+        self._category_retired_sequence = -1
+        self._category_study_binding = None
+        self._clear_category_badge()
 
-        self._latest_sine_live_view = live
-        self._render_authoritative_dwell()
+    def bind_category_session(self, session_id: object) -> None:
+        authorized = session_id if type(session_id) is int and session_id > 0 else None
+        if authorized != self._category_session_id:
+            self.set_secant_projection(None)
+            self.reset_category_epoch()
+            self._category_session_id = authorized
 
-    def _render_authoritative_dwell(self) -> None:
+    def bind_category_study(self, study, cosecant) -> None:
+        token = study_context_token(study.block_id, study.generation) if study and study.block_id else ""
+        active = bool(study and study.state is StudyState.ACTIVE)
+        if cosecant and cosecant.state not in {
+            CosecantState.INACTIVE, CosecantState.CONFIRMED,
+            CosecantState.CANCELLED, CosecantState.SHUTDOWN,
+        }:
+            active = False
+        binding = (token, active)
+        previous = self._category_study_binding
+        self._category_study_binding = binding
+        pending_matches = bool(
+            self._category_record and not self._category_record_matched
+            and self._category_record[0].study_context_token == token
+            and (self._category_record[1] not in {"STUDY", "STUDY_FOCUS"} or active)
+        )
+        if previous is not None and binding != previous and not pending_matches:
+            # Do not allow a pre-pause/context-change observation to reappear
+            # on resume. A newer source observation must establish eligibility.
+            self._category_retired_sequence = self._category_observation_sequence
+            self._category_record = None
+            self._clear_category_badge()
+        self._reconcile_category()
+
+    def _reconcile_category(self) -> None:
+        record = self._category_record
+        current = self._latest_resource_intent
+        if record is None or current is None:
+            if current is None and self._category_record_matched:
+                self._category_record = None
+                self._category_retired_sequence = self._category_observation_sequence
+            self._clear_category_badge()
+            return
+        resource, category, label, sequence, available = record
+        if current != resource:
+            if self._category_record_matched:
+                self._category_record = None
+                self._category_retired_sequence = self._category_observation_sequence
+            # One bounded validated record may wait for its dedicated RI signal.
+            self._category_reason = "pending_matching_resource"
+            self._clear_category_badge()
+            return
+        binding = self._category_study_binding
+        if (
+            sequence <= self._category_retired_sequence
+            or not available
+            or binding is None
+            or current.study_context_token != binding[0]
+            or (category in {"STUDY", "STUDY_FOCUS"} and not binding[1])
+        ):
+            self._category_reason = "ineligible_or_retired"
+            self._clear_category_badge()
+            return
+        self._category_record_matched = True
+        self._category_reason = "accepted"
+        self._paint_category_badge(category, label)
+
+    def render_category_payload(self, payload: object) -> None:
+        """Validate coherent transport, then reconcile either legal signal order.
+
+        RI live views have no observation IDs. Foreground independently binds
+        PID/HWND/raw process/sequence/time; the immutable source observation
+        carries the producer-checked canonical identity and token material.
+        Token recomputation proves transport consistency, not a second reader.
+        """
+        if not isinstance(payload, Mapping):
+            self._category_record = None
+            self._clear_category_badge()
+            return
+        metadata = payload.get("study_app_category")
+        if not isinstance(metadata, Mapping):
+            self._category_record = None
+            self._clear_category_badge()
+            return
+        session = metadata.get("session_id")
+        if (
+            type(session) is not int or session != self._category_session_id
+            or type(payload.get("session_id")) is not int
+            or payload.get("session_id") != session
+        ):
+            self._category_reason = "rejected_session"
+            return
+        sequence = metadata.get("observation_sequence")
+        observed_ns = metadata.get("observed_monotonic_ns")
+        if type(sequence) is not int or type(observed_ns) is not int:
+            self._category_reason = "malformed_order"
+            self._category_record = None
+            self._clear_category_badge()
+            return
+        if sequence < self._category_observation_sequence:
+            self._category_reason = "rejected_old_sequence"
+            return
+        resource = payload.get("resource_intent")
+        foreground = payload.get("foreground")
+        observation = metadata.get("source_observation")
+        category = metadata.get("category")
+        label = metadata.get("label")
+        available = metadata.get("evidence_available")
+        raw = str(getattr(foreground, "process_name", "") or "").strip().casefold().removesuffix(".exe")
+        valid = bool(
+            metadata.get("schema_version") == _CATEGORY_SCHEMA_VERSION
+            and sequence > 0 and observed_ns > 0
+            and observed_ns >= self._category_observed_monotonic_ns
+            and sequence == getattr(foreground, "sequence", None)
+            and observed_ns == getattr(foreground, "observed_monotonic_ns", None)
+            and type(metadata.get("process_id")) is int
+            and metadata["process_id"] > 0
+            and metadata["process_id"] == getattr(foreground, "process_id", None)
+            and type(metadata.get("hwnd")) is int and metadata["hwnd"] > 0
+            and metadata["hwnd"] == getattr(foreground, "hwnd", None)
+            and raw and metadata.get("process_name") == raw
+            and isinstance(resource, ResourceIntentLiveView)
+            and metadata.get("resource_key") == resource.resource_key
+            and metadata.get("study_context_token") == resource.study_context_token
+            and metadata.get("canonical_process_name") == resource.process_name
+            and isinstance(observation, ResourceObservation)
+            and observation.process_name == resource.process_name
+            and observation.sequence == sequence
+            and observation.observed_monotonic_ns == observed_ns
+            and observation.process_id == metadata["process_id"]
+            and observation.hwnd == metadata["hwnd"]
+            and observation.raw_title == getattr(foreground, "window_title", None)
+            and metadata.get("observation_token") == observation_token(observation)
+            and type(available) is bool
+            and isinstance(category, str) and isinstance(label, str)
+            and ((available and category in _CATEGORY_BADGE_LABELS
+                  and label == _CATEGORY_BADGE_LABELS[category])
+                 or (not available and category == "" and label == ""))
+        )
+        if not valid:
+            # Invalid input cannot advance either high-water mark. Retire the
+            # current accepted observation so replay cannot undo invalidation.
+            self._category_reason = "rejected_envelope_or_time"
+            self._category_retired_sequence = self._category_observation_sequence
+            self._category_record = None
+            self._clear_category_badge()
+            return
+        signature = (resource, observation, raw, observed_ns, category, label, available)
+        if sequence == self._category_observation_sequence:
+            if signature != self._category_signature:
+                self._category_retired_sequence = sequence
+                self._category_record = None
+                self._category_reason = "retired_conflict"
+                self._clear_category_badge()
+                return
+            if sequence <= self._category_retired_sequence:
+                return
+        self._category_observation_sequence = sequence
+        self._category_observed_monotonic_ns = observed_ns
+        self._category_signature = signature
+        self._category_record_matched = False
+        self._category_record = (resource, category, label, sequence, available)
+        self._reconcile_category()
+
+    def _clear_category_badge(self) -> None:
+        badge = self._values.get("category")
+        if badge is None or (not self._category_painted and badge.text() == "—"):
+            return
+        self._category_painted = ""
+        badge.setText("—")
+        badge.setAccessibleName("App category unclassified")
+        badge.setStyleSheet("")
+
+    def _paint_category_badge(self, category: str, label: str) -> None:
+        if self._category_painted == category:
+            return
+        self._category_painted = category
+        background, foreground, border = _CATEGORY_BADGE_STYLES[category]
+        badge = self._values["category"]
+        badge.setText(label)
+        badge.setAccessibleName(f"App category {category.replace('_', ' ').lower()}")
+        badge.setStyleSheet(
+            "QLabel#resourceIntentCategoryBadge {"
+            f"background-color: {background}; color: {foreground}; "
+            f"border: 1px solid {border}; border-radius: 9px; "
+            "padding: 3px 9px;"
+            "}"
+        )
+
+
+    def _render_clarification(self) -> None:
+        """Show Resource Intent's independent uncertainty clock, never SINE time."""
+
         resource = self._latest_resource_intent
-        if resource is None:
-            self._values["dwell"].setText("—")
+        if resource is None or not resource.uncertainty_active:
+            self._values["clarification"].setText("—")
             return
 
-        sine = self._latest_sine_live_view
-        if sine is not None:
-            stage = getattr(sine, "stage", 0)
-            try:
-                stage_number = int(getattr(stage, "value", stage))
-            except (TypeError, ValueError):
-                stage_number = 0
-            phase = getattr(sine, "phase", "")
-            phase_value = str(getattr(phase, "value", phase) or "").casefold()
-            protected = bool(getattr(sine, "protected_red_active", False))
-            if protected or phase_value == "protected_red":
-                self._values["dwell"].setText("RETURN REQUIRED")
-                return
-
-            target_field = {
-                1: "stage_2_delay_seconds_applied",
-                2: "stage_3_delay_seconds_applied",
-            }.get(stage_number)
-            remaining_raw = getattr(sine, "next_deadline_seconds", None)
-            target_raw = getattr(sine, target_field, None) if target_field else None
-            try:
-                target = float(target_raw)
-                remaining = max(0.0, float(remaining_raw))
-            except (TypeError, ValueError, OverflowError):
-                target = 0.0
-                remaining = 0.0
-            if target > 0.0 and remaining_raw is not None:
-                elapsed = min(target, max(0.0, target - remaining))
-                self._values["dwell"].setText(
-                    f"{_duration(elapsed)} / {_duration(target)}"
-                )
-                return
-
-        self._values["dwell"].setText(
-            f"{_duration(resource.dwell_elapsed_seconds)} / "
-            f"{_duration(resource.dwell_target_seconds)}"
+        target = max(0.0, float(resource.uncertainty_target_seconds))
+        if target <= 0.0:
+            self._values["clarification"].setText("—")
+            return
+        elapsed = min(target, max(0.0, float(resource.uncertainty_elapsed_seconds)))
+        self._values["clarification"].setText(
+            f"{_duration(elapsed)} / {_duration(target)}"
         )
+
 
 
 def _cosecant_supersedes(
@@ -809,7 +1222,7 @@ class StudyConfirmationPopup(QDialog):
     def __init__(self, owner: QWidget | None = None) -> None:
         super().__init__(owner)
         self.setObjectName("studyConfirmationPopup")
-        self.setWindowTitle("MYELIN — STUDY CONFIRMATION")
+        self.setWindowTitle(STUDY_CONFIRMATION_WINDOW_TITLE)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.setModal(False)
         self.setMinimumWidth(560)
@@ -876,9 +1289,10 @@ class StudyConfirmationPopup(QDialog):
         self.adjustSize()
         self._place_for_source_hwnd(request.source_hwnd)
         self.show()
+        # Report factual visibility before requesting foreground focus.
+        self._report_shown()
         self.raise_()
         self.activateWindow()
-        QTimer.singleShot(0, self._report_shown)
 
     def _place_for_source_hwnd(self, source_hwnd: int) -> None:
         area = _work_area_for_source_hwnd(source_hwnd)
@@ -1301,6 +1715,7 @@ class _ContinuityPopupDispatcher(QObject):
     #: request.  Presentation coordinators (e.g. the common theme's Green
     #: claim) use this instead of guessing from a break timer or state text.
     popup_presented = pyqtSignal(object)
+    popup_withdrawn = pyqtSignal(object)
 
     def __init__(self, app: QApplication) -> None:
         super().__init__(app)
@@ -1322,6 +1737,10 @@ class _ContinuityPopupDispatcher(QObject):
         if isinstance(snapshot, CosecantSnapshot):
             if self._popup.present_snapshot(snapshot):
                 self.popup_presented.emit(snapshot)
+            elif (self._popup._snapshot is snapshot and not snapshot.popup_required
+                    and not self._popup.isVisible()):
+                import time
+                self.popup_withdrawn.emit((snapshot, time.monotonic_ns()))
 
     @pyqtSlot()
     def _reset(self) -> None:
@@ -1332,7 +1751,7 @@ _DISPATCHER_LOCK = threading.RLock()
 _DISPATCHER: _ContinuityPopupDispatcher | None = None
 
 
-def install_popup_dispatcher(app: QApplication) -> None:
+def install_popup_dispatcher(app: QApplication) -> _ContinuityPopupDispatcher:
     """Install the one COSECANT popup dispatcher on the Qt main thread."""
 
     if not isinstance(app, QApplication):
@@ -1341,6 +1760,7 @@ def install_popup_dispatcher(app: QApplication) -> None:
     with _DISPATCHER_LOCK:
         if _DISPATCHER is None:
             _DISPATCHER = _ContinuityPopupDispatcher(app)
+        return _DISPATCHER
 
 
 def request_continuity_popup(snapshot: CosecantSnapshot) -> bool:
@@ -2854,14 +3274,38 @@ class StudyView(QWidget):
         return menu
 
     def _connect_engine_signals(self) -> None:
+        break_signal = getattr(self._engine, "secant_break_selection_requested", None)
+        if break_signal is not None:
+            break_signal.connect(self._select_secant_break)
+        secant_signal = getattr(self._engine, "secant_projection_changed", None)
+        if secant_signal is not None:
+            secant_signal.connect(self.timer_card.set_secant_projection)
+            secant_signal.connect(self.resource_intent.set_secant_projection)
+        session_signal = getattr(self._engine, "current_session_id_changed", None)
+        if session_signal is not None:
+            session_signal.connect(self.resource_intent.bind_category_session)
+        session_reader = getattr(self._engine, "current_session_id", None)
+        if callable(session_reader):
+            self.resource_intent.bind_category_session(session_reader())
         resource_signal = getattr(
             self._engine, "resource_intent_live_status_changed", None
         )
         if resource_signal is not None:
             resource_signal.connect(self.set_resource_intent)
-        sine_signal = getattr(self._engine, "sine_watch_status_changed", None)
-        if sine_signal is not None:
-            sine_signal.connect(self.resource_intent.render_sine)
+        control_signal = getattr(self._engine, "control_view_changed", None)
+        if control_signal is not None:
+            control_signal.connect(self.resource_intent.render_category_payload)
+        prepare_signal = getattr(self._engine, "study_prepare_result", None)
+        if prepare_signal is not None:
+            prepare_signal.connect(self.timer_card.show_prepare_result)
+        transition_signal = getattr(self._engine, "study_start_transition_changed", None)
+        if transition_signal is not None:
+            transition_signal.connect(self.timer_card.show_start_transition)
+
+    def _select_secant_break(self, request: object) -> None:
+        # Reuse the existing Study duration control and exact block command.
+        # _emit_break retains the mandatory Phase-3B Study lock.
+        self._emit_break(self.timer_card.break_minutes.value() * 60)
 
     def _connect_dispatcher(self) -> None:
         with _DISPATCHER_LOCK:
@@ -2915,7 +3359,9 @@ class StudyView(QWidget):
         """
 
         self._state = StudyViewState(None, None, None)
-        self.resource_intent.render_sine(None)
+        self.timer_card._start_transition = {}
+        self.timer_card.show_prepare_result({})
+        self.resource_intent.reset_category_epoch()
         self._render()
         reset_continuity_presentation()
 
@@ -2963,6 +3409,7 @@ class StudyView(QWidget):
     def _render(self) -> None:
         self.timer_card.render(self._state.study, self._state.cosecant)
         self.telemetry.render(self._state.study, self._state.cosecant)
+        self.resource_intent.bind_category_study(self._state.study, self._state.cosecant)
         self.resource_intent.render(self._state.resource_intent)
         # The pill reads the published Study state only -- never a timer
         # value, never a button's enabled-ness, never COSECANT.

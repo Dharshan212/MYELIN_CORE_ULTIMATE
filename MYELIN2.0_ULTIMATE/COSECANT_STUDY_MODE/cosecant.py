@@ -32,7 +32,7 @@ import secrets
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Final, Protocol
@@ -205,9 +205,26 @@ class CosecantReturnTarget:
     platform_key: str
     resource_token: str
     observed_monotonic_ns: int
+    identity_kind: str = "BROWSER"
+    resource_key: str = ""
+    process_name: str = ""
+    process_id: int = 0
+    hwnd: int = 0
+    normalized_title: str = ""
+    identity_version: int = 1
+    display_metadata: object = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
-        for name in ("study_context_token", "platform_key", "resource_token"):
+        from SECANT.read_model import validate_display_metadata, ResourceDisplayMetadata
+        if self.display_metadata is not None and not isinstance(self.display_metadata, ResourceDisplayMetadata):
+            raise ValueError("Immutable return-target display metadata required")
+        validate_display_metadata(self.display_metadata, observed_ns=self.observed_monotonic_ns)
+        if self.identity_kind not in {"BROWSER", "DESKTOP"} or self.identity_version != 1:
+            raise ValueError("Typed V1 return identity required")
+        if self.identity_kind == "DESKTOP" and not (self.resource_key and self.process_name and self.process_id > 0 and self.hwnd > 0):
+            raise ValueError("Existing exact desktop window identity required")
+        names = ("study_context_token", "platform_key", "resource_token") if self.identity_kind == "BROWSER" else ("study_context_token",)
+        for name in names:
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(
@@ -217,6 +234,27 @@ class CosecantReturnTarget:
             raise TypeError("observed_monotonic_ns must be an integer")
         if self.observed_monotonic_ns < 0:
             raise ValueError("observed_monotonic_ns cannot be negative")
+
+
+    def matches_resource(self, resource) -> bool:
+        if getattr(resource, "kind", "") != self.identity_kind or getattr(resource, "version", 0) != self.identity_version:
+            return False
+        if self.identity_kind == "BROWSER":
+            return (resource.platform_key == self.platform_key and resource.resource_token == self.resource_token)
+        return (resource.key == self.resource_key and resource.process_name == self.process_name
+            and resource.process_id == self.process_id and resource.hwnd == self.hwnd
+            and resource.normalized_title == self.normalized_title)
+
+
+@dataclass(frozen=True, slots=True)
+class CosecantReservation:
+    pause_id: str
+    study_block_id: str
+    study_generation: int
+    study_context_token: str
+    selected_break_seconds: int
+    intended_return_target: CosecantReturnTarget
+    secant_stage: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,6 +301,38 @@ class StudyReturnObservation:
         )
 
 
+def _validate_cosecant_return_target(*, kind, extension_version, target,
+        study_block_id, study_generation, effective_monotonic_ns):
+    """Validate only the new durable extension; never resolve or infer a target."""
+    if extension_version is None:
+        if target is not None or study_generation is not None:
+            raise ValueError("Return target requires its payload extension version")
+        return  # Historical payload, not permission to create a new targetless start.
+    if type(extension_version) is not int or extension_version != 1:
+        raise ValueError("Unsupported return-target payload extension")
+    if kind is not CosecantFactKind.BREAK_STARTED:
+        if target is not None or study_generation is not None:
+            raise ValueError("Intended return target belongs only to BREAK_STARTED")
+        return
+    if type(target) is not CosecantReturnTarget:
+        raise TypeError("BREAK_STARTED requires its frozen exact return target")
+    if type(study_block_id) is not str or not study_block_id.strip():
+        raise ValueError("Return target requires its owning Study block")
+    if type(study_generation) is not int or study_generation <= 0:
+        raise ValueError("Return target requires its owning Study generation")
+    for name in ("study_context_token", "platform_key", "resource_token", "identity_kind",
+            "resource_key", "process_name", "normalized_title"):
+        if type(getattr(target, name)) is not str:
+            raise TypeError("Return target identity fields must retain their exact string types")
+    for name in ("observed_monotonic_ns", "process_id", "hwnd", "identity_version"):
+        if type(getattr(target, name)) is not int or getattr(target, name) < 0:
+            raise TypeError("Return target identity fields must retain their exact integer types")
+    target.__post_init__()  # The existing browser/desktop identity contract remains authority.
+    if (type(effective_monotonic_ns) is not int
+            or target.observed_monotonic_ns > effective_monotonic_ns):
+        raise ValueError("Return target observation cannot follow break admission")
+
+
 @dataclass(frozen=True, slots=True)
 class CosecantFact:
     """One immutable COSECANT fact for telemetry, popup routing or storage."""
@@ -279,6 +349,28 @@ class CosecantFact:
     message: str
     evidence_token: str = ""
     schema_version: str = COSECANT_SCHEMA_VERSION
+    selected_break_seconds: int | None = None
+    selected_break_extension_version: int | None = 1
+    return_target_extension_version: int | None = 1
+    return_target: CosecantReturnTarget | None = None
+    return_target_study_generation: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.selected_break_extension_version is not None:
+            if type(self.selected_break_extension_version) is not int or self.selected_break_extension_version != 1:
+                raise ValueError("Unsupported selected-break payload extension")
+            if self.kind is CosecantFactKind.BREAK_STARTED:
+                if type(self.selected_break_seconds) is not int:
+                    raise TypeError("BREAK_STARTED requires integer selected_break_seconds")
+                if not MINIMUM_BREAK_SECONDS <= self.selected_break_seconds <= MAXIMUM_BREAK_SECONDS:
+                    raise ValueError("Selected break allowance must be between 60 seconds and 24 hours")
+            elif self.selected_break_seconds is not None:
+                raise ValueError("Selected allowance belongs only to BREAK_STARTED")
+        elif self.selected_break_seconds is not None:
+            raise ValueError("Selected allowance requires its payload extension version")
+        _validate_cosecant_return_target(kind=self.kind, extension_version=self.return_target_extension_version,
+            target=self.return_target, study_block_id=self.study_block_id,
+            study_generation=self.return_target_study_generation, effective_monotonic_ns=self.effective_monotonic_ns)
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,6 +456,9 @@ class CosecantRuntime:
         )
         self._lock = threading.RLock()
 
+        self._reservation: CosecantReservation | None = None
+        self._committed_pause_id = ""
+        self._cleanup_context_token = ""
         self._state = CosecantState.INACTIVE
         self._generation = 0
         self._fact_sequence = 0
@@ -407,12 +502,92 @@ class CosecantRuntime:
     # Public commands.  Presentation code receives facts; it owns no state.
     # ------------------------------------------------------------------
 
+    def reserve_break(self, *, pause_id: str, study: StudySnapshot, selected_break_seconds: int,
+                      intended_return_target: CosecantReturnTarget, secant_stage: int) -> CosecantReservation | None:
+        """Approve a sibling transaction without starting a break or publishing BREAK."""
+        with self._lock:
+            if (not pause_id or not isinstance(study, StudySnapshot)
+                    or study.state is not StudyState.ACTIVE or secant_stage not in {0, 1}
+                    or self._state in _ACTIVE_STATES or self._state is CosecantState.SHUTDOWN
+                    or self._cleanup_context_token or study.global_hold_id
+                    or not isinstance(intended_return_target, CosecantReturnTarget)
+                    or intended_return_target.study_context_token != study.context_token
+                    or type(selected_break_seconds) is not int
+                    or not MINIMUM_BREAK_SECONDS <= selected_break_seconds <= MAXIMUM_BREAK_SECONDS):
+                return None
+            resources = tuple(study.resources)
+            if (not any(getattr(f, "role", "") == "PRIMARY" for f in resources)
+                    or not any(intended_return_target.matches_resource(f.resource) for f in resources)):
+                return None
+            now = self._read_monotonic()
+            if not study.active_epoch_monotonic_ns <= intended_return_target.observed_monotonic_ns <= now:
+                return None
+            proposed = CosecantReservation(pause_id, study.block_id, study.generation, study.context_token,
+                selected_break_seconds, intended_return_target, secant_stage)
+            if self._reservation is not None:
+                return self._reservation if self._reservation == proposed else None
+            self._reservation = proposed
+            return proposed
+
+    def commit_reserved_break(self, *, pause_id: str, study: StudySnapshot) -> CosecantResult:
+        with self._lock:
+            if pause_id and pause_id == self._committed_pause_id:
+                return self._accept("COSECANT reservation already committed", ())
+            reservation = self._reservation
+            if (reservation is None or reservation.pause_id != pause_id
+                    or study.block_id != reservation.study_block_id or study.generation != reservation.study_generation
+                    or study.context_token != reservation.study_context_token or study.state is not StudyState.PAUSED):
+                return self._reject("Exact reserved PAUSED Study snapshot required")
+            result = self.start_break(study=study, selected_break_seconds=reservation.selected_break_seconds,
+                intended_return_target=reservation.intended_return_target, reservation_id=pause_id)
+            if result.accepted:
+                self._committed_pause_id = pause_id
+                self._reservation = None
+            return result
+
+    def abort_reservation(self, pause_id: str) -> bool:
+        with self._lock:
+            if (not pause_id or self._state in _ACTIVE_STATES or pause_id == self._committed_pause_id
+                    or self._reservation is None or self._reservation.pause_id != pause_id):
+                return False
+            if not self.retry_cleanup():
+                return False
+            self._reservation = None
+            return True
+
+    def retry_cleanup(self) -> bool:
+        """Positive retirement proof is separate from a terminal physiology state."""
+        with self._lock:
+            if self._state in _ACTIVE_STATES:
+                return False
+            token = self._cleanup_context_token
+            if not token:
+                return True
+            try:
+                retired = bool(self._context_authority.retire_study_context(expected_context_token=token))
+                proof = getattr(self._context_authority, "context_retirement_proven", None)
+                retired = retired or bool(proof and proof(token))
+            except Exception:
+                return False
+            if retired:
+                self._cleanup_context_token = ""
+                self._context_delivery = ContextDelivery.RETIRED
+                self._snapshot = self._make_snapshot(now_ns=self._read_monotonic())
+            return retired
+
+    def transaction_clear(self, pause_id: str) -> bool:
+        with self._lock:
+            return bool(pause_id and pause_id == self._committed_pause_id
+                and self._state in {CosecantState.CONFIRMED, CosecantState.CANCELLED, CosecantState.SHUTDOWN}
+                and self.retry_cleanup() and self._context_delivery is ContextDelivery.RETIRED)
+
     def start_break(
         self,
         *,
         study: StudySnapshot,
         selected_break_seconds: int,
         intended_return_target: CosecantReturnTarget,
+        reservation_id: str = "",
     ) -> CosecantResult:
         """Start an approved break from one exact paused Study snapshot.
 
@@ -437,6 +612,13 @@ class CosecantRuntime:
             )
 
         with self._lock:
+            if (not reservation_id or self._reservation is None
+                    or reservation_id != self._reservation.pause_id
+                    or selected_break_seconds != self._reservation.selected_break_seconds
+                    or intended_return_target != self._reservation.intended_return_target
+                    or study.block_id != self._reservation.study_block_id
+                    or study.generation != self._reservation.study_generation):
+                return self._reject("An approved COSECANT reservation is required")
             if self._state in _ACTIVE_STATES:
                 return self._reject("Another COSECANT break is already active")
             if self._state is CosecantState.SHUTDOWN:
@@ -737,9 +919,11 @@ class CosecantRuntime:
             self._snapshot = self._make_snapshot(now_ns=now_ns)
             return self._accept(self._last_action, tuple(facts))
 
-    def cancel_for_session_end(self) -> CosecantResult:
+    def cancel_for_session_end(self, *, reason: str = "study_complete") -> CosecantResult:
         """Cancel only when the owning Study/lifecycle authority ends."""
 
+        if reason not in {"study_complete", "emergency", "session_end"}:
+            raise ValueError("Factual Study termination reason required")
         with self._lock:
             if self._state not in _ACTIVE_STATES:
                 return self._reject("There is no active break to cancel")
@@ -751,7 +935,7 @@ class CosecantRuntime:
             self._clear_confirmation()
             self._acknowledged_reminder = None
             self._retire_break_context()
-            self._last_action = "Break cancelled because the Study session ended"
+            self._last_action = "Break cancelled: " + reason
             fact = self._new_fact(
                 CosecantFactKind.BREAK_CANCELLED,
                 from_state=previous,
@@ -967,6 +1151,12 @@ class CosecantRuntime:
             occurred_wall_time_utc=_wall_text(now_wall),
             message=message,
             evidence_token=evidence_token,
+            selected_break_seconds=(self._selected_break_seconds
+                if kind is CosecantFactKind.BREAK_STARTED else None),
+            return_target=(self._intended_return_target
+                if kind is CosecantFactKind.BREAK_STARTED else None),
+            return_target_study_generation=(self._study_generation
+                if kind is CosecantFactKind.BREAK_STARTED else None),
         )
 
     def _build_break_context(self, now_ns: int) -> StudyContext:
@@ -1018,8 +1208,10 @@ class CosecantRuntime:
         except Exception:
             retired = False
         if retired or self._context_delivery is ContextDelivery.RETIRED:
+            self._cleanup_context_token = ""
             self._context_delivery = ContextDelivery.RETIRED
             return True
+        self._cleanup_context_token = self._study_context_token
         self._context_delivery = ContextDelivery.DEGRADED
         return False
 

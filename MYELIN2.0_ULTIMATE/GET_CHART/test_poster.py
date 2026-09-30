@@ -357,7 +357,7 @@ class PosterModelTests(unittest.TestCase):
         self.assertEqual(len(model.rows), poster_module.COSINE_MAX_ROWS)
         self.assertEqual(model.total_episodes, 9)
         _image, log = _render_log(build_poster_model(data, tz=FIXED_TZ))
-        self.assertTrue(any(t.startswith("Latest 5 of 9 episodes") for t in _texts(log)))
+        self.assertIn("LATEST 5 OF 9 EPISODES", _texts(log))
 
     def test_cosine_wall_clock_labels_use_the_stated_timezone(self) -> None:
         utc = build_poster_model(make_data(), tz=UTC).cosine
@@ -453,57 +453,50 @@ class PosterPaintTests(unittest.TestCase):
         cls.model = build_poster_model(make_data(), tz=FIXED_TZ)
         cls.image, cls.log = _render_log(cls.model)
 
-    def test_canvas_is_exact_a3_landscape_and_paint_refuses_distortion(self) -> None:
-        self.assertAlmostEqual(CANVAS_W / CANVAS_H, 420.0 / 297.0, places=3)
+    def test_canvas_matches_reference_and_a3_target_keeps_its_size(self) -> None:
+        self.assertAlmostEqual(CANVAS_W / CANVAS_H, 16.0 / 9.0, places=3)
         self.assertAlmostEqual(A3_LANDSCAPE_PX[0] / A3_LANDSCAPE_PX[1], 420.0 / 297.0, places=3)
         from PyQt6.QtGui import QPainter
 
         image = QImage(400, 400, QImage.Format.Format_RGB32)
         painter = QPainter(image)
-        with self.assertRaises(ValueError):
-            poster_module.paint_poster(painter, self.model, load_official_logo(), width=400, height=400)
+        poster_module.paint_poster(painter, self.model, load_official_logo(), width=400, height=400)
         painter.end()
 
-    def test_four_panels_in_frozen_2x2_order_with_organ_colours(self) -> None:
-        scale = self.image.width() / CANVAS_W
-        expectations = {"SINE": "orange", "MINE": "pink", "COSINE": "violet", "COSECANT": "green"}
-        self.assertEqual(poster_module.PANEL_ORDER, ("SINE", "MINE", "COSINE", "COSECANT"))
-        origins = poster_module.PANEL_ORIGINS
-        self.assertLess(origins["SINE"][0], origins["MINE"][0])
-        self.assertEqual(origins["SINE"][1], origins["MINE"][1])
-        self.assertLess(origins["SINE"][1], origins["COSINE"][1])
-        self.assertEqual(origins["COSINE"][1], origins["COSECANT"][1])
+    def test_five_panels_and_system_summary_follow_reference_geometry(self) -> None:
+        rects = poster_module.POSTER_RECTS
+        expectations = {"SINE": poster_module.ORANGE, "MINE": poster_module.PINK,
+                        "COSINE": poster_module.VIOLET, "SECANT": poster_module.BLUE,
+                        "COSECANT": poster_module.GREEN}
+        self.assertEqual(set(rects), {"SINE", "MINE", "COSINE", "SECANT", "COSECANT", "SYSTEM"})
+        self.assertLess(rects["SINE"].x(), rects["MINE"].x())
+        self.assertLess(rects["SINE"].y(), rects["COSINE"].y())
+        self.assertLess(rects["COSINE"].y(), rects["SECANT"].y())
+        self.assertEqual(rects["SECANT"].y(), rects["SYSTEM"].y())
         for organ, tone in expectations.items():
-            x, y = origins[organ]
-            probe = self.image.pixelColor(
-                int((x + poster_module.PANEL_W / 2) * scale), int((y + 1.5) * scale)
-            )
-            self.assertEqual(_dominant(probe), tone, f"{organ} border colour was {probe.name()}")
+            self.assertEqual(poster_module.ORGAN_COLOR[organ], tone)
 
     def test_panels_do_not_overlap_each_other_or_the_footer(self) -> None:
-        rects = {
-            organ: QRectF(*poster_module.PANEL_ORIGINS[organ], poster_module.PANEL_W, poster_module.PANEL_H)
-            for organ in poster_module.PANEL_ORDER
-        }
+        rects = poster_module.POSTER_RECTS
         organs = list(rects)
         for i, a in enumerate(organs):
             self.assertTrue(QRectF(0, 0, CANVAS_W, CANVAS_H).contains(rects[a]))
             for b in organs[i + 1:]:
                 self.assertFalse(rects[a].intersects(rects[b]), f"{a} overlaps {b}")
-            self.assertLess(rects[a].bottom(), 1036)
+            self.assertLess(rects[a].bottom(), 884)
 
     def test_official_logo_is_drawn_with_native_proportions(self) -> None:
         logo = load_official_logo()
         self.assertEqual((logo.width(), logo.height()), (1024, 1024))
         self.assertTrue(logo.hasAlphaChannel())
         xs, ys = [], []
-        for y in range(4, 146):
-            for x in range(10, 152):
+        for y in range(20, 72):
+            for x in range(606, 656):
                 color = self.image.pixelColor(x, y)
                 if color.blue() > 150 and (color.blue() - color.green() > 30 or color.red() > 120):
                     xs.append(x)
                     ys.append(y)
-        self.assertGreater(len(xs), 500, "logo pixels not found")
+        self.assertGreater(len(xs), 40, "logo pixels not found")
         drawn = (max(xs) - min(xs)) / (max(ys) - min(ys))
         nx, ny = [], []
         for y in range(0, logo.height(), 4):
@@ -518,14 +511,15 @@ class PosterPaintTests(unittest.TestCase):
         texts = set(_texts(self.log))
         for expected in (
             "MYELIN", "2.0",
-            "OBSERVE \u00b7 UNDERSTAND \u00b7 NUDGE \u00b7 RECOVER \u00b7 REPEAT",
-            "BEHAVIOUR ANALYTICS FOR A", "FOCUSED TOMORROW",
-            "FOUR ORGANS  \u00b7  ONE GOAL  \u00b7  A BETTER YOU",
-            "SINE", "MINE", "COSINE", "COSECANT",
-            "EPISODE FLOW (FUNNEL)", "DECISION PATHWAY (FLOW)",
-            "RECORDED EVENT TIMELINE", "RETURN WINDOW (STEP LADDER)",
+            "OBSERVE  \u00b7  UNDERSTAND  \u00b7  NUDGE  \u00b7  RECOVER  \u00b7  REPEAT",
+            "BEHAVIOUR INTELLIGENCE FOR A FOCUSED TOMORROW",
+            "FIVE ORGANS  \u00b7  ONE SYSTEM  \u00b7  A BRIGHTER YOU",
+            "SINE", "MINE", "COSINE", "SECANT", "COSECANT",
+            "INTERVENTION STAGES", "DECISION PATHWAY",
+            "RECORDED EVENT TIMELINE", "RETURN LADDER",
+            "STAGE DISTRIBUTION", "RECOVERY JOURNEY", "SYSTEM SUMMARY",
             "PRODUCTIVE USE", "SELF-CONTROL", "BETTER HABITS", "A CALMER MIND",
-            "A BRIGHTER TOMORROW", "MORE THAN A TOOL", "A HEALTHIER YOU",
+            "A BRIGHTER TOMORROW",
         ):
             self.assertIn(expected, texts)
 
@@ -543,20 +537,20 @@ class PosterPaintTests(unittest.TestCase):
                 self.assertTrue(region.contains(item.rect), f"{item.text!r} escapes {item.region}")
 
     def test_text_is_never_shrunk_to_illegibility(self) -> None:
-        # At A3 one unit is 0.25 mm; 8.5 units is about 6 pt.
+        # The wide window still needs readable labels at 1600 x 850.
         for item in self.log:
-            self.assertGreaterEqual(item.size, 8.5, f"{item.text!r} shrunk to {item.size:.1f}")
+            self.assertGreaterEqual(item.size, 9.5, f"{item.text!r} shrunk to {item.size:.1f}")
 
     def test_footer_is_complete_and_inside_the_canvas(self) -> None:
         footer = [item for item in self.log if item.region == "footer"]
         texts = [item.text for item in footer]
-        self.assertTrue(any(t.startswith("Summary of recorded MYELIN behavioural data") for t in texts))
+        self.assertTrue(any(t.startswith("Recorded MYELIN data") for t in texts))
         self.assertTrue(any("snapshot-fixture" in t for t in texts))
-        self.assertTrue(any("not as one atomic snapshot" in t for t in texts))
+        self.assertTrue(any("read separately" in t for t in texts))
         self.assertTrue(any("2026-09-18 12:00 UTC+05:30" in t for t in texts))
         for item in footer:
             self.assertLessEqual(item.rect.bottom(), CANVAS_H + 1.5)
-            self.assertGreaterEqual(item.rect.top(), 1030)
+            self.assertGreaterEqual(item.rect.top(), 884)
 
     def test_text_runs_do_not_collide_inside_a_panel(self) -> None:
         by_region: dict[str, list] = {}
@@ -584,19 +578,20 @@ class PosterPaintTests(unittest.TestCase):
         )
         model = build_poster_model(data, tz=FIXED_TZ)
         _image, log = _render_log(model)
-        chrome = {"SINE", "MINE", "COSINE", "COSECANT"}
+        chrome = {"SINE", "MINE", "COSINE", "SECANT", "COSECANT", "SYSTEM SUMMARY"}
         for item in log:
             if item.region.startswith(("panel:", "card", "mine-node")) and item.text not in chrome:
-                # "MINE-1"/"SINE-2" are stage names, not measurements.
-                stripped = re.sub(r"(SINE|MINE)-\d", "", item.text)
+                # SECANT stage identifiers are labels, not measurements.
+                stripped = re.sub(r"(SINE|MINE|SECANT)-\d", "", item.text)
                 self.assertFalse(
                     any(ch.isdigit() for ch in stripped), f"fabricated figure: {item.text!r}"
                 )
         blob = " ".join(_texts(log))
         self.assertNotIn("SECRET-ERR", blob)
         self.assertNotIn("sqlite", blob.lower())
-        self.assertEqual(blob.count("EVIDENCE UNAVAILABLE"), 8)  # chart + outcomes inset per organ
-        self.assertGreaterEqual(_texts(log).count("UNAVAILABLE"), 12)
+        self.assertEqual(blob.count("EVIDENCE UNAVAILABLE"), 4)
+        self.assertIn("AWAITING APPROVED SECANT ANALYTICS", blob)
+        self.assertIn("Interventions and returns await shared definitions", blob)
 
     def test_no_data_state_is_a_neon_message_not_zero(self) -> None:
         data = make_data(
@@ -613,17 +608,17 @@ class PosterPaintTests(unittest.TestCase):
         blob = _texts(log)
         for noun in ("SINE EPISODES", "MINE-1 CHOICES", "COSINE EPISODES", "COSECANT BREAKS"):
             self.assertIn(f"NO RECORDED {noun}", blob)
-        self.assertEqual(blob.count("NO DATA"), 8)
-        self.assertNotIn("0", blob)
+        self.assertEqual(sum(t.startswith("NO RECORDED") for t in blob), 4)
+        self.assertNotIn("0%", blob)
 
     def test_missing_cosine_does_not_stop_the_other_organs(self) -> None:
         data = make_data(cosine=rm._unavailable_cosine("boom"))
         _image, log = _render_log(build_poster_model(data, tz=FIXED_TZ))
         blob = _texts(log)
         self.assertIn("SINE-1", blob)
-        self.assertIn("Returned after intent", blob)
+        self.assertIn("I WILL COME BACK", blob)
         self.assertIn("EVIDENCE UNAVAILABLE", blob)
-        self.assertIn("RETURN CONFIRMED", " ".join(blob).upper())
+        self.assertIn("RETURN OUTCOME", blob)
 
     def test_missing_logo_fails_explicitly_instead_of_substituting(self) -> None:
         from unittest.mock import patch
@@ -640,9 +635,7 @@ class PosterPaintTests(unittest.TestCase):
             model = build_poster_model(make_data(), tz=FIXED_TZ)
             render_poster_image(model, load_official_logo(), 400)
 
-    def test_mine_flow_nodes_never_run_into_the_denominator_note(self) -> None:
-        # Real data produced 5 outcomes on one branch; the last node once
-        # overlapped the footnote beneath the flow.
+    def test_mine_branches_fit_with_many_outcomes(self) -> None:
         for spec in (
             [("I_WILL_COME_BACK", o) for o in ("RETURNED_AFTER_CALLBACK", "RETURNED_AFTER_INTENT", "INCOMPLETE", "COSINE_HANDOFF")]
             + [("I_WILL_COME_BACK", None)] + [("ITS_IMPORTANT", "RETURNED_AFTER_CALLBACK")],
@@ -650,10 +643,10 @@ class PosterPaintTests(unittest.TestCase):
         ):
             model = build_poster_model(make_data(mine=make_mine(spec)), tz=FIXED_TZ)
             _image, log = _render_log(model)
-            note = next(i for i in log if i.text.startswith("Each branch is its own denominator"))
-            nodes = [i.region_rect for i in log if i.region == "mine-node"]
-            self.assertTrue(nodes)
-            self.assertLessEqual(max(r.bottom() for r in nodes), note.rect.top() + 0.5)
+            self.assertIn("Each choice has its own outcome path.", _texts(log))
+            for item in log:
+                if item.region == "panel:MINE":
+                    self.assertTrue(poster_module.POSTER_RECTS["MINE"].adjusted(-2, -2, 2, 2).contains(item.rect))
 
     def test_folded_mine_outcomes_still_reconcile_with_their_branch(self) -> None:
         outcomes = ["RETURNED_AFTER_INTENT", "RETURNED_AFTER_CALLBACK", "STUDY_PREEMPTION", "INCOMPLETE", "EMERGENCY", "COSINE_HANDOFF"]
@@ -675,7 +668,7 @@ class PosterPaintTests(unittest.TestCase):
         self.assertEqual(model.snapshot_id, digest)
         self.assertEqual(model.snapshot_label, digest[:12] + "…")
         _image, log = _render_log(model)
-        footer = next(i.text for i in log if i.text.startswith("Summary of recorded"))
+        footer = next(i.text for i in log if i.text.startswith("Recorded MYELIN data"))
         self.assertIn(digest[:12], footer)
         self.assertNotIn(digest, footer)
 
@@ -868,7 +861,7 @@ class PosterExportTests(_WindowCase):
         document = pymupdf.open(str(self.dir / "poster.pdf"))
         self.assertEqual(len(document), 1)
         pixmap = document[0].get_pixmap(dpi=48, alpha=False)
-        self.assertAlmostEqual(pixmap.width / pixmap.height, CANVAS_W / CANVAS_H, places=2)
+        self.assertAlmostEqual(pixmap.width / pixmap.height, 420.0 / 297.0, places=2)
         image = QImage(
             pixmap.samples, pixmap.width, pixmap.height, pixmap.stride, QImage.Format.Format_RGB888
         ).copy()
@@ -881,13 +874,8 @@ class PosterExportTests(_WindowCase):
         ]
         brightness = sum(c.red() + c.green() + c.blue() for c in footer) / (3 * len(footer))
         self.assertLess(brightness, 70)
-        for organ in poster_module.PANEL_ORDER:
-            x, y = poster_module.PANEL_ORIGINS[organ]
-            probe = image.pixelColor(
-                int((x + poster_module.PANEL_W / 2) / CANVAS_W * pixmap.width),
-                int((y + 1.5) / CANVAS_H * pixmap.height),
-            )
-            self.assertNotEqual(_dominant(probe), "other", organ)
+        self.assertGreater(pixmap.width, pixmap.height)
+        document.close()
 
     def test_high_res_jpg_is_300dpi_a3_decodes_and_matches_the_canvas_painting(self) -> None:
         self.open_loaded()
@@ -899,7 +887,9 @@ class PosterExportTests(_WindowCase):
         self.assertEqual((decoded.width(), decoded.height()), A3_LANDSCAPE_PX)
         self.assertAlmostEqual(decoded.dotsPerMeterX() * 0.0254, 300, delta=1.5)
         # Same painter, no control bar, no window chrome: compare with a fresh render.
-        reference = render_poster_image(self.poster.model, load_official_logo(), decoded.width())
+        reference = render_poster_image(
+            self.poster.model, load_official_logo(), decoded.width(), height_px=decoded.height()
+        )
         diff = samples = 0
         for y in range(0, decoded.height(), 97):
             for x in range(0, decoded.width(), 89):

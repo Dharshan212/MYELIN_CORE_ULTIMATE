@@ -397,6 +397,52 @@ class CosecantChartProjection:
 
 
 @dataclass(frozen=True, slots=True)
+class SecantChartProjection:
+    status: str
+    highest_stage_counts: tuple[int, int, int] | None
+    founded_episodes: int | None
+    return_attempts: int | None
+    verified_events: int | None
+    interrupted_recoveries: int | None
+    recovered_episodes: int | None
+    incomplete_episodes: int | None
+    status_message: str
+
+    def __post_init__(self) -> None:
+        if not _valid_status(self.status):
+            raise ValueError("SECANT poster status is invalid")
+        values = (self.founded_episodes, self.return_attempts, self.verified_events,
+                  self.interrupted_recoveries, self.recovered_episodes, self.incomplete_episodes)
+        if self.status == UNAVAILABLE:
+            if self.highest_stage_counts is not None or any(value is not None for value in values):
+                raise ValueError("Unavailable SECANT cannot carry values")
+            return
+        if self.highest_stage_counts is None or any(type(v) is not int or v < 0 for v in self.highest_stage_counts + values):
+            raise ValueError("SECANT counts must be non-negative integers")
+        if sum(self.highest_stage_counts) != self.founded_episodes:
+            raise ValueError("SECANT highest-stage counts must be exclusive")
+        if self.status == NO_DATA and self.founded_episodes != 0:
+            raise ValueError("SECANT no-data population must be zero")
+
+
+def secant_chart_from_family(family) -> SecantChartProjection:
+    if family is None or family.errors.get("secant"):
+        return SecantChartProjection(UNAVAILABLE, None, None, None, None, None, None, None,
+                                     "SECANT evidence unavailable")
+    episodes = family.secant
+    stages = tuple(sum(row["highest_stage"] == stage for row in episodes) for stage in (1, 2, 3))
+    events = tuple(event for episode in episodes for event in episode["events"])
+    count = lambda name: sum(event["event_name"] == name for event in events)
+    excluded = len(getattr(family, "secant_excluded", ()))
+    message = (f"Validated SECANT episodes; {excluded} recorder-gap episode(s) excluded"
+               if excluded else "All recorded SECANT episodes")
+    return SecantChartProjection(AVAILABLE if episodes else NO_DATA, stages, len(episodes),
+        count("SECANT_RETURN_STARTED"), count("SECANT_RETURN_VERIFIED"),
+        count("SECANT_RECOVERY_INTERRUPTED"), sum(row["recovered"] for row in episodes),
+        sum(not row["closed"] for row in episodes), message)
+
+
+@dataclass(frozen=True, slots=True)
 class PosterChartData:
     lifetime_summary: LifetimeMetricHubProjection
     sine: SineChartProjection
@@ -404,6 +450,8 @@ class PosterChartData:
     cosine: CosineChartProjection
     cosecant: CosecantChartProjection
     generated_at_utc: str
+    secant: SecantChartProjection | None = None
+    study_blocks_started: int | None = None
 
     @property
     def snapshot_id(self) -> str:
@@ -952,6 +1000,12 @@ def validate_poster_chart_data(projection: object) -> PosterChartData:
     )
     if any(not isinstance(value, expected) for value, expected in expected_types):
         raise TypeError("poster data requires all four immutable chart projections")
+    if projection.secant is not None and not isinstance(projection.secant, SecantChartProjection):
+        raise TypeError("poster SECANT data requires its immutable projection")
+    if projection.study_blocks_started is not None and (
+        type(projection.study_blocks_started) is not int or projection.study_blocks_started < 0
+    ):
+        raise ValueError("Study block count must be a non-negative integer")
     if summary.read_only is not True:
         raise ValueError("poster data must come from a read-only snapshot")
     if not _nonempty(summary.snapshot_id) or not _nonempty(projection.generated_at_utc):
@@ -977,6 +1031,19 @@ def read_poster_chart_data(
     stamp = _utc_now()
     summary = read_lifetime_metric_hub(database_file)
     source = _read_evidence(database_file)
+    family = None
+    try:
+        from GET_CHART.study_family_evidence import read_study_family
+
+        family = read_study_family(database_file if database_file is not None else database_path(create_parent=False))
+    except Exception:
+        pass
+    study_count = None
+    if family is not None and not family.errors.get("study"):
+        study_count = sum(
+            bool(block.get("payload", {}).get("started_wall_time_utc"))
+            for _session_id, result in family.studies for block in result.get("blocks", ())
+        )
     return validate_poster_chart_data(
         PosterChartData(
             lifetime_summary=summary,
@@ -985,6 +1052,8 @@ def read_poster_chart_data(
             cosine=_project_cosine(source, stamp),
             cosecant=_project_cosecant(source),
             generated_at_utc=stamp,
+            secant=secant_chart_from_family(family),
+            study_blocks_started=study_count,
         )
     )
 
@@ -996,6 +1065,8 @@ __all__ = [
     "CosecantBreakProjection",
     "CosecantChartProjection",
     "CosecantMilestoneProjection",
+    "SecantChartProjection",
+    "secant_chart_from_family",
     "CosineChartProjection",
     "CosineEpisodeTimelineProjection",
     "CosineRecordedEventProjection",

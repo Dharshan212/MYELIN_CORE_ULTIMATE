@@ -761,7 +761,7 @@ class ComposerTests(unittest.TestCase):
 
     def test_composer_mentions_selected_dates_only_and_the_empty_message(self) -> None:
         labels = [label.text() for label in self.dialog.findChildren(type(self.dialog.message))]
-        self.assertIn("Four individual organs \u00b7 Selected dates only", labels)
+        self.assertIn("Report sections \u00b7 Selected dates only", labels)
         self.assertIn("Only records belonging to the selected period enter the report.", labels)
         self.assertIn("No episode recorded", labels)
         self.assertIn("FROM \u2192 TO", labels)
@@ -777,7 +777,8 @@ class ComposerTests(unittest.TestCase):
                 box.setChecked(key == only)
             self.dialog.export_button.click()
             request_ = self.requests[-1]
-            self.assertEqual(request_.selected_sections(), (only,))
+            expected = ("study-mode", "secant", "cosecant") if only == "study-mode" else (only,)
+            self.assertEqual(request_.selected_sections(), expected)
             self.assertTrue(getattr(request_, attr))
             self.assertEqual((request_.range_start, request_.range_end), (date(2026, 9, 17), date(2026, 9, 19)))
 
@@ -785,10 +786,10 @@ class ComposerTests(unittest.TestCase):
         boxes = self.dialog.sections
         boxes["cosine"].setChecked(False)
         self.dialog.export_button.click()
-        self.assertEqual(self.requests[-1].selected_sections(), ("live-mirl", "mine", "study-mode"))
+        self.assertEqual(self.requests[-1].selected_sections(), ("live-mirl", "mine", "study-mode", "secant", "cosecant"))
         boxes["cosine"].setChecked(True)
         self.dialog.export_button.click()
-        self.assertEqual(self.requests[-1].selected_sections(), ("live-mirl", "cosine", "mine", "study-mode"))
+        self.assertEqual(self.requests[-1].selected_sections(), ("live-mirl", "cosine", "mine", "study-mode", "secant", "cosecant"))
 
     def test_at_least_one_organ_and_valid_dates_are_required(self) -> None:
         from PyQt6.QtCore import QDate
@@ -797,7 +798,7 @@ class ComposerTests(unittest.TestCase):
             box.setChecked(False)
         self.dialog.export_button.click()
         self.assertEqual(self.requests, [])
-        self.assertIn("Select at least one organ", self.dialog.message.text())
+        self.assertIn("Select at least one report section", self.dialog.message.text())
         for box in self.dialog.sections.values():
             box.setChecked(True)
         self.dialog.start_date.setDate(QDate(2026, 9, 19))
@@ -833,7 +834,7 @@ class ComposerTests(unittest.TestCase):
         lane._worker.join(5)
         lane.shutdown()
         self.assertEqual(seen[0].presentation_timezone, "Asia/Kolkata")
-        self.assertEqual(seen[0].selected_sections(), ("live-mirl", "cosine", "mine", "study-mode"))
+        self.assertEqual(seen[0].selected_sections(), ("live-mirl", "cosine", "mine", "study-mode", "secant", "cosecant"))
 
     def test_request_is_immutable_and_has_no_metric_hub_or_science_lab_flags(self) -> None:
         from CONTROL_STATION.analytics import AnalyticsSheetRequest
@@ -863,19 +864,39 @@ class ExportTests(_Tmp):
 
         return export_analytics_sheet(snapshot=snap or standard_snapshot(), request=req or request())
 
-    def test_export_reads_study_mode_through_the_existing_per_session_reader(self) -> None:
+    def test_study_report_reader_uses_read_only_connection_and_session_scope(self) -> None:
+        from PERSISTENCE.storage import _read_study_records_for_report
+
+        database = self.tmp / "study_reader.sqlite"
+        connection = sqlite3.connect(database)
+        connection.execute("CREATE TABLE study_events (id INTEGER, session_id INTEGER, action TEXT, "
+                           "occurred_monotonic_ns INTEGER, payload_json TEXT, created_at_utc TEXT)")
+        connection.executemany("INSERT INTO study_events VALUES (?, ?, 'START', 1, '{}', ?)",
+                               ((1, 1, D17), (2, 2, OLD), (3, 3, D17)))
+        connection.commit()
+        connection.close()
+        calls = []
+
+        def read_only_connection(*, read_only=False):
+            calls.append(read_only)
+            result = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
+            result.row_factory = sqlite3.Row
+            return result
+
+        snap = SimpleNamespace(lifetime_metric_hub=self._hub([1, 2, 9]))
+        with patch("PERSISTENCE.storage.connect_database", read_only_connection):
+            records = _read_study_records_for_report(snap)
+        self.assertEqual(calls, [True])
+        self.assertEqual([row.session_id for row in records], [1, 2])
+
+    def test_export_uses_supplied_read_only_study_records(self) -> None:
         snap = standard_snapshot()
         snap.lifetime_metric_hub = self._hub([1, 2, 9])
         rows = {1: study_block(1, D17), 2: study_block(2, OLD), 9: []}
-        calls: list = []
-
-        def reader(session_id):
-            calls.append(session_id)
-            return tuple(rows[session_id])
-
-        with self._home(), patch("PERSISTENCE.storage.read_science_lab_study_records", reader):
+        supplied = tuple(rows[1]) + tuple(rows[2])
+        with self._home(), patch("PERSISTENCE.storage._read_study_records_for_report", return_value=supplied) as reader:
             path = Path(self._export(snap, request(("study-mode",))))
-        self.assertEqual(calls, [1, 2, 9])
+        reader.assert_called_once_with(snap)
         if pymupdf is not None:
             text = "".join(p.get_text() for p in self.open(path))
             self.assertIn("block0001", re.sub(r"\s+", "", text))
@@ -885,10 +906,10 @@ class ExportTests(_Tmp):
         snap = standard_snapshot()
         snap.lifetime_metric_hub = self._hub([1])
 
-        def boom(_sid):
+        def boom(_snapshot):
             raise sqlite3.OperationalError("secret path C:/x.db")
 
-        with self._home(), patch("PERSISTENCE.storage.read_science_lab_study_records", boom):
+        with self._home(), patch("PERSISTENCE.storage._read_study_records_for_report", boom):
             path = Path(self._export(snap, request(("study-mode",))))
         if pymupdf is not None:
             text = "".join(p.get_text() for p in self.open(path))

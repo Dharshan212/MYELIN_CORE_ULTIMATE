@@ -34,11 +34,12 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 import secrets
 import threading
 import unicodedata
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, field
 from enum import Enum
 from typing import Final
 
@@ -77,9 +78,10 @@ from COSECANT_STUDY_MODE.study_alignment import study_evidence
 # Unavailable/transient UIA read-failure grace remains unchanged.
 # v10: certified ordinary Reddit browser surfaces are SOCIAL, while Reddit
 # Chat remains MESSAGING.
-CLASSIFIER_VERSION: Final = "myelin-resource-intent-v10"
+CLASSIFIER_VERSION: Final = "myelin-resource-intent-v12"
 OBSERVATION_FRESHNESS_NS: Final = 5_000_000_000
 STUDY_UNCERTAINTY_INTERVAL_SECONDS: Final = 300
+STUDY_CONFIRMATION_WINDOW_TITLE: Final = "MYELIN \u2014 STUDY CONFIRMATION"
 STUDY_UNCERTAINTY_INTERVAL_NS: Final = (
     STUDY_UNCERTAINTY_INTERVAL_SECONDS * 1_000_000_000
 )
@@ -394,6 +396,7 @@ class StudyConfirmationRecord:
     effective_operational_state: StudyEffectiveState
     confirmed_monotonic_ns: int
     source: str
+    case1_popup_confirmed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -411,6 +414,7 @@ class StudySessionMemoryEntry:
     confirmed_monotonic_ns: int
     confirmation_source: str
     last_used_order: int
+    case1_popup_confirmed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,10 +481,13 @@ class IntentVerdict:
     study_idle_allowed: bool
     measured_classification: ResourceIntent = ResourceIntent.UNCERTAIN
     measured_confidence: float = 0.50
+    study_alignment_percent: float | None = None
+    study_alignment_basis: str = ""
     user_confirmation: StudyUserConfirmation = StudyUserConfirmation.NONE
     effective_operational_state: StudyEffectiveState = StudyEffectiveState.UNRESOLVED
     confirmation_source: str = ""
     confirmation_monotonic_ns: int = 0
+    distraction_segment_uid: str = ""
     classifier_version: str = CLASSIFIER_VERSION
 
 
@@ -531,6 +538,8 @@ class ResourceIntentLiveView:
     no_nudge_reason_code: str
     measured_classification: ResourceIntent = ResourceIntent.UNCERTAIN
     measured_confidence: float = 0.50
+    study_alignment_percent: float | None = None
+    study_alignment_basis: str = ""
     user_confirmation: StudyUserConfirmation = StudyUserConfirmation.NONE
     effective_operational_state: StudyEffectiveState = StudyEffectiveState.UNRESOLVED
     uncertainty_active: bool = False
@@ -960,6 +969,16 @@ def is_allowance_eligible(identity: ResourceIdentity) -> bool:
     return True
 
 
+def _has_exact_browser_resource(identity: ResourceIdentity) -> bool:
+    """Require a current certified address and session-only page identity."""
+
+    return bool(
+        identity.browser_family
+        and identity.browser_evidence_certified
+        and identity.opaque_resource_token
+    )
+
+
 def _has_phrase(text: str, phrases: tuple[str, ...]) -> bool:
     padded = f" {searchable_text(text)} "
     return any(f" {searchable_text(phrase)} " in padded for phrase in phrases)
@@ -998,6 +1017,33 @@ def _reason_values(reasons: tuple[IntentReason, ...]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(reason.value for reason in reasons))
 
 
+@dataclass(frozen=True, slots=True)
+class StudyAcceptanceProvenance:
+    study_context_token: str
+    resource_key: str
+    request_id: str
+    source_observation_id: str
+    accepted_monotonic_ns: int
+    source: str = "USER_CONFIRMED_STUDY"
+
+
+@dataclass(frozen=True, slots=True)
+class StudyResourceSample:
+    study_context_token: str
+    block_id: str
+    generation: int
+    resource: object
+    observed_monotonic_ns: int
+    observation_sequence: int
+    observation_id: str
+    classification: str
+    effective_state: str
+    accepted: StudyAcceptanceProvenance | None = None
+    confirmed_off_task: bool = False
+    certified_ott: bool = False
+    display_metadata: object = field(default=None, compare=False)
+
+
 class ResourceIntentAuthority:
     """One lock, one context, one allowance and one current decision."""
 
@@ -1008,18 +1054,15 @@ class ResourceIntentAuthority:
         self._allowance: AllowanceRecord | None = None
         self._confirmation: StudyConfirmationRecord | None = None
         self._study_memory: dict[str, StudySessionMemoryEntry] = {}
+        self._accepted_provenance: dict[str, StudyAcceptanceProvenance] = {}
+        self._retired_context_tokens: set[str] = set()
         self._study_memory_access_order = 0
         self._active_resource_key = ""
         self._latest: ResourceIntentSnapshot | None = None
         self._protected_red_active = False
-        self._sine_episode_active = False
         self._cosine_active = False
         self._cosine_owned = False
         self._certified_ott_platform_key = ""
-        self._dwell_key: tuple[str, str] | None = None
-        self._dwell_started_ns = -1
-        self._dwell_last_ns = -1
-        self._stage_one_target_seconds: float | None = None
         self._uncertainty_episode_uid = ""
         self._uncertainty_started_ns = -1
         self._uncertainty_last_ns = -1
@@ -1041,21 +1084,6 @@ class ResourceIntentAuthority:
             self._started = True
             self._closed = False
 
-    def set_stage_one_target_seconds(self, target_seconds: float) -> bool:
-        """Freeze Blacklist's already-resolved Stage-1 target for this session."""
-
-        with self._lock:
-            self._require_active()
-            try:
-                target = float(target_seconds)
-            except (TypeError, ValueError):
-                return False
-            if not math.isfinite(target) or target <= 0.0:
-                return False
-            if self._stage_one_target_seconds is None:
-                self._stage_one_target_seconds = target
-                return True
-            return self._stage_one_target_seconds == target
 
     def publish_study_context(self, context: StudyContext) -> bool:
         """Accept only forward context facts; invalidate changed authority."""
@@ -1104,8 +1132,8 @@ class ResourceIntentAuthority:
                 if memory_scope_changed:
                     self._clear_study_memory()
                 self._latest = None
-                self._reset_dwell()
             self._context = context
+            self._retired_context_tokens.discard(context.context_token)
             return True
 
     def retire_study_context(self, expected_context_token: str = "") -> bool:
@@ -1126,10 +1154,10 @@ class ResourceIntentAuthority:
                 ),
             )
             self._retire_uncertainty(occurred_ns, "study_context_retired")
+            self._retired_context_tokens.add(self._context.context_token)
             self._context = None
             self._clear_study_memory()
             self._latest = None
-            self._reset_dwell()
             return True
 
     def set_protected_red(self, active: bool) -> None:
@@ -1146,17 +1174,7 @@ class ResourceIntentAuthority:
                 # and idle permission stays withheld for as long as Red runs.
                 #
                 self._latest = None
-                self._reset_dwell()
 
-    def set_sine_episode_active(self, active: bool) -> None:
-        """Scope Phase 3 to Case 1: clarification exists only before SINE."""
-
-        with self._lock:
-            changed = self._sine_episode_active != bool(active)
-            self._sine_episode_active = bool(active)
-            if changed and self._sine_episode_active:
-                occurred_ns = self._latest_observed_ns()
-                self._retire_uncertainty(occurred_ns, "sine_episode_already_exists")
 
     def set_cosine_active(self, active: bool) -> None:
         with self._lock:
@@ -1167,7 +1185,6 @@ class ResourceIntentAuthority:
                 if self._cosine_active:
                     self._retire_uncertainty(occurred_ns, "cosine_precedence")
                 self._latest = None
-                self._reset_dwell()
 
     def set_cosine_resource_owned(self, owned: bool) -> None:
         with self._lock:
@@ -1175,7 +1192,6 @@ class ResourceIntentAuthority:
             self._cosine_owned = bool(owned)
             if changed:
                 self._latest = None
-                self._reset_dwell()
 
     def set_certified_ott_platform_key(self, platform_key: str) -> None:
         """Accept Monitor's factual OTT identity without granting ownership."""
@@ -1203,6 +1219,19 @@ class ResourceIntentAuthority:
                     or self._certified_ott_platform_key
                 ),
             )
+            request = self._uncertainty_request
+            if (
+                request is not None
+                and self._uncertainty_request_snapshot is not None
+                and observation.process_id == os.getpid()
+                and observation.hwnd > 0
+                and observation.hwnd != request.source_hwnd
+                and observation.raw_title == STUDY_CONFIRMATION_WINDOW_TITLE
+            ):
+                # The native popup may become foreground before its factual
+                # shown callback reaches Monitor. Preserve the source request
+                # across that exact, same-process presentation handoff.
+                return replace(self._uncertainty_request_snapshot, deduplicated=True)
             if (
                 self._uncertainty_popup_hwnd > 0
                 and observation.hwnd == self._uncertainty_popup_hwnd
@@ -1222,7 +1251,6 @@ class ResourceIntentAuthority:
             verdict = self._classify(observation, identity)
             verdict = self._apply_confirmation(verdict)
             verdict = self._advance_study_uncertainty(observation, verdict)
-            verdict = self._apply_off_task_dwell(observation, verdict)
             snapshot = ResourceIntentSnapshot(
                 observation=observation,
                 verdict=verdict,
@@ -1247,6 +1275,119 @@ class ResourceIntentAuthority:
                 self._uncertainty_request_snapshot = snapshot
             return snapshot
 
+    @staticmethod
+    def _study_exact_identity(snapshot):
+        from SECANT.read_model import ExactResource
+        import hashlib
+        import json
+        identity = snapshot.verdict.resource_identity
+        observation = snapshot.observation
+        if identity.browser_family:
+            # An unmanaged page may have an opaque token without a certified
+            # platform. Preserve RI truth, but do not fabricate a SECANT identity.
+            if not (identity.platform_key and _has_exact_browser_resource(identity)):
+                return None
+            values = ("BROWSER", 1, identity.platform_key, identity.opaque_resource_token)
+            key = "browser:v1:" + hashlib.sha256(json.dumps(values).encode()).hexdigest()
+            return ExactResource("BROWSER", key, identity.platform_key, identity.opaque_resource_token)
+        if not (identity.process_name and observation.process_id > 0 and identity.hwnd > 0):
+            return None
+        values = ("DESKTOP", 1, identity.process_name, observation.process_id,
+                  identity.hwnd, identity.normalised_title)
+        key = "desktop:v1:" + hashlib.sha256(json.dumps(values).encode()).hexdigest()
+        return ExactResource("DESKTOP", key, process_name=identity.process_name,
+            process_id=observation.process_id, hwnd=identity.hwnd,
+            normalized_title=identity.normalised_title)
+
+    def study_sample(self, *, expected_observation_ns: int, expected_sequence: int) -> StudyResourceSample | None:
+        """Read current-cycle evidence; an obscuring popup's old source is not fresh."""
+        with self._lock:
+            snapshot, context = self._latest, self._context
+            if (snapshot is None or context is None or not context.active or not snapshot.fresh
+                    or snapshot.observation.observed_monotonic_ns != expected_observation_ns
+                    or snapshot.observation.sequence != expected_sequence
+                    or snapshot.verdict.study_context_token != context.context_token):
+                return None
+            exact = self._study_exact_identity(snapshot)
+            if exact is None:
+                return None
+            verdict = snapshot.verdict
+            # Display metadata belongs to this same observation, outside ExactResource.
+            from SECANT.read_model import ResourceDisplayMetadata
+            caption = snapshot.observation.raw_title
+            normalized = verdict.resource_identity.normalised_title
+            display_metadata = None
+            if exact.kind == "BROWSER" and caption.strip() and normalized.strip():
+                try:
+                    display_metadata = ResourceDisplayMetadata(caption, normalized,
+                        verdict.observation_token, snapshot.observation.sequence,
+                        snapshot.observation.observed_monotonic_ns)
+                except ValueError:
+                    pass  # Unusable display metadata must not interrupt exact-resource evidence.
+            accepted = self._accepted_provenance.get(exact.key)
+            if accepted and accepted.study_context_token != context.context_token:
+                accepted = None
+            return StudyResourceSample(context.context_token, context.block_id, context.generation,
+                exact, snapshot.observation.observed_monotonic_ns, snapshot.observation.sequence,
+                verdict.observation_token, verdict.classification.value,
+                verdict.effective_operational_state.value, accepted,
+                verdict.user_confirmation is StudyUserConfirmation.OFF_TASK,
+                bool(snapshot.observation.certified_ott_platform_key), display_metadata)
+
+    def study_observation_evidence(self, *, expected_observation_ns=None, expected_sequence=None):
+        """Read immutable authority evidence without classifying or touching memory.
+
+        Confirmation callbacks may read the request's original observation;
+        callers must label that as confirmation, never as a new foreground poll.
+        """
+        import json
+        from dataclasses import asdict
+        with self._lock:
+            snapshot = self._latest
+            if snapshot is None:
+                return None
+            ns = snapshot.observation.observed_monotonic_ns if expected_observation_ns is None else expected_observation_ns
+            seq = snapshot.observation.sequence if expected_sequence is None else expected_sequence
+            sample = self.study_sample(expected_observation_ns=ns, expected_sequence=seq)
+            if sample is None:
+                return None
+            verdict = snapshot.verdict
+            entry = self._study_memory.get(snapshot.resource_key)
+            confirmation = None
+            if (entry is not None and entry.study_context_token == sample.study_context_token
+                    and entry.confirmed_monotonic_ns == verdict.confirmation_monotonic_ns
+                    and entry.user_confirmation is verdict.user_confirmation):
+                confirmation = dict(source_observation_id=entry.observation_token,
+                    authority_resource_key=entry.resource_key, source=entry.confirmation_source,
+                    confirmed_monotonic_ns=entry.confirmed_monotonic_ns,
+                    user_confirmation=entry.user_confirmation.value,
+                    effective_operational_state=entry.effective_operational_state.value,
+                    measured_classification=entry.measured_classification.value,
+                    measured_confidence=entry.measured_confidence,
+                    case1_popup_confirmed=entry.case1_popup_confirmed)
+            result = dict(study_context_token=sample.study_context_token, study_block_id=sample.block_id,
+                study_generation=sample.generation, resource=asdict(sample.resource),
+                observation_id=sample.observation_id, observation_sequence=sample.observation_sequence,
+                observed_monotonic_ns=sample.observed_monotonic_ns,
+                authority_resource_key=snapshot.resource_key,
+                classification=verdict.classification.value, confidence=verdict.confidence,
+                measured_classification=verdict.measured_classification.value,
+                measured_confidence=verdict.measured_confidence,
+                effective_operational_state=verdict.effective_operational_state.value,
+                user_confirmation=verdict.user_confirmation.value,
+                confirmation_source=verdict.confirmation_source,
+                confirmation_monotonic_ns=verdict.confirmation_monotonic_ns,
+                confirmation=confirmation, acceptance=asdict(sample.accepted) if sample.accepted else None,
+                classifier_version=verdict.classifier_version)
+            if sample.display_metadata is not None:
+                result["display_metadata"] = asdict(sample.display_metadata)
+            return json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+    def context_retirement_proven(self, expected_context_token: str) -> bool:
+        with self._lock:
+            return bool(expected_context_token and expected_context_token in self._retired_context_tokens
+                and (self._context is None or self._context.context_token != expected_context_token))
+
     def live_view(self) -> ResourceIntentLiveView | None:
         with self._lock:
             if self._latest is None:
@@ -1262,15 +1403,17 @@ class ResourceIntentAuthority:
                 resource_surface=identity.surface,
                 classification=verdict.classification,
                 confidence=verdict.confidence,
+                study_alignment_percent=verdict.study_alignment_percent,
+                study_alignment_basis=verdict.study_alignment_basis,
                 positive_reason_codes=verdict.positive_reason_codes,
                 negative_reason_codes=negative,
-                dwell_elapsed_seconds=verdict.off_task_dwell_seconds,
-                dwell_target_seconds=float(self._stage_one_target_seconds or 0.0),
+                dwell_elapsed_seconds=0.0,
+                dwell_target_seconds=0.0,
                 allowance_active=verdict.allowance_match,
                 study_idle_allowed=verdict.study_idle_allowed,
                 protected_red_active=self._protected_red_active,
                 cosine_active=self._cosine_active,
-                sine_contribution=verdict.sine_contribution,
+                sine_contribution=SineContribution.NONE,
                 browser_evidence_certified=identity.browser_evidence_certified,
                 no_nudge_reason_code=(negative[-1] if negative else ""),
                 measured_classification=verdict.measured_classification,
@@ -1350,7 +1493,6 @@ class ResourceIntentAuthority:
             )
             self._confirmation = confirmation
             self._remember_confirmation(context, confirmation)
-            self._reset_dwell()
             return AllowanceResult(AllowanceOutcome.GRANTED, record=record)
 
     def drain_facts(self) -> tuple[ResourceIntentFact, ...]:
@@ -1461,6 +1603,15 @@ class ResourceIntentAuthority:
                 action = StudyConfirmationResponse(str(response))
             except ValueError:
                 return False
+            source_identity = request_snapshot.verdict.resource_identity
+            if source_identity.browser_family and not _has_exact_browser_resource(source_identity):
+                return False
+            if (
+                action is StudyConfirmationResponse.THIS_IS_STUDY_MATERIAL
+                and not is_allowance_eligible(source_identity)
+                and not _has_exact_browser_resource(source_identity)
+            ):
+                return False
 
             measured = request_snapshot.verdict
             if action is StudyConfirmationResponse.THIS_IS_STUDY_MATERIAL:
@@ -1485,7 +1636,13 @@ class ResourceIntentAuthority:
                     effective_operational_state=StudyEffectiveState.STUDY_ALIGNED,
                     confirmed_monotonic_ns=occurred_ns,
                     source="USER_CONFIRMED_STUDY",
+                    case1_popup_confirmed=True,
                 )
+                exact = self._study_exact_identity(request_snapshot)
+                if exact is not None:
+                    self._accepted_provenance[exact.key] = StudyAcceptanceProvenance(
+                        context.context_token, exact.key, request.request_id,
+                        request.observation_token, occurred_ns)
                 event_kind = "USER_CONFIRMED_STUDY"
                 message = "User confirmed that the exact uncertain resource is Study material."
             else:
@@ -1499,8 +1656,8 @@ class ResourceIntentAuthority:
                     effective_operational_state=StudyEffectiveState.CONFIRMED_DISTRACTION,
                     confirmed_monotonic_ns=occurred_ns,
                     source="USER_CONFIRMED_OFF_TASK",
+                    case1_popup_confirmed=True,
                 )
-                self._begin_confirmed_dwell(context.context_token, occurred_ns)
                 event_kind = "USER_CONFIRMED_OFF_TASK"
                 message = "User confirmed that the exact uncertain resource is off-task."
 
@@ -1525,13 +1682,6 @@ class ResourceIntentAuthority:
             )
             self._clear_uncertainty_state()
             applied = self._apply_confirmation(measured)
-            if action is StudyConfirmationResponse.IM_COMING_BACK:
-                applied = replace(
-                    applied,
-                    off_task_dwell_seconds=0.0,
-                    sine_contribution=SineContribution.PENDING,
-                    study_idle_allowed=False,
-                )
             self._latest = replace(
                 request_snapshot,
                 verdict=applied,
@@ -1555,11 +1705,6 @@ class ResourceIntentAuthority:
         token = observation_token(observation)
         certified_ott = bool(observation.certified_ott_platform_key)
         messaging = identity.surface is ResourceSurface.MESSAGING
-        study_owned = bool(
-            context is not None
-            and (context.active or context.approved_break)
-        )
-
         # Protected Red is an EFFERENT intervention state.  It must not cut the
         # AFFERENT nerve that reports what the user is factually looking at:
         # MIRL can only verify a return it is allowed to observe, and Monitor
@@ -1590,11 +1735,21 @@ class ResourceIntentAuthority:
                 token,
                 identity,
             )
-        # OTT and Messaging are identity facts, not organ permissions.  While
-        # ACTIVE Study or its COSECANT break owns the moment, these two factual
-        # collisions must reach Study's existing distraction pathway before
-        # APPROVED_BREAK or COSINE/Messaging lifecycle precedence can hide them.
-        if study_owned and (certified_ott or messaging):
+        if context.approved_break:
+            return self._verdict(
+                ResourceIntent.APPROVED_BREAK,
+                1.0,
+                (IntentReason.APPROVED_BREAK,),
+                (),
+                context_token,
+                token,
+                identity,
+            )
+        # OTT and Messaging are identity facts, not organ permissions.  During
+        # ACTIVE Study, these factual collisions reach Study's established
+        # distraction pathway before COSINE/Messaging lifecycle precedence can
+        # hide them.  An accepted COSECANT break is permission, handled above.
+        if context.active and (certified_ott or messaging):
             reason = (
                 IntentReason.ENTERTAINMENT
                 if certified_ott
@@ -1605,16 +1760,6 @@ class ResourceIntentAuthority:
                 1.0,
                 (),
                 (reason,),
-                context_token,
-                token,
-                identity,
-            )
-        if context.approved_break:
-            return self._verdict(
-                ResourceIntent.APPROVED_BREAK,
-                1.0,
-                (IntentReason.APPROVED_BREAK,),
-                (),
                 context_token,
                 token,
                 identity,
@@ -1767,9 +1912,13 @@ class ResourceIntentAuthority:
             important_keywords=context.important_keywords,
             title=identity.normalised_title,
             identity_certified=identity.browser_evidence_certified,
+            allow_exact_task_match=identity.surface in {
+                ResourceSurface.FOCUS_WEB, ResourceSurface.LEARNING_APP,
+                ResourceSurface.YOUTUBE_WATCH,
+            },
         )
 
-        if evidence.raw_possible_points == 0:
+        if evidence.raw_possible_points == 0 and evidence.alignment_basis != "EXACT_TASK_TITLE":
             # No scientific input is not proof of distraction.  The current UI
             # cannot supply Study keywords yet, so an old Study block reaches
             # here with nothing to score and must keep the pre-C4 behaviour:
@@ -1810,9 +1959,11 @@ class ResourceIntentAuthority:
                 context_token,
                 token,
                 identity,
+                study_alignment_percent=evidence.confidence_percent,
+                study_alignment_basis=evidence.alignment_basis,
             )
 
-        if confidence >= STUDY_UNCERTAIN_MIN_CONFIDENCE:
+        if confidence > STUDY_UNCERTAIN_MIN_CONFIDENCE:
             negative.append(IntentReason.STUDY_EVIDENCE_UNCERTAIN)
             return self._verdict(
                 ResourceIntent.UNCERTAIN,
@@ -1822,6 +1973,8 @@ class ResourceIntentAuthority:
                 context_token,
                 token,
                 identity,
+                study_alignment_percent=evidence.confidence_percent,
+                study_alignment_basis=evidence.alignment_basis,
             )
 
         # An off-task FACT, not an intervention.  The off-task dwell below and
@@ -1837,6 +1990,8 @@ class ResourceIntentAuthority:
             context_token,
             token,
             identity,
+            study_alignment_percent=evidence.confidence_percent,
+            study_alignment_basis=evidence.alignment_basis,
         )
 
     def _apply_confirmation(self, verdict: IntentVerdict) -> IntentVerdict:
@@ -1901,7 +2056,6 @@ class ResourceIntentAuthority:
             context is not None
             and context.active
             and not self._protected_red_active
-            and not self._sine_episode_active
             and not self._cosine_active
             and verdict.classification is ResourceIntent.UNCERTAIN
             and verdict.measured_classification is ResourceIntent.UNCERTAIN
@@ -2133,95 +2287,7 @@ class ResourceIntentAuthority:
             return max(1, int(self._context.published_monotonic_ns))
         return 1
 
-    def _begin_confirmed_dwell(self, context_token: str, occurred_ns: int) -> None:
-        self._dwell_key = (str(context_token), "confirmed_distraction")
-        self._dwell_started_ns = int(occurred_ns)
-        self._dwell_last_ns = int(occurred_ns)
 
-    def _apply_off_task_dwell(
-        self,
-        observation: ResourceObservation,
-        verdict: IntentVerdict,
-    ) -> IntentVerdict:
-        context = self._context
-        candidate = bool(
-            context is not None
-            and (context.active or context.approved_break)
-            and (
-                verdict.resource_identity.surface
-                in {
-                    ResourceSurface.YOUTUBE_WATCH,
-                    ResourceSurface.MESSAGING,
-                }
-                or bool(observation.certified_ott_platform_key)
-            )
-            # Phase 3: 50% uncertainty owns an independent clarification clock.
-            # Only factual confirmed distraction may consume SINE dwell.
-            and verdict.classification is ResourceIntent.DISTRACTION
-            and not verdict.allowance_match
-            and not self._protected_red_active
-            and not self._cosine_active
-            and not observation.cosine_owned
-        )
-        if not candidate:
-            self._reset_dwell()
-            return self._with_sine_policy(verdict, 0.0)
-
-        # The confirmed behavioural episode belongs to the active Study
-        # context, not one URL.  Switching among distractive videos therefore
-        # preserves the same 5-minute SINE watch.
-        key = (context.context_token, "confirmed_distraction")
-        observed_ns = observation.observed_monotonic_ns
-        continuous = bool(
-            self._dwell_key == key
-            and self._dwell_last_ns >= 0
-            and 0 <= observed_ns - self._dwell_last_ns <= OBSERVATION_FRESHNESS_NS
-        )
-        if not continuous:
-            self._dwell_key = key
-            self._dwell_started_ns = observed_ns
-        self._dwell_last_ns = observed_ns
-        dwell_ns = max(0, observed_ns - self._dwell_started_ns)
-        dwell_seconds = dwell_ns / 1_000_000_000.0
-        target_seconds = self._stage_one_target_seconds
-        if target_seconds is None:
-            # Classification remains truthful for read-only consumers, but no
-            # Study SINE clock may exist until Monitor supplies Blacklist's
-            # already-resolved session target. Resetting also prevents a later
-            # binding from backdating this unsupported interval.
-            self._reset_dwell()
-            return replace(
-                verdict,
-                off_task_dwell_seconds=0.0,
-                sine_contribution=SineContribution.NONE,
-                study_idle_allowed=False,
-            )
-        if dwell_seconds < target_seconds:
-            negative = verdict.negative_reason_codes + (
-                IntentReason.OFF_TASK_WATCH_PENDING.value,
-            )
-            pending = replace(
-                verdict,
-                negative_reason_codes=tuple(dict.fromkeys(negative)),
-                off_task_dwell_seconds=dwell_seconds,
-                sine_contribution=SineContribution.PENDING,
-                study_idle_allowed=False,
-            )
-            return pending
-
-        negative = verdict.negative_reason_codes + (
-            IntentReason.OFF_TASK_WATCH_READY.value,
-        )
-        ready = replace(
-            verdict,
-            classification=ResourceIntent.DISTRACTION,
-            confidence=max(DISTRACTION_THRESHOLD, verdict.confidence),
-            negative_reason_codes=tuple(dict.fromkeys(negative)),
-            off_task_dwell_seconds=dwell_seconds,
-            sine_contribution=SineContribution.READY,
-            study_idle_allowed=False,
-        )
-        return ready
 
     def _with_sine_policy(
         self,
@@ -2236,22 +2302,10 @@ class ResourceIntentAuthority:
             and not self._protected_red_active
             and not self._cosine_active
         )
-        if not context_active or self._protected_red_active or self._cosine_active:
-            contribution = SineContribution.NONE
-        elif verdict.classification in {
-            ResourceIntent.STUDY_ALIGNED,
-            ResourceIntent.APPROVED_BREAK,
-            ResourceIntent.BACKGROUND_AUDIO,
-        }:
-            contribution = SineContribution.WITHHELD
-        elif verdict.classification is ResourceIntent.DISTRACTION:
-            contribution = SineContribution.READY
-        else:
-            contribution = SineContribution.NONE
         return replace(
             verdict,
-            off_task_dwell_seconds=float(dwell_seconds),
-            sine_contribution=contribution,
+            off_task_dwell_seconds=0.0,
+            sine_contribution=SineContribution.NONE,
             study_idle_allowed=idle_allowed,
         )
 
@@ -2266,6 +2320,8 @@ class ResourceIntentAuthority:
         identity: ResourceIdentity,
         *,
         allowance_match: bool = False,
+        study_alignment_percent: float | None = None,
+        study_alignment_basis: str = "",
     ) -> IntentVerdict:
         bounded_confidence = max(0.0, min(1.0, float(confidence)))
         effective_state = (
@@ -2278,6 +2334,8 @@ class ResourceIntentAuthority:
         verdict = IntentVerdict(
             classification=classification,
             confidence=bounded_confidence,
+            study_alignment_percent=study_alignment_percent,
+            study_alignment_basis=study_alignment_basis,
             positive_reason_codes=_reason_values(positive),
             negative_reason_codes=_reason_values(negative),
             study_context_token=context_token,
@@ -2339,6 +2397,7 @@ class ResourceIntentAuthority:
             confirmed_monotonic_ns=confirmation.confirmed_monotonic_ns,
             confirmation_source=confirmation.source,
             last_used_order=self._study_memory_access_order,
+            case1_popup_confirmed=confirmation.case1_popup_confirmed,
         )
         self._refresh_legacy_confirmation_aliases()
 
@@ -2356,8 +2415,21 @@ class ResourceIntentAuthority:
         ):
             return None
         if (
+            entry.case1_popup_confirmed
+            and identity.browser_family
+            and not _has_exact_browser_resource(identity)
+        ):
+            return None
+        if (
             entry.user_confirmation is StudyUserConfirmation.STUDY
             and not is_allowance_eligible(identity)
+            and not (
+                entry.case1_popup_confirmed
+                and _has_exact_browser_resource(identity)
+                and entry.measured_classification is ResourceIntent.UNCERTAIN
+                and entry.measured_confidence == 0.50
+                and entry.effective_operational_state is StudyEffectiveState.STUDY_ALIGNED
+            )
         ):
             return None
         return entry
@@ -2391,6 +2463,7 @@ class ResourceIntentAuthority:
             effective_operational_state=newest.effective_operational_state,
             confirmed_monotonic_ns=newest.confirmed_monotonic_ns,
             source=newest.confirmation_source,
+            case1_popup_confirmed=newest.case1_popup_confirmed,
         )
         study_entries = tuple(
             entry
@@ -2413,6 +2486,7 @@ class ResourceIntentAuthority:
         )
 
     def _clear_study_memory(self) -> None:
+        self._accepted_provenance.clear()
         self._study_memory.clear()
         self._study_memory_access_order = 0
         self._active_resource_key = ""
@@ -2459,8 +2533,6 @@ class ResourceIntentAuthority:
             and left.classification is right.classification
             and left.confidence == right.confidence
             and left.allowance_match == right.allowance_match
-            and left.sine_contribution is right.sine_contribution
-            and left.off_task_dwell_seconds == right.off_task_dwell_seconds
             and left.negative_reason_codes == right.negative_reason_codes
             and left.measured_classification is right.measured_classification
             and left.measured_confidence == right.measured_confidence
@@ -2477,24 +2549,17 @@ class ResourceIntentAuthority:
         if not self._started or self._closed:
             raise RuntimeError("Resource Intent session is not active")
 
-    def _reset_dwell(self) -> None:
-        self._dwell_key = None
-        self._dwell_started_ns = -1
-        self._dwell_last_ns = -1
 
     def _reset_all(self) -> None:
         self._context = None
         self._clear_study_memory()
         self._latest = None
         self._protected_red_active = False
-        self._sine_episode_active = False
         self._cosine_active = False
         self._cosine_owned = False
         self._certified_ott_platform_key = ""
         self._clear_uncertainty_state()
         self._facts.clear()
-        self._reset_dwell()
-        self._stage_one_target_seconds = None
 
 
 __all__ = (

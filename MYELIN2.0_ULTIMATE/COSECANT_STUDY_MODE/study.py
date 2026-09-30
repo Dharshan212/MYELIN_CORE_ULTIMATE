@@ -948,6 +948,11 @@ class StudySnapshot:
     published_monotonic_ns: int
 
     schema_version: str = STUDY_SCHEMA_VERSION
+    resources: tuple[object, ...] = ()
+    pending_resources: tuple[object, ...] = ()
+    global_hold_id: str = ""
+    secant_episode_active: bool = False
+    break_pause_id: str = ""
 
     @property
     def configured(self) -> bool:
@@ -985,6 +990,85 @@ class StudyActionResult:
     accepted: bool
     message: str
     snapshot: StudySnapshot
+
+
+class _StudyResourceRegistry:
+    """Study-owned qualification and durable-registration reconciliation."""
+    def __init__(self):
+        self.committed = {}
+        self.pending = {}
+        self.reset_candidate()
+        self.revalidate = False
+
+    def reset_candidate(self):
+        self.candidate = None
+        self.elapsed_ns = 0
+        self.first_ns = self.last_ns = None
+        self.first_utc = ""
+        self.last_observation_id = ""
+
+    def observe(self, sample, *, supported_since_ns, session_id, now_utc):
+        from SECANT.read_model import ExactResource, StudyResourceFact
+        import json
+        aligned = sample.classification == "STUDY_ALIGNED"
+        if not aligned or not isinstance(sample.resource, ExactResource):
+            self.reset_candidate()
+            self.revalidate = False
+            return ()
+        key = sample.resource.key
+        if key in self.committed or key in self.pending:
+            self.reset_candidate()
+            self.revalidate = False
+            return ()
+        if self.last_ns is not None and sample.observed_monotonic_ns <= self.last_ns:
+            return ()
+        same = self.candidate is not None and self.candidate == sample.resource
+        continuous = same and supported_since_ns == self.last_ns and self.last_ns is not None
+        if self.revalidate and same:
+            pass
+        elif continuous:
+            self.elapsed_ns += sample.observed_monotonic_ns - self.last_ns
+        else:
+            self.candidate = sample.resource
+            self.elapsed_ns = 0
+            self.first_ns = sample.observed_monotonic_ns
+            self.first_utc = now_utc
+        self.revalidate = False
+        self.last_ns = sample.observed_monotonic_ns
+        self.last_observation_id = sample.observation_id
+        primary = any(f.role == "PRIMARY" for f in self.committed.values())
+        if not primary and self.pending:
+            return ()  # The first qualified PRIMARY waits for the same durable receipt.
+        threshold = (5 if primary else 300) * 1_000_000_000
+        if self.elapsed_ns < threshold:
+            return ()
+        provenance = {"observation_id": sample.observation_id,
+            "classification": sample.classification, "effective_state": sample.effective_state}
+        metadata = getattr(sample, "display_metadata", None)
+        if metadata is not None:
+            from dataclasses import asdict
+            from SECANT.read_model import validate_display_metadata
+            provenance["display_metadata"] = asdict(validate_display_metadata(metadata,
+                observation_id=sample.observation_id, sequence=sample.observation_sequence,
+                observed_ns=sample.observed_monotonic_ns))
+        fact = StudyResourceFact("study-resource-" + secrets.token_hex(16), session_id,
+            sample.block_id, sample.generation, sample.study_context_token, sample.resource,
+            "LATER" if primary else "PRIMARY", self.first_ns, sample.observed_monotonic_ns,
+            self.first_utc, now_utc, json.dumps(provenance,sort_keys=True))
+        self.pending[key] = fact
+        self.reset_candidate()
+        return (fact,)
+
+    def commit(self, fact_id):
+        if any(f.resource_fact_id == fact_id for f in self.committed.values()):
+            return True
+        for key, fact in tuple(self.pending.items()):
+            if fact.resource_fact_id == fact_id:
+                if fact.role == "PRIMARY" and any(f.role == "PRIMARY" for f in self.committed.values()):
+                    return False
+                self.committed[key] = self.pending.pop(key)
+                return True
+        return False
 
 
 class StudyRuntime:
@@ -1045,6 +1129,11 @@ class StudyRuntime:
 
         self._lock = threading.RLock()
 
+        self._session_id = 0
+        self._resource_registry = _StudyResourceRegistry()
+        self._global_hold_id = ""
+        self._secant_episode_active = False
+        self._break_pause_id = ""
         self._state = StudyState.EMPTY
 
         self._plan: StudyPlan | None = None
@@ -1161,6 +1250,10 @@ class StudyRuntime:
 
             self._block_id = next_block_id
             self._generation = next_generation
+            self._resource_registry = _StudyResourceRegistry()
+            self._global_hold_id = ""
+            self._secant_episode_active = False
+            self._break_pause_id = ""
 
             self._state = next_state
 
@@ -1262,6 +1355,7 @@ class StudyRuntime:
 
     def pause(
         self,
+        *, break_pause_id: str = "",
     ) -> StudyActionResult:
         """Pause Study time.
 
@@ -1271,6 +1365,12 @@ class StudyRuntime:
 
         with self._lock:
             self._assert_runtime_invariants()
+
+            if self._global_hold_id:
+                return self._reject("Global Pause must resume before this Study action")
+            authorized_break = bool(break_pause_id and break_pause_id == self._break_pause_id)
+            if (self._secant_episode_active or self._break_pause_id) and not authorized_break:
+                return self._reject("SECANT episode or COSECANT transaction owns Study pause")
 
             try:
                 paused_state = _next_study_state(
@@ -1351,6 +1451,7 @@ class StudyRuntime:
 
     def resume(
         self,
+        *, break_pause_id: str = "",
     ) -> StudyActionResult:
         """Resume a paused Study block.
 
@@ -1360,6 +1461,12 @@ class StudyRuntime:
 
         with self._lock:
             self._assert_runtime_invariants()
+
+            if self._global_hold_id:
+                return self._reject("Global Pause must resume before this Study action")
+            authorized_break = bool(break_pause_id and break_pause_id == self._break_pause_id)
+            if (self._secant_episode_active or self._break_pause_id) and not authorized_break:
+                return self._reject("SECANT episode or COSECANT transaction owns Study pause")
 
             try:
                 next_state = _next_study_state(
@@ -1673,6 +1780,64 @@ class StudyRuntime:
     # INTERNAL TARGET SETTLEMENT
     # --------------------------------------------------------
 
+    def bind_session(self, session_id: int) -> bool:
+        with self._lock:
+            if type(session_id) is not int or session_id <= 0 or self._session_id not in {0, session_id}:
+                return False
+            self._session_id = session_id
+            return True
+
+    def set_connection_state(self, *, secant_episode_active: bool, break_pause_id: str = "") -> None:
+        with self._lock:
+            self._secant_episode_active = bool(secant_episode_active)
+            self._break_pause_id = str(break_pause_id)
+            self._publish(now_wall=self._read_wall_clock())
+
+    def observe_resource(self, sample, *, supported_since_ns=None):
+        from CORE_ENGINE.resource_intent import StudyResourceSample
+        with self._lock:
+            if (self._state is not StudyState.ACTIVE or self._global_hold_id
+                    or not self._session_id):
+                return ()
+            if (not isinstance(sample, StudyResourceSample)
+                    or sample.study_context_token != self._snapshot.context_token
+                    or sample.block_id != self._block_id or sample.generation != self._generation
+                    or sample.observed_monotonic_ns < self._active_epoch.started_monotonic_ns):
+                self._resource_registry.reset_candidate()
+                return ()
+            facts = self._resource_registry.observe(sample, supported_since_ns=supported_since_ns,
+                session_id=self._session_id, now_utc=_wall_text(self._read_wall_clock()))
+            self._publish(now_wall=self._read_wall_clock())
+            return facts
+
+    def resource_committed(self, resource_fact_id: str) -> bool:
+        with self._lock:
+            accepted = self._resource_registry.commit(resource_fact_id)
+            self._publish(now_wall=self._read_wall_clock())
+            return accepted
+
+    def set_global_paused(self, hold_id: str, paused: bool) -> bool:
+        with self._lock:
+            if not hold_id or self._break_pause_id or self._state in {StudyState.COMPLETED, StudyState.SHUTDOWN}:
+                return False
+            if paused:
+                if self._global_hold_id:
+                    return self._global_hold_id == hold_id
+                if self._state is StudyState.ACTIVE:
+                    self._timer.pause()
+                self._global_hold_id = hold_id
+                self._complete_if_target_reached(now_wall=self._read_wall_clock())
+            else:
+                if self._global_hold_id != hold_id:
+                    return False
+                self._global_hold_id = ""
+                if self._state is StudyState.ACTIVE:
+                    self._timer.resume()
+                self._resource_registry.revalidate = True
+            self._publish(now_wall=self._read_wall_clock())
+            self._assert_runtime_invariants()
+            return True
+
     def _complete_if_target_reached(
         self,
         *,
@@ -1721,6 +1886,9 @@ class StudyRuntime:
     ) -> None:
         """Publish one causally ordered immutable Study snapshot."""
 
+        if self._state is not StudyState.ACTIVE:
+            self._resource_registry.reset_candidate()
+            self._resource_registry.revalidate = False
         timer_sample = self._timer.sample()
 
         # A timer sample can reach the target between a Start/Resume mutation
@@ -1765,6 +1933,7 @@ class StudyRuntime:
 
         if (
             self._state is StudyState.ACTIVE
+            and not self._global_hold_id
             and timer.remaining_seconds > 0
         ):
             ends_at = _wall_text(
@@ -1853,6 +2022,11 @@ class StudyRuntime:
             published_monotonic_ns=(
                 published_monotonic_ns
             ),
+            resources=tuple(self._resource_registry.committed.values()),
+            pending_resources=tuple(self._resource_registry.pending.values()),
+            global_hold_id=self._global_hold_id,
+            secant_episode_active=self._secant_episode_active,
+            break_pause_id=self._break_pause_id,
         )
 
 
@@ -2037,7 +2211,7 @@ class StudyRuntime:
                     "a configured timer"
                 )
 
-            if not self._timer.running:
+            if not self._timer.running and not self._global_hold_id:
                 raise RuntimeError(
                     "ACTIVE Study state requires "
                     "a running timer"

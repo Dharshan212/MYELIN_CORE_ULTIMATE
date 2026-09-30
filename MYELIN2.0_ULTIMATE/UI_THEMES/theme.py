@@ -86,6 +86,8 @@ FEED_BADGE_HANDOVER: Final = "#64748B"
 FEED_BADGE_MONITOR: Final = "#2563EB"
 FEED_BADGE_STUDY: Final = "#16A34A"
 FEED_BADGE_FOCUS: Final = "#FFFFFF"
+FEED_STUDY_OTT: Final = "#FDE047"
+FEED_STUDY_MESSAGING: Final = "#FB923C"
 
 # Base themes differ only in background/surface/text/accent/border tokens.
 # The semantic fields (red/red_dim/amber/green/green_dim/violet) keep the
@@ -638,6 +640,15 @@ QLabel#feedTag[badge="STUDY"] {{
 }}
 QLabel#feedTag[badge="FOCUS"] {{
     color: {FEED_BADGE_FOCUS}; background: {alpha(FEED_BADGE_FOCUS, 0.12)};
+}}
+/* Study-only feed tones.  These selectors are declared after the historic
+   badge rules so Study OTT can be yellow without recolouring normal OTT or
+   COSINE, and messaging can be orange without changing shared amber/cyan. */
+QLabel#feedTag[tone="study-yellow"] {{
+    color: {FEED_STUDY_OTT}; background: {alpha(FEED_STUDY_OTT, 0.12)};
+}}
+QLabel#feedTag[tone="study-orange"] {{
+    color: {FEED_STUDY_MESSAGING}; background: {alpha(FEED_STUDY_MESSAGING, 0.12)};
 }}
 
 /* ---------- showcase hairlines (Metric Hub / Live MIRL / COSINE fixtures) --
@@ -1968,3 +1979,37 @@ __all__ = [
     "make_font",
     "resource_icon",
 ]
+
+
+def secant_popup_palette(color: str) -> tuple[str, str, str]:
+    """Cosmetic tokens only; the caller supplies the authoritative stage colour."""
+    return {
+        "blue": ("#32D6F5", "#101827", "#163848"),
+        "amber": ("#FFB018", "#1D1509", "#49330F"),
+        "red": ("#FF416D", "#210A11", "#52202E"),
+    }[color]
+
+
+def secant_popup_stylesheet(color: str) -> str:
+    accent, panel, track = secant_popup_palette(color)
+    return f"""
+    QDialog#secantDialog {{ background: transparent; }}
+    QFrame#secantShell {{ background: {panel}; border: 2px solid {accent}; border-radius: 24px; }}
+    QLabel {{ background: transparent; border: none; color: #F1F5F9; font-family: 'Segoe UI'; }}
+    QLabel#secantEyebrow {{ color: #9BAFCB; font-size: 13px; font-weight: 600; letter-spacing: 2px; }}
+    QLabel#secantBadge {{ color: {accent}; border: 1px solid {accent}; border-radius: 14px; padding: 7px 16px; font-size: 13px; font-weight: 700; }}
+    QLabel#secantTitle {{ color: {accent}; font-size: 34px; font-weight: 700; }}
+    QLabel#secantBody {{ font-size: 17px; }}
+    QLabel#secantResource {{ color: #9BAFCB; font-family: 'Consolas'; font-size: 12px; }}
+    QLabel#secantStatus, QLabel#secantProtected {{ color: {accent}; font-family: 'Consolas'; font-size: 13px; font-weight: 700; }}
+    QLabel#secantTiming, QLabel#secantFooter {{ color: #9BAFCB; font-family: 'Consolas'; font-size: 12px; }}
+    QPushButton#secantPrimary, QPushButton#secantSecondary {{ border: 2px solid {accent}; border-radius: 13px; padding: 8px 18px; font-family: 'Segoe UI'; font-size: 15px; font-weight: 700; }}
+    QPushButton#secantPrimary {{ background: {accent}; color: #07131D; }}
+    QPushButton#secantSecondary {{ background: {track}; color: {accent}; }}
+    QPushButton#secantPrimary:hover, QPushButton#secantSecondary:hover {{ border-color: #F1F5F9; }}
+    QPushButton#secantPrimary:focus, QPushButton#secantSecondary:focus {{ border: 3px solid #F1F5F9; }}
+    QPushButton#secantPrimary:pressed, QPushButton#secantSecondary:pressed {{ background: {panel}; color: {accent}; }}
+    QPushButton#secantPrimary:disabled, QPushButton#secantSecondary:disabled {{ background: {track}; color: #8190A4; border-color: {track}; }}
+    QProgressBar#secantProgress {{ border: none; background: {track}; border-radius: 3px; }}
+    QProgressBar#secantProgress::chunk {{ background: {accent}; border-radius: 3px; }}
+    """

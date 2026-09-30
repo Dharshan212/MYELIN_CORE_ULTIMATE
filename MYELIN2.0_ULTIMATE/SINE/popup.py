@@ -594,8 +594,6 @@ class SinePopupWindow(QWidget):
 
         if self.is_post_normal_break_return_gate:
             footer_text = "POST-BREAK RETURN · NOT A SINE STAGE"
-        elif presentation.study_mode:
-            footer_text = "STUDY ACTIVE · SINE INTERVENTION"
         else:
             footer_text = (
                 f"WEBER–FECHNER · {presentation.weber_fechner.intensity_label.upper()}"
@@ -608,14 +606,11 @@ class SinePopupWindow(QWidget):
 
     def _button_text(self, response: SineResponse) -> str:
         if response is SineResponse.RETURN_TO_FOCUS:
-            if self.request.presentation.study_mode:
-                return "RETURN TO STUDY"
             if self.request.stage is SineStage.SINE_2:
                 return "I'M BACK NOW"
             return "I'M BACK"
         return {
             SineResponse.REQUEST_BREAK: "NEED A BREAK",
-            SineResponse.THIS_IS_STUDY_MATERIAL: "THIS IS STUDY MATERIAL",
             SineResponse.CONTINUE_SINE: "CONTINUE SINE",
         }[response]
 
@@ -1539,17 +1534,6 @@ class SinePopupPresenter(QObject):
                 fact.popup_request_id,
                 fact.reason or "sine_close_command",
             )
-            return
-        if fact.kind == "SINE_STUDY_MATERIAL_RESULT":
-            window = self._windows.get(fact.popup_request_id)
-            if window is not None:
-                granted = fact.response == "granted"
-                if not granted:
-                    reason = fact.reason.replace("_", " ").strip()
-                    message = "STUDY MATERIAL ALLOWANCE NOT APPLIED"
-                    if reason:
-                        message = f"{message} · {reason}"
-                    window.show_action_result(message, allow_retry=True)
             return
         if fact.kind == "SINE_PROTECTED_RED_AWAITING_RECOVERY":
             window = self._windows.get(fact.popup_request_id)

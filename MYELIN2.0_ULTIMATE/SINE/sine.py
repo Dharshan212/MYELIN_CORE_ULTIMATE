@@ -402,6 +402,8 @@ class SineLiveView:
     post_normal_break_return_pending: bool = False
     activity_clock_paused: bool = False
     popup_hwnd: int = 0
+    study_context_token: str = ""
+    study_transition_close_pending: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -463,6 +465,7 @@ class _Episode:
     current_popup_request_id: str = ""
     protected_red: bool = False
     terminal_reason: str = ""
+    study_transition_close_pending: bool = False
     last_response: str = ""
     last_response_monotonic_ns: int | None = None
     stage_occurrences: dict[SineStage, int] = field(default_factory=dict)
@@ -604,8 +607,7 @@ class SineAuthority:
         """Receive the monitor's already-classified immutable observation.
 
         INSTRUCTION: SINE never reads Windows itself and never treats a title
-        as resource identity.  Exact Study alignment can resolve an episode;
-        uncertain evidence can neither resolve nor cancel it.
+        Recovery is verified by MIRL; observations do not resolve an episode.
         """
 
         with self._lock:
@@ -625,14 +627,10 @@ class SineAuthority:
                 return
 
             foreground = _field(context, "foreground")
-            snapshot = _field(context, "resource_intent")
-            verdict = _field(snapshot, "verdict")
             now_ns = int(_field(foreground, "observed_monotonic_ns", 0) or 0)
             if now_ns <= 0:
                 return
 
-            classification = _enum_text(_field(verdict, "classification", ""))
-            study_token = str(_field(verdict, "study_context_token", "") or "")
 
             # Protected Red cannot be displaced by another distracting window.
             # Only a verified recovery, emergency or shutdown may release it.
@@ -646,50 +644,8 @@ class SineAuthority:
                 # strongest intervention MYELIN has.  Red is released solely by
                 # confirm_verified_return(evidence_source="mirl") or by the
                 # existing emergency/shutdown terminal paths.
-                if self._is_verified_study_alignment(episode, snapshot, verdict):
-                    # The Red surface literally reads "AWAITING VERIFIED FOCUS
-                    # RETURN".  Reaching the exact Study resource proves the
-                    # resource, not the return, so Red is NOT released here --
-                    # that is strictly stronger than before, never weaker.
-                    # MIRL is watching the same observation and will verify the
-                    # return; monitor.py then calls confirm_verified_return.
-                    # Red is topmost-hinted but does not hold the foreground,
-                    # and it self-restores only when its window is closed, so
-                    # the user can work in the Study resource while it is up
-                    # and MIRL can observe that work.
-                    self._announce_study_alignment_hold(episode, now_ns)
                 return
 
-            if classification == "APPROVED_BREAK":
-                self._resolve_episode("approved_break", now_ns)
-                return
-
-            if self._is_verified_study_alignment(episode, snapshot, verdict):
-                # AUTHORITY BOUNDARY: exact Study alignment proves "this is the
-                # intended Study resource".  It does not prove "the behavioural
-                # return survived verification".  Those are different facts, and
-                # only MIRL owns the second one -- in Study Mode exactly as in
-                # normal mode.
-                #
-                # Resolving here used to end the episode in the same monitor
-                # cycle in which MIRL had just started RETURN_VERIFICATION, so
-                # MIRL consumed SINE_EPISODE_RESOLVED and closed ABORTED: a
-                # Study return could never produce Tr.  The episode now stays
-                # ACTIVE and resolution arrives only through
-                # confirm_verified_return(evidence_source="mirl").
-                self._announce_study_alignment_hold(episode, now_ns)
-                return
-
-            # A changed Study block invalidates the captured Study popup facts.
-            # An empty/uncertain observation is not enough; it may be MYELIN's
-            # own popup or a temporary unsupported surface.
-            if (
-                episode.study_mode
-                and study_token
-                and study_token != episode.study_context_token
-            ):
-                self._cancel_episode("study_context_changed", now_ns)
-                return
 
             if self._foreground_is_current_popup(foreground):
                 return
@@ -724,6 +680,11 @@ class SineAuthority:
             candidate_session = _field(candidate, "session_id", None)
             candidate_profile = _enum_text(_field(candidate, "profile_type", ""))
             evidence = _field(candidate, "evidence")
+            if (
+                str(_field(evidence, "study_context_token", "") or "")
+                or _enum_text(_field(evidence, "source", "")) == "STUDY_OFF_TASK"
+            ):
+                return False
             observed_ns = int(_field(evidence, "observed_monotonic_ns", 0) or 0)
             if (
                 not candidate_uid
@@ -731,6 +692,21 @@ class SineAuthority:
                 or candidate_profile != self._profile_type
                 or evidence is None
                 or observed_ns <= 0
+            ):
+                return False
+            from MIRL.mirl import MirlDisplayToken
+
+            token = mirl_display_token
+            now_ns = self._now_ns()
+            if (
+                not isinstance(token, MirlDisplayToken)
+                or token.session_id != candidate_session
+                or token.candidate_uid != candidate_uid
+                or token.operational_event_id != operational_event_id
+                or token.study_context_token != str(_field(evidence, "study_context_token", "") or "")
+                or token.evidence_digest != str(_field(evidence, "evidence_digest", "") or "")
+                or not token.token_id or not token.evidence_digest
+                or not token.issued_monotonic_ns <= now_ns < token.deadline_monotonic_ns
             ):
                 return False
 
@@ -741,7 +717,7 @@ class SineAuthority:
             # enough once that episode has already finished.
             consumed_event_id = self._consumed_candidates.get(candidate_uid)
             if consumed_event_id is not None:
-                return consumed_event_id == operational_event_id
+                return False
 
             timing = self._session_timing
             timing_source = timing.timing_source
@@ -767,18 +743,7 @@ class SineAuthority:
 
             current = self._episode
             if current is not None and not current.terminal:
-                if current.candidate_uid == candidate_uid:
-                    return current.operational_event_id == operational_event_id
-                if current.protected_red:
-                    self._emit(
-                        "SINE_TRIGGER_WITHHELD_PROTECTED_RED",
-                        "A later durable trigger was recorded while Protected Red remained active.",
-                        self._now_ns(),
-                        episode=current,
-                        reason="protected_red_precedence",
-                    )
-                    return True
-                self._cancel_episode("superseded_by_later_durable_trigger", self._now_ns())
+                return False
 
             accepted_ns = self._now_ns()
             dwell_seconds = max(0.0, float(_field(evidence, "dwell_seconds", 0.0) or 0.0))
@@ -791,7 +756,6 @@ class SineAuthority:
                 stage_2_delay_seconds_applied
             )
 
-            study_token = str(_field(evidence, "study_context_token", "") or "")
             resource_key = str(_field(evidence, "resource_key", "") or "")
             resource_title = self._current_resource_title()
             episode = _Episode(
@@ -810,9 +774,9 @@ class SineAuthority:
                 platform_key=str(_field(evidence, "platform_key", "") or ""),
                 resource_key=resource_key,
                 resource_title=resource_title,
-                study_context_token=study_token,
-                study_mode=bool(study_token),
-                study_material_action_allowed=self._safe_study_material_action(evidence),
+                study_context_token="",
+                study_mode=False,
+                study_material_action_allowed=False,
                 stage_2_timing_source=timing_source,
                 stage_2_delay_seconds_applied=stage_2_delay_seconds_applied,
                 stage_3_timing_source=timing_source,
@@ -873,6 +837,14 @@ class SineAuthority:
 
             episode = self._episode
             if episode is not None and not episode.terminal:
+                if episode.study_transition_close_pending:
+                    return self._take_facts()
+                if (
+                    episode.first_displayed_monotonic_ns is None
+                    and now_monotonic_ns >= episode.mirl_display_token.deadline_monotonic_ns
+                ):
+                    self._cancel_episode("mirl_first_display_token_expired", now_monotonic_ns)
+                    return self._take_facts()
                 if episode.monitor_held:
                     return self._take_facts()
                 # MIRL has verified recovery ENTRY but not final stability.
@@ -963,6 +935,14 @@ class SineAuthority:
                     shown_monotonic_ns,
                     popup_hwnd,
                 )
+
+            if episode.study_transition_close_pending:
+                return False
+            if occurrence.request.stage is SineStage.SINE_1:
+                token = episode.mirl_display_token
+                if token is None or shown_monotonic_ns >= token.deadline_monotonic_ns:
+                    self._cancel_episode("mirl_first_display_token_expired", shown_monotonic_ns)
+                    return False
 
             occurrence.state = PopupState.DISPLAYED
             occurrence.shown_monotonic_ns = shown_monotonic_ns
@@ -1178,13 +1158,15 @@ class SineAuthority:
                 )
             except ValueError:
                 return False
-            if selected not in occurrence.request.presentation.allowed_responses:
+            if (
+                selected is SineResponse.THIS_IS_STUDY_MATERIAL
+                or selected not in occurrence.request.presentation.allowed_responses
+            ):
                 return False
 
             # UNMISTAKABLE DISCRIMINATOR: only an occurrence SINE itself minted
             # as the post-Normal-Break gate takes the acknowledgement path.
-            # Ordinary Normal SINE-1/SINE-2 and Study RETURN_TO_FOCUS keep
-            # their existing meaning below, unchanged.
+            # Ordinary Normal SINE-1/SINE-2 retain their existing meaning.
             if (
                 occurrence.request.surface
                 is SineSurface.POST_NORMAL_BREAK_RETURN_GATE
@@ -1210,7 +1192,6 @@ class SineAuthority:
             response_kind = {
                 SineResponse.RETURN_TO_FOCUS: "SINE_RETURN_INTENT_RECORDED",
                 SineResponse.REQUEST_BREAK: "SINE_BREAK_REQUESTED",
-                SineResponse.THIS_IS_STUDY_MATERIAL: "SINE_STUDY_MATERIAL_REQUESTED",
                 SineResponse.CONTINUE_SINE: "SINE_CONTINUE_REQUESTED",
             }[selected]
             self._emit(
@@ -1235,16 +1216,12 @@ class SineAuthority:
             # does NOT confirm MIRL recovery, and does NOT cancel escalation.
             # Only later authoritative MIRL evidence may resolve the episode.
             #
-            # THIS_IS_STUDY_MATERIAL remains open while Resource Intent decides
-            # that separate request. REQUEST_BREAK and CONTINUE_SINE still close
-            # immediately after SINE accepts them.
-            if selected is not SineResponse.THIS_IS_STUDY_MATERIAL:
-                self._request_popup_close(
-                    episode,
-                    occurrence,
-                    occurred_monotonic_ns,
-                    f"response:{selected.value}",
-                )
+            self._request_popup_close(
+                episode,
+                occurrence,
+                occurred_monotonic_ns,
+                f"response:{selected.value}",
+            )
             return True
 
     def popup_expired(
@@ -1318,6 +1295,13 @@ class SineAuthority:
                 occurrence=occurrence,
                 reason=occurrence.close_reason,
             )
+            if (
+                episode.study_transition_close_pending
+                and episode.current_popup_request_id == occurrence.request.request_id
+                and not episode.terminal
+            ):
+                self._cancel_episode("STUDY_MODE_ACTIVATED", occurred_monotonic_ns)
+                return True
 
             # An unacknowledged gate surface disappearing does not release the
             # gate; the same episode still owes the user a WELCOME BACK to
@@ -1370,38 +1354,6 @@ class SineAuthority:
     # Confirmations from authoritative non-UI owners
     # ------------------------------------------------------------------
 
-    def cancel_matching_study_episode(
-        self,
-        *,
-        study_context_token: str,
-        occurred_monotonic_ns: int,
-        completion_reason: str,
-    ) -> bool:
-        """Cancel only the active SINE episode owned by a terminal Study scope."""
-
-        with self._lock:
-            episode = self._episode
-            if episode is None or episode.terminal or not episode.study_mode:
-                return True
-            if (
-                type(study_context_token) is not str
-                or not study_context_token
-                or episode.study_context_token != study_context_token
-                or type(completion_reason) is not str
-                or completion_reason
-                not in {"TARGET_REACHED", "USER_COMPLETED"}
-                or not self._valid_event_time(
-                    occurred_monotonic_ns,
-                    episode.accepted_monotonic_ns,
-                )
-            ):
-                return False
-
-            self._cancel_episode(
-                f"study_scope_terminal:{completion_reason.lower()}",
-                occurred_monotonic_ns,
-            )
-            return True
 
     def withhold_presentation_for_verified_return_entry(
         self,
@@ -1430,8 +1382,7 @@ class SineAuthority:
                 # real SINE 2, exactly as before.
                 and not episode.post_normal_break_return_pending
                 and (
-                    episode.study_mode
-                    or (
+                    (
                         episode.current_stage is SineStage.SINE_3
                         and episode.protected_red
                     )
@@ -1517,7 +1468,6 @@ class SineAuthority:
             ):
                 return False
             episode.presentation_withheld_for_recovery = False
-            episode.study_alignment_announced = False
             occurrence = self._current_popup(episode)
             self._emit(
                 "SINE_PRESENTATION_RESUMED_AFTER_RELAPSE",
@@ -1544,15 +1494,16 @@ class SineAuthority:
         candidate_uid: str,
         occurred_monotonic_ns: int,
         evidence_source: str,
+        study_context_token: str = "",
     ) -> bool:
-        """Pause one Normal SINE escalation clock on factual ordinary Activity."""
+        """Pause the matching SINE escalation clock on factual ordinary Activity."""
 
         with self._lock:
             episode = self._episode
             if (
                 episode is None
                 or episode.terminal
-                or episode.study_mode
+                or bool(study_context_token)
                 or episode.protected_red
                 or episode.normal_break_held
                 # The post-break acknowledgement gate is its own specialist
@@ -1597,15 +1548,16 @@ class SineAuthority:
         candidate_uid: str,
         occurred_monotonic_ns: int,
         evidence_source: str,
+        study_context_token: str = "",
     ) -> bool:
-        """Resume the same Normal SINE clock when Activity no longer owns it."""
+        """Resume the same SINE clock when Activity no longer owns it."""
 
         with self._lock:
             episode = self._episode
             if (
                 episode is None
                 or episode.terminal
-                or episode.study_mode
+                or bool(study_context_token)
                 or episode.protected_red
                 or episode.normal_break_held
                 or episode.post_normal_break_return_pending
@@ -1732,20 +1684,68 @@ class SineAuthority:
             self._cancel_episode("monitor_terminated", now_ns)
             return bool(self._episode is not None and self._episode.terminal)
 
+    def cancel_exact_candidate(
+        self, *, candidate_uid: str, operational_event_id: int,
+        reason: str, now_ns: int,
+    ) -> bool:
+        """Retire only the exact rejected/expired handoff; never its successor."""
+        with self._lock:
+            episode = self._episode
+            if (
+                episode is None or episode.candidate_uid != candidate_uid
+                or episode.operational_event_id != operational_event_id
+            ):
+                return False
+            if not episode.terminal:
+                self._cancel_episode(str(reason), now_ns)
+            return True
+
+    def close_for_study_transition(
+        self, *, episode_uid: str, candidate_uid: str,
+        operational_event_id: int, now_ns: int,
+    ) -> bool:
+        """Begin the authorized exact close; a displayed surface must ACK."""
+        with self._lock:
+            episode = self._episode
+            if (
+                episode is None or episode.episode_uid != episode_uid
+                or episode.candidate_uid != candidate_uid
+                or episode.operational_event_id != operational_event_id
+                or episode.study_mode
+                or not self._valid_event_time(now_ns, episode.accepted_monotonic_ns)
+            ):
+                return False
+            if episode.terminal:
+                return episode.terminal_reason == "STUDY_MODE_ACTIVATED"
+            episode.study_transition_close_pending = True
+            occurrence = self._current_popup(episode)
+            if occurrence is not None and occurrence.state in {
+                PopupState.DISPLAYED, PopupState.CLOSE_REQUESTED,
+            } and occurrence.shown_monotonic_ns is not None:
+                if occurrence.state is PopupState.DISPLAYED:
+                    self._request_popup_close(
+                        episode, occurrence, now_ns, "STUDY_MODE_ACTIVATED"
+                    )
+                return True
+            self._cancel_episode("STUDY_MODE_ACTIVATED", now_ns)
+            return True
+
     def preempt_for_study(self, *, now_ns: int | None = None) -> bool:
         """Immediately end the current SINE episode when Dad/Study takes ownership.
 
         Study is a stronger owner, not a sibling.  This operation therefore
         creates no handover, saves no SINE remainder, and never restores the
-        old episode after Study ends.  It is deliberately one-shot rather than
-        a Study suppression latch because SINE may later admit fresh Study-mode
-        distraction episodes under the normal Study context.
+        old episode after Study ends. Study intervention is not admitted by SINE.
         """
 
         with self._lock:
             episode = self._episode
             if episode is None or episode.terminal:
                 return True
+            if not episode.study_mode and (
+                episode.protected_red or episode.current_stage >= SineStage.SINE_2
+            ):
+                return False
 
             occurred_ns = self._now_ns() if now_ns is None else now_ns
             if not self._valid_event_time(
@@ -2015,62 +2015,6 @@ class SineAuthority:
             )
             return True
 
-    def record_study_material_result(
-        self,
-        *,
-        request_id: str,
-        granted: bool,
-        occurred_monotonic_ns: int,
-        reason: str,
-    ) -> bool:
-        """Record Monitor's answer to a Study Material declaration."""
-
-        with self._lock:
-            occurrence = self._popups.get(str(request_id or ""))
-            episode = self._episode
-            if occurrence is None or episode is None or episode.terminal:
-                return False
-            if occurrence.request.episode_uid != episode.episode_uid:
-                return False
-            if not self._valid_event_time(
-                occurred_monotonic_ns,
-                occurrence.request.requested_monotonic_ns,
-            ):
-                return False
-            if occurrence.response != SineResponse.THIS_IS_STUDY_MATERIAL.value:
-                return False
-            self._emit(
-                "SINE_STUDY_MATERIAL_RESULT",
-                "Monitor returned the Study Material declaration result.",
-                occurred_monotonic_ns,
-                episode=episode,
-                occurrence=occurrence,
-                reason=str(reason or ("granted" if granted else "denied")),
-                response="granted" if granted else "denied",
-            )
-            if granted:
-                # UI action is not recovery truth -- the same principle already
-                # settled for I'M BACK.  Granting the allowance means Resource
-                # Intent accepted the resource identity, so this popup
-                # occurrence may close and let the user reach the underlying
-                # Study resource. The SINE episode deliberately stays ACTIVE,
-                # waiting for MIRL.
-                self._request_popup_close(
-                    episode,
-                    occurrence,
-                    occurred_monotonic_ns,
-                    "study_material_allowance_granted",
-                )
-            else:
-                # BUGFIX: denial is a factual result, but the SINE surface
-                # remains active and the user must still be able to respond
-                # (e.g. RETURN_TO_FOCUS). Without this, popup_response's
-                # "occurrence.state is not DISPLAYED or occurrence.response"
-                # guard permanently rejects every later response on this same
-                # popup occurrence, since occurrence.response was left set to
-                # "this_is_study_material" forever.
-                occurrence.response = ""
-            return True
 
     # ------------------------------------------------------------------
     # Protected Red, read model and shutdown
@@ -2082,6 +2026,8 @@ class SineAuthority:
         with self._lock:
             episode = self._episode
             if episode is None or episode.terminal or not episode.protected_red:
+                return False
+            if episode.study_transition_close_pending:
                 return False
             if episode.presentation_withheld_for_recovery:
                 return True
@@ -2161,6 +2107,8 @@ class SineAuthority:
                 or episode.post_normal_break_return_pending
             ):
                 remaining = None
+            elif episode.monitor_held and episode.monitor_hold_remaining_ns is not None:
+                remaining = episode.monitor_hold_remaining_ns / NANOSECONDS_PER_SECOND
             elif (
                 episode.presentation_withheld_for_recovery
                 and episode.recovery_pause_remaining_ns is not None
@@ -2174,6 +2122,11 @@ class SineAuthority:
                     episode.activity_pause_remaining_ns
                     / NANOSECONDS_PER_SECOND
                 )
+            elif not episode.terminal and episode.current_stage in {SineStage.SINE_1, SineStage.SINE_2}:
+                # These consumers display the escalation interval, not the
+                # popup's separate visibility timeout. Read the existing clock.
+                _, remaining_ns = self._capture_escalation_deadline(episode, now_ns)
+                remaining = None if remaining_ns is None else remaining_ns / NANOSECONDS_PER_SECOND
             else:
                 deadline = self._next_deadline(episode)
                 remaining = (
@@ -2196,7 +2149,9 @@ class SineAuthority:
                 stage_3_deadline_monotonic_ns=episode.stage_3_deadline_monotonic_ns,
                 next_deadline_seconds=remaining,
                 protected_red_active=bool(episode.protected_red and not episode.terminal),
-                study_mode=episode.study_mode,
+                study_mode=False,
+                study_context_token="",
+                study_transition_close_pending=episode.study_transition_close_pending,
                 last_response=episode.last_response,
                 last_fact=self._last_fact,
                 stage_2_timing_source=episode.stage_2_timing_source,
@@ -2700,59 +2655,40 @@ class SineAuthority:
         stage: SineStage,
     ) -> SinePresentation:
         title = episode.resource_title
-        if episode.study_mode:
-            if stage is SineStage.SINE_1:
-                headline = "Study focus notice"
-                message = (
-                    "The active study block is running. Return to the "
-                    "registered study resource."
-                )
-            elif stage is SineStage.SINE_2:
-                headline = "Study focus needs attention"
-                message = "The off-task episode continued after the first study notice."
-            else:
-                headline = "Study recovery required"
-                message = "Protected Red remains active until recovery is factually verified."
-            responses: tuple[SineResponse, ...]
-            if stage is SineStage.SINE_3:
-                responses = ()
-            else:
-                responses = (SineResponse.RETURN_TO_FOCUS,)
+        if stage is SineStage.SINE_1:
+            headline = "Cognitive Drift Detected"
+            message = "The current resource reached its intervention threshold."
+            responses = (
+                SineResponse.RETURN_TO_FOCUS,
+                SineResponse.REQUEST_BREAK,
+            )
+        elif stage is SineStage.SINE_2:
+            # WELCOME BACK is NOT SINE 2.  The green post-Normal-Break
+            # surface is its own acknowledgement gate -- see
+            # ``_post_normal_break_return_presentation`` -- so every
+            # factual SINE 2, post-break or ordinary, is the amber stage.
+            headline = "Still Here?"
+            message = (
+                "You stepped away for a moment, but the loop pulled you back. "
+                "Your focus window is still open."
+            )
+            # Normal SINE 2 now has one return action.  The compatibility
+            # enum/handler for CONTINUE_SINE remains available for old
+            # persisted inputs, but new presentation never offers it.
+            responses = (SineResponse.RETURN_TO_FOCUS,)
         else:
-            if stage is SineStage.SINE_1:
-                headline = "Cognitive Drift Detected"
-                message = "The current resource reached its intervention threshold."
-                responses = (
-                    SineResponse.RETURN_TO_FOCUS,
-                    SineResponse.REQUEST_BREAK,
-                )
-            elif stage is SineStage.SINE_2:
-                # WELCOME BACK is NOT SINE 2.  The green post-Normal-Break
-                # surface is its own acknowledgement gate -- see
-                # ``_post_normal_break_return_presentation`` -- so every
-                # factual SINE 2, post-break or ordinary, is the amber stage.
-                headline = "Still Here?"
-                message = (
-                    "You stepped away for a moment, but the loop pulled you back. "
-                    "Your focus window is still open."
-                )
-                # Normal SINE 2 now has one return action.  The compatibility
-                # enum/handler for CONTINUE_SINE remains available for old
-                # persisted inputs, but new presentation never offers it.
-                responses = (SineResponse.RETURN_TO_FOCUS,)
-            else:
-                headline = "Long Drift Detected"
-                message = (
-                    "You've been away for a while. "
-                    "Protected Red remains active until recovery is factually verified."
-                )
-                responses = ()
+            headline = "Long Drift Detected"
+            message = (
+                "You've been away for a while. "
+                "Protected Red remains active until recovery is factually verified."
+            )
+            responses = ()
         return SinePresentation(
             world={1: "blue", 2: "amber", 3: "red"}[int(stage)],
             badge=f"SINE {int(stage)}",
             headline=headline,
             message=message,
-            study_mode=episode.study_mode,
+            study_mode=False,
             resource_title=title,
             allowed_responses=responses,
             weber_fechner=_weber_fechner_projection(stage),
@@ -2788,76 +2724,8 @@ class SineAuthority:
         observation = _field(snapshot, "observation")
         return str(_field(observation, "raw_title", "") or "").strip()[:240]
 
-    def _safe_study_material_action(self, evidence: object) -> bool:
-        if not str(_field(evidence, "study_context_token", "") or ""):
-            return False
-        if not str(_field(evidence, "resource_key", "") or ""):
-            return False
-        if not str(_field(evidence, "resource_observation_token", "") or ""):
-            return False
-        surface = str(_field(evidence, "surface_class", "") or "").casefold()
-        if surface not in {"youtube_watch", "web_content", "document", "learning_app"}:
-            return False
-        if surface in {"youtube_watch", "web_content"}:
-            evidence_kind = str(
-                _field(evidence, "browser_evidence_kind", "") or ""
-            ).casefold()
-            return evidence_kind not in {"", "none", "unknown", "unavailable", "title_only"}
-        return True
 
-    def _is_verified_study_alignment(
-        self,
-        episode: _Episode,
-        snapshot: object,
-        verdict: object,
-    ) -> bool:
-        """True when Resource Intent factually reports THIS episode's Study
-        resource in focus.
 
-        AUTHORITY BOUNDARY: Resource Intent is the Study verdict authority.
-        Requiring allowance_match/allowance_active here re-derived WHY the
-        verdict was issued and silently excluded C4's automatic route, in
-        which a genuine certified lecture aligns with no manual allowance at
-        all.  SINE now trusts the published classification and checks only
-        that it belongs to this episode's Study block.
-
-        This is recognition, not release.  The caller records a hold; only
-        ``confirm_verified_return(evidence_source="mirl")`` may end an episode.
-        """
-
-        if not episode.study_mode:
-            return False
-        return bool(
-            bool(_field(snapshot, "fresh", False))
-            and _enum_text(_field(verdict, "classification", "")) == "STUDY_ALIGNED"
-            and str(_field(verdict, "study_context_token", "") or "")
-            == episode.study_context_token
-        )
-
-    def _announce_study_alignment_hold(
-        self,
-        episode: _Episode,
-        now_ns: int,
-    ) -> None:
-        """Record once that SINE is holding open, waiting for MIRL to verify.
-
-        Emitted at most once per episode so a per-cycle observation cannot
-        flood the research ledger, mirroring the existing
-        ``protected_wait_announced`` pattern.
-        """
-
-        if episode.study_alignment_announced:
-            return
-        episode.study_alignment_announced = True
-        self._emit(
-            "SINE_STUDY_ALIGNMENT_AWAITING_RECOVERY",
-            "The exact Study resource is in focus; SINE is holding this "
-            "episode open until MIRL verifies the return.",
-            now_ns,
-            episode=episode,
-            occurrence=self._current_popup(episode),
-            reason="awaiting_mirl_verified_return",
-        )
 
     def _foreground_is_current_popup(self, foreground: object) -> bool:
         episode = self._episode
@@ -2882,9 +2750,6 @@ class SineAuthority:
             ),
             SineResponse.REQUEST_BREAK: (
                 "A break was requested; SINE waits for lifecycle confirmation."
-            ),
-            SineResponse.THIS_IS_STUDY_MATERIAL: (
-                "A Study Material allowance was requested from Resource Intent."
             ),
             SineResponse.CONTINUE_SINE: (
                 "The user asked SINE to continue; escalation deadlines remain active."
@@ -2965,7 +2830,7 @@ class SineAuthority:
             popup_request_id=occurrence.request.request_id if occurrence else "",
             reason=reason,
             response=response,
-            study_context_token=episode.study_context_token if episode else "",
+            study_context_token="",
             resource_key=episode.resource_key if episode else "",
             popup=popup,
             mirl_display_token=mirl_display_token,

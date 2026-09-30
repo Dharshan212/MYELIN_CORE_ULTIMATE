@@ -807,7 +807,7 @@ class _Chrome:
             c.drawString(MARGIN_X + 40, yy - 4, self.glyphs.clean(name))
             yy -= 40
         x = PAGE_W - MARGIN_X - 240
-        rows = (("REPORTING PERIOD", m.period_text), ("GENERATED", m.generated_label), ("ORGANS", f"{len(m.cover_items)} selected"))
+        rows = (("REPORTING PERIOD", m.period_text), ("GENERATED", m.generated_label), ("REPORT FAMILIES", f"{len(m.cover_items)} selected"))
         yy = 246
         for label, value in rows:
             self._spaced(c, label, x, yy, self.f["semi"], 7.2, MUTED, 1.6)
@@ -833,7 +833,8 @@ class _Doc(BaseDocTemplate):
         if isinstance(flowable, SectionTitle):
             key = f"sec-{flowable.key}-{self.page}"
             self.canv.bookmarkPage(key)
-            self.canv.addOutlineEntry(flowable.title, key, 1 if flowable.appendix else 0, 0)
+            self.canv.addOutlineEntry(flowable.title, key,
+                                      1 if flowable.appendix or flowable.key in {"secant", "cosecant"} else 0, 0)
 
 
 # --------------------------------------------------------------------------
@@ -881,6 +882,8 @@ def build_analytics_sheet_pdf(
     sample_banner: str = "",
     study_records=None,
     study_error: str | None = None,
+    study_family=None,
+    study_family_error: str | None = None,
 ) -> BuildResult:
     """Render one A4 report to ``output_path`` (the caller owns safe finalisation)."""
 
@@ -892,6 +895,8 @@ def build_analytics_sheet_pdf(
         sample_banner=sample_banner,
         study_records=study_records,
         study_error=study_error,
+        study_family=study_family,
+        study_family_error=study_family_error,
     )
     return render_model(model, output_path, logo_path=logo_path)
 

@@ -31,17 +31,22 @@ from typing import Final
 from .period import Period, make_period, parse_instant, select_by_start
 
 SECTION_KEYS: Final = ("live-mirl", "cosine", "mine", "study-mode")
+REPORT_KEYS: Final = (*SECTION_KEYS, "secant", "cosecant")
 SECTION_TITLES: Final = {
     "live-mirl": "MIRL",
     "cosine": "COSINE",
     "mine": "MINE",
     "study-mode": "STUDY MODE",
+    "secant": "SECANT",
+    "cosecant": "COSECANT",
 }
 SECTION_SUBTITLES: Final = {
     "live-mirl": "Recovery episodes",
     "cosine": "OTT episodes",
     "mine": "Messaging episodes",
     "study-mode": "Study records",
+    "secant": "Study off-task recovery evidence",
+    "cosecant": "Approved Study-break and return evidence",
 }
 SECTION_ATTRS: Final = {"live-mirl": "live_mirl", "cosine": "cosine", "mine": "mine"}
 INTEGRITY_TITLE: Final = "Evidence Integrity"
@@ -349,7 +354,7 @@ def _empty_blocks(period_text: str, unit: str, *, unplaceable: int = 0) -> list[
 
 
 def _unavailable_blocks(detail: str) -> list[Block]:
-    return [EmptyState("Evidence unavailable", "The evidence for this organ could not be read or validated, so no statement is made about the selected period. " + txt(detail, "")[:240], "warn")]
+    return [EmptyState("Evidence unavailable", "The evidence for this report section could not be read or validated, so no statement is made about the selected period. " + txt(detail, "")[:240], "warn")]
 
 
 # --------------------------------------------------------------------------
@@ -782,10 +787,10 @@ class _StudySnapshot:
     source_id: str
 
 
-def _study_blocks(records) -> tuple[dict[str, list[_StudySnapshot]], int]:
+def _study_blocks(records) -> tuple[dict[tuple[object, str, object], list[_StudySnapshot]], int]:
     """Group durable Study Mode snapshots by study block (shutdown markers with no block are skipped)."""
 
-    blocks: dict[str, list[_StudySnapshot]] = {}
+    blocks: dict[tuple[object, str, object], list[_StudySnapshot]] = {}
     malformed = 0
     for row in records:
         try:
@@ -798,7 +803,12 @@ def _study_blocks(records) -> tuple[dict[str, list[_StudySnapshot]], int]:
         block_id = txt(payload.get("block_id"), "")
         if not block_id:
             continue
-        blocks.setdefault(block_id, []).append(
+        generation = payload.get("generation", 1)
+        if type(generation) is not int or generation <= 0:
+            malformed += 1
+            continue
+        identity = (g(row, "session_id"), block_id, generation)
+        blocks.setdefault(identity, []).append(
             _StudySnapshot(txt(g(row, "created_at_utc"), ""), txt(g(row, "kind"), ""), payload, g(row, "session_id"), txt(g(row, "source_event_id"), ""))
         )
     for snapshots in blocks.values():
@@ -821,7 +831,7 @@ def _fmt_planned(seconds: object) -> str:
     return f"{minutes} min" + (f" {rest} s" if rest else "") + f" ({int(seconds):,} s)"
 
 
-def _study_section(records, error: str | None, period: Period, zone) -> tuple[Section, str, tuple[str, ...]]:
+def _study_section(records, error: str | None, period: Period, zone, family=None) -> tuple[Section, str, tuple[str, ...]]:
     key = "study-mode"
     subtitle = SECTION_SUBTITLES[key]
     if records is None:
@@ -834,10 +844,12 @@ def _study_section(records, error: str | None, period: Period, zone) -> tuple[Se
         "Shutdown markers that carry no study block are not study blocks and are not listed."
     )
     if not selection.inside:
-        blocks: list[Block] = _empty_blocks(period.label, "study block", unplaceable=0)
+        blocks: list[Block] = _empty_blocks(period.label, "study block", unplaceable=selection.unplaceable)
         blocks.append(unit_note)
+        if malformed:
+            blocks.append(Note(f"{malformed:,} durable Study Mode row(s) could not be read and are not part of any block.", "warn"))
         return Section(key, SECTION_TITLES[key], subtitle, tuple(blocks)), NO_DATA_STATE, ()
-    chosen = sorted(selection.inside, key=lambda item: (_study_start(item[1]) or "", item[0]))
+    chosen = sorted(selection.inside, key=lambda item: (_study_start(item[1]) or "", str(item[0])))
     total_snaps = sum(len(s) for _b, s in chosen)
     completed = sum(1 for _b, s in chosen if any(x.action.upper() == "COMPLETE" for x in s))
     blocks = [
@@ -853,7 +865,8 @@ def _study_section(records, error: str | None, period: Period, zone) -> tuple[Se
         _grouped("Last recorded state", "State", [(s[-1].payload.get("state")) for _b, s in chosen], note="Grouped from each block's final recorded snapshot.", unit="Blocks"),
     ]
     rows = []
-    for block_id, snaps in chosen:
+    for identity, snaps in chosen:
+        block_id = identity[1]
         last = snaps[-1].payload
         rows.append(
             (
@@ -876,7 +889,8 @@ def _study_section(records, error: str | None, period: Period, zone) -> tuple[Se
         )
     )
     blocks.append(Heading("Study block records", "Durable snapshots in recorded order. Snapshots recorded outside the selected dates are marked."))
-    for block_id, snaps in chosen:
+    for identity, snaps in chosen:
+        block_id = identity[1]
         last = snaps[-1].payload
         event_rows = []
         outside = 0
@@ -924,9 +938,181 @@ def _study_section(records, error: str | None, period: Period, zone) -> tuple[Se
                 caption=(f"{outside:,} snapshot(s) of this block were recorded outside the selected dates and are marked." if outside else ""),
             )
         )
+    if family is not None:
+        blocks.extend(_study_resource_blocks(family, {identity for identity, _snaps in chosen}))
+    if selection.unplaceable:
+        blocks.append(Note(f"{selection.unplaceable:,} Study block(s) have no readable start time and are unplaceable.", "warn"))
     if malformed:
         blocks.append(Note(f"{malformed:,} durable Study Mode row(s) could not be read and are not part of any block.", "warn"))
-    return Section(key, SECTION_TITLES[key], subtitle, tuple(blocks)), AVAILABLE_STATE, tuple(b for b, _s in chosen)
+    return Section(key, SECTION_TITLES[key], subtitle, tuple(blocks)), AVAILABLE_STATE, tuple(identity[1] for identity, _s in chosen)
+
+
+def _study_resource_blocks(family, chosen: set[tuple]) -> list[Block]:
+    """Show only validated observations belonging to selected Study blocks."""
+    if g(family, "errors", {}).get("study"):
+        return [Note("Additional Study resource evidence is unavailable; timer records above remain separate.", "warn")]
+    resources, visits, jumps = [], [], []
+    for _sid, study in g(family, "studies", ()):
+        def selected(row):
+            return (row.get("session_id"), row.get("study_block_id"), row.get("study_generation")) in chosen
+
+        resources.extend(row for row in study.get("resources", ()) if selected(row))
+        visits.extend(row for row in study.get("visits", ()) if selected(row))
+        jumps.extend(item for item in study.get("jumps", ()) if selected(item["visit"]))
+    blocks: list[Block] = [Heading("Recorded Study resource evidence",
+        "Observed spans only. Gaps are not counted as focused time or silently joined.")]
+    blocks.append(_table(("Role", "Resource", "Qualified (UTC)"),
+        [(r.get("role"), r.get("title", "Title not recorded"), r.get("qualified_at_utc")) for r in resources],
+        (1.3, 4.6, 3.0), title="PRIMARY / LATER qualified resources",
+        empty="No qualified Study resource was recorded for the selected blocks."))
+    blocks.append(_table(("Resource", "Supported foreground", "Classification", "Confirmation"),
+        [(v.get("title", "Title not recorded"), fmt_seconds(v.get("supported_duration_ns", 0) / 1e9),
+          v.get("effective", {}).get("classification", "Not recorded"),
+          v.get("effective", {}).get("user_confirmation", "Not recorded")) for v in visits],
+        (3.2, 1.8, 2.2, 2.0), title="Study visits and observation evidence",
+        note="Duration is supported only within each validated visit. Classification and confirmation come from that visit's own evidence.",
+        empty="No validated Study visit was recorded for the selected blocks."))
+    jump_rows = []
+    for left, right in zip(jumps, jumps[1:]):
+        if (left["visit"].get("session_id"), left["visit"].get("study_block_id"),
+                left["visit"].get("study_generation")) != (
+                right["visit"].get("session_id"), right["visit"].get("study_block_id"),
+                right["visit"].get("study_generation")):
+            continue
+        jump_rows.append((left["visit"].get("title", "Title not recorded"),
+                          left.get("connector") or "Evidence gap",
+                          right["visit"].get("title", "Title not recorded")))
+    if jump_rows:
+        blocks.append(_table(("From visit", "Recorded connector", "To visit"), jump_rows,
+            (3.0, 2.7, 3.0), title="Study Jump",
+            note="A direct jump is shown only when the exact observed boundary chain supports it."))
+    else:
+        blocks.append(Note("Study Jump: no validated connector was recorded for the selected blocks."))
+    return blocks
+
+
+def _secant_section(family, error: str | None, period: Period, zone) -> tuple[Section, str, tuple[str, ...]]:
+    key = "secant"
+    if family is None or error or g(family, "errors", {}).get(key):
+        detail = "SECANT history could not be read or validated."
+        return Section(key, "SECANT", SECTION_SUBTITLES[key], tuple(_unavailable_blocks(detail))), UNAVAILABLE_STATE, ()
+    selection = select_by_start(g(family, "secant", ()), lambda item: item.get("start_utc"), period)
+    excluded = select_by_start(g(family, "secant_excluded", ()),
+                               lambda item: item.get("start_utc"), period).inside
+    if not selection.inside:
+        if excluded:
+            return Section(key, "SECANT", SECTION_SUBTITLES[key],
+                           tuple(_unavailable_blocks(
+                               f"{len(excluded)} SECANT episode(s) in this period have recorder gaps or unfinalized evidence; no validated episode can be counted."))), UNAVAILABLE_STATE, ()
+        return Section(key, "SECANT", SECTION_SUBTITLES[key],
+                       tuple(_empty_blocks(period.label, "SECANT episode", unplaceable=selection.unplaceable))), NO_DATA_STATE, ()
+    chosen = sorted(selection.inside, key=lambda item: (item["start_utc"], item["alias"]))
+    counts = Counter(row["highest_stage"] for row in chosen)
+    events = tuple(event for row in chosen for event in row["events"])
+    count_event = lambda name: sum(e["event_name"] == name for e in events)
+    blocks: list[Block] = [
+        CardRow((Card("Founded episodes", fmt_int(len(chosen)), "started in the selected period"),
+                 Card("Recovered episodes", fmt_int(sum(row["recovered"] for row in chosen)), "validated recovered closure"),
+                 Card("Open / incomplete", fmt_int(sum(not row["closed"] for row in chosen)), "not a failed recovery"))),
+        Note("SECANT verified-return events, recovered episodes and COSECANT return confirmations are distinct evidence units."),
+        _table(("Highest displayed stage", "Episodes"),
+               [(f"SECANT-{stage}", counts[stage]) for stage in (1, 2, 3)], (3.2, 1.2),
+               title="Exclusive stage distribution", note="Each validated episode is counted once, at its highest displayed stage."),
+        _table(("Recorded event", "Events"),
+               [(label, count_event(name)) for name, label in (
+                   ("SECANT_ACTION_INTENT", "Action intents"),
+                   ("SECANT_RETURN_STARTED", "Return attempts"),
+                   ("SECANT_RETURN_VERIFIED", "Verified-return events"),
+                   ("SECANT_RECOVERY_INTERRUPTED", "Recovery interruptions"))],
+               (3.2, 1.2), title="Recovery event counts"),
+        _grouped("Episode closure reasons", "Reason",
+                 [row["terminal_reason"] for row in chosen], unit="Episodes"),
+        Heading("SECANT episode records", "Native identities are not used as display aliases."),
+    ]
+    if excluded:
+        blocks.insert(1, Note(
+            f"{len(excluded)} SECANT episode(s) in the selected period were excluded because recorder evidence is incomplete or has a gap. Counts below cover validated episodes only; no behavioural outcome is inferred for excluded episodes.",
+            "warn"))
+    for row in chosen:
+        founded_ns = row["events"][0]["occurred_monotonic_ns"]
+        start = parse_instant(row["start_utc"])
+        event_rows, outside = [], 0
+        for index, event in enumerate(row["events"], 1):
+            at = start + timedelta(microseconds=(event["occurred_monotonic_ns"] - founded_ns) // 1000)
+            at_iso = at.isoformat()
+            flag = _outside_flag(period, at_iso)
+            outside += bool(flag)
+            event_rows.append((str(index), Cell(fmt_dt(at_iso, zone), sub=flag),
+                               event["event_name"], event["stage"] or DASH,
+                               event.get("reason") or DASH))
+        alias = row["alias"] if row["alias"] != "Unavailable" else "Alias unavailable"
+        blocks.append(Record(
+            title=f"{alias} · {fmt_dt(row['start_utc'], zone)}",
+            badges=(badge("Recovered" if row["recovered"] else "Closed" if row["closed"] else "Open / incomplete"),),
+            facts=(("Study context", txt(row["context_id"])),
+                   ("Highest displayed", f"SECANT-{row['highest_stage']}"),
+                   ("Terminal reason", txt(row["terminal_reason"])),
+                   ("Founding source", txt(row["source_kind"])),
+                   ("Recorded source caption", txt(row["source_caption"])),
+                   ("Verified-return events", fmt_int(sum(e["event_name"] == "SECANT_RETURN_VERIFIED" for e in row["events"])))),
+            ids=(("Display alias", alias),),
+            table=_table(("#", "Event time", "Recorded fact", "Stage", "Reason"), event_rows,
+                         (0.5, 2.1, 3.0, 0.8, 2.0), dense=True),
+            caption=f"{outside} event(s) outside the selected dates are marked." if outside else ""))
+    if selection.unplaceable:
+        blocks.append(Note(f"{selection.unplaceable} SECANT episode(s) have no readable founding time.", "warn"))
+    return Section(key, "SECANT", SECTION_SUBTITLES[key], tuple(blocks)), AVAILABLE_STATE, tuple(row["alias"] for row in chosen)
+
+
+def _cosecant_section(family, error: str | None, period: Period, zone) -> tuple[Section, str, tuple[str, ...]]:
+    key = "cosecant"
+    if family is None or error or g(family, "errors", {}).get(key):
+        return Section(key, "COSECANT", SECTION_SUBTITLES[key],
+                       tuple(_unavailable_blocks("COSECANT history could not be read or validated."))), UNAVAILABLE_STATE, ()
+    selection = select_by_start(g(family, "cosecant", ()), lambda item: item.get("start_utc"), period)
+    if not selection.inside:
+        return Section(key, "COSECANT", SECTION_SUBTITLES[key],
+                       tuple(_empty_blocks(period.label, "COSECANT break", unplaceable=selection.unplaceable))), NO_DATA_STATE, ()
+    chosen = sorted(selection.inside, key=lambda item: (item["start_utc"], item["alias"]))
+    milestone_names = ("BREAK_STARTED", "BREAK_COMPLETE", "FINAL_LOCKED", "RETURN_INTENT_RECORDED",
+                       "RETURN_CONFIRMATION_STARTED", "RETURN_CONFIRMED")
+    blocks: list[Block] = [
+        CardRow((Card("Breaks started", fmt_int(len(chosen)), "recorded starts in the selected period"),
+                 Card("Allowance complete", fmt_int(sum(row["complete"] for row in chosen)), "deadline state reached"),
+                 Card("Confirmed returns", fmt_int(sum(row["confirmed"] for row in chosen)), "same-break resource proof"),
+                 Card("Cancelled breaks", fmt_int(sum(row["cancelled"] for row in chosen)), "recorded cancellation"))),
+        Note("No return confirmation recorded is not a failed return. Reminder stages reached do not prove popup paint."),
+        _table(("Recorded milestone", "Breaks reaching it"),
+               [(name.replace("_", " ").title(), sum(any(e["kind"] == name for e in row["events"]) for row in chosen))
+                for name in milestone_names], (3.5, 1.3), title="COSECANT recorded progression"),
+        Heading("COSECANT break records", "Each break retains its own target and return evidence."),
+    ]
+    for row in chosen:
+        event_rows, outside = [], 0
+        for index, event in enumerate(row["events"], 1):
+            at = event["payload"].get("occurred_wall_time_utc")
+            flag = _outside_flag(period, at)
+            outside += bool(flag)
+            event_rows.append((str(index), Cell(fmt_dt(at, zone), sub=flag),
+                               event["kind"],
+                               "Recorded" if event["kind"] == "RETURN_CONFIRMED" and event["payload"].get("evidence_token") else DASH))
+        alias = row["alias"] if row["alias"] != "Unavailable" else "Alias unavailable"
+        blocks.append(Record(
+            title=f"{alias} · {fmt_dt(row['start_utc'], zone)}",
+            badges=(badge("Return confirmed" if row["confirmed"] else "Cancelled" if row["cancelled"] else "Open / no confirmation recorded"),),
+            facts=(("Study block", txt(row["study_block_id"])),
+                   ("Selected allowance", _fmt_planned(row["allowance"])),
+                   ("Return target", txt(row["target_kind"])),
+                   ("Recorded target caption", txt(row["target_caption"])),
+                   ("Allowance deadline", "Reached" if row["complete"] else "Not recorded"),
+                   ("Return confirmation", "Recorded with evidence" if row["confirmed"] else "Not recorded")),
+            ids=(("Display alias", alias),),
+            table=_table(("#", "Event time", "Recorded fact", "Return proof"), event_rows,
+                         (0.5, 2.2, 3.5, 1.7), dense=True),
+            caption=f"{outside} event(s) outside the selected dates are marked." if outside else ""))
+    if selection.unplaceable:
+        blocks.append(Note(f"{selection.unplaceable} COSECANT break(s) have no readable start time.", "warn"))
+    return Section(key, "COSECANT", SECTION_SUBTITLES[key], tuple(blocks)), AVAILABLE_STATE, tuple(row["alias"] for row in chosen)
 
 
 # --------------------------------------------------------------------------
@@ -1061,15 +1247,16 @@ def _integrity_sections(projection: object, episodes: tuple, zone) -> list[Secti
 
 
 def _overview_section(selected, period: Period, zone, states, included, details, integrity_present: bool) -> Section:
-    unit = {"live-mirl": "episodes", "cosine": "episodes", "mine": "episodes", "study-mode": "study blocks"}
+    unit = {"live-mirl": "episodes", "cosine": "episodes", "mine": "episodes",
+            "study-mode": "study blocks", "secant": "SECANT episodes", "cosecant": "COSECANT breaks"}
     cards = []
     for key in selected:
         state = states[key]
         if state == UNAVAILABLE_STATE:
-            cards.append(Card(SECTION_TITLES[key], UNAVAILABLE, "evidence unavailable", "muted"))
+            cards.append(Card(("Study / " if key in {"secant", "cosecant"} else "") + SECTION_TITLES[key], UNAVAILABLE, "evidence unavailable", "muted"))
         else:
             n = len(included[key])
-            cards.append(Card(SECTION_TITLES[key], fmt_int(n), (f"{unit[key]} in the selected period" if n else NO_EPISODE), "" if n else "muted"))
+            cards.append(Card(("Study / " if key in {"secant", "cosecant"} else "") + SECTION_TITLES[key], fmt_int(n), (f"{unit[key]} in the selected period" if n else NO_EPISODE), "" if n else "muted"))
     blocks: list[Block] = [CardRow(tuple(cards[i : i + 4])) for i in range(0, len(cards), 4)]
     start_local = period.start_utc.astimezone(zone) if zone is not None else period.start_utc.astimezone()
     blocks.append(
@@ -1085,7 +1272,7 @@ def _overview_section(selected, period: Period, zone, states, included, details,
         n = len(included[key])
         rows.append(
             (
-                Cell(SECTION_TITLES[key], bold=True),
+                Cell(("  / " if key in {"secant", "cosecant"} else "") + SECTION_TITLES[key], bold=True),
                 Cell({AVAILABLE_STATE: "Available", NO_DATA_STATE: "Available (no data)", UNAVAILABLE_STATE: "Unavailable"}[state], tone={AVAILABLE_STATE: "ok", NO_DATA_STATE: "muted", UNAVAILABLE_STATE: "warn"}[state]),
                 Cell(UNAVAILABLE if state == UNAVAILABLE_STATE else (fmt_int(n) if n else NO_EPISODE)),
                 Cell(SECTION_SUBTITLES[key], small=True),
@@ -1094,15 +1281,25 @@ def _overview_section(selected, period: Period, zone, states, included, details,
         )
     blocks.append(
         _table(
-            ("Organ", "Evidence", "Records in period", "Recorded unit", "Note"),
+            ("Section", "Evidence", "Records in period", "Recorded unit", "Note"),
             rows,
             (1.4, 1.5, 1.6, 1.6, 3.6),
-            title="Organs in this report",
+            title="Report sections and evidence",
             align=("l", "l", "l", "l", "l"),
         )
     )
-    contents = [SECTION_TITLES[k] for k in selected] + ([INTEGRITY_TITLE] if integrity_present else [])
-    blocks.append(_table(("Chapter", "Title"), [(f"Chapter {i}", n) for i, n in enumerate(contents, 1)], (1.0, 3.0), title="Contents", header=False))
+    contents = []
+    chapter = child = 0
+    for key in selected:
+        if key in {"secant", "cosecant"}:
+            child += 1
+            contents.append((f"Chapter {chapter}.{child}", f"STUDY MODE / {SECTION_TITLES[key]}"))
+        else:
+            chapter += 1
+            contents.append((f"Chapter {chapter}", "STUDY MODE / Study Context" if key == "study-mode" and any(k in selected for k in ("secant", "cosecant")) else SECTION_TITLES[key]))
+    if integrity_present:
+        contents.append((f"Chapter {chapter + 1}", INTEGRITY_TITLE))
+    blocks.append(_table(("Chapter", "Title"), contents, (1.0, 3.0), title="Contents", header=False))
     return Section("overview", "Report overview", f"Reporting period {period.label}", tuple(blocks))
 
 
@@ -1120,14 +1317,18 @@ def build_report(
     sample_banner: str = "",
     study_records=None,
     study_error: str | None = None,
+    study_family=None,
+    study_family_error: str | None = None,
 ) -> ReportModel:
     requested = tuple(request.selected_sections())
     if not requested:
         raise ValueError("at least one analytics section is required")
-    unknown = [k for k in requested if k not in SECTION_KEYS]
+    unknown = [k for k in requested if k not in REPORT_KEYS]
     if unknown:
         raise ValueError(f"unknown analytics section: {unknown[0]}")
-    selected = tuple(k for k in SECTION_KEYS if k in requested)  # fixed order: MIRL, COSINE, MINE, STUDY MODE
+    selected = tuple(k for k in REPORT_KEYS if k in requested)
+    if any(key in selected for key in ("secant", "cosecant")) and "study-mode" not in selected:
+        raise ValueError("SECANT and COSECANT Analytics Sheet sections require Study Mode selection")
 
     timezone_key = str(getattr(request, "presentation_timezone", "local") or "local")
     if tz is None:
@@ -1156,9 +1357,21 @@ def build_report(
             projection = g(snapshot, "mine")
             section, state, ids = _mine_section(projection, period, zone)
             details[key] = organ_state(key, projection)[1]
-        else:
-            section, state, ids = _study_section(study_records, study_error, period, zone)
+        elif key == "study-mode":
+            section, state, ids = _study_section(study_records, study_error, period, zone, study_family)
+            if any(child in selected for child in ("secant", "cosecant")):
+                section = Section(section.key, "STUDY MODE / Study Context", section.subtitle, section.blocks)
             details[key] = "Study Mode evidence could not be read." if state == UNAVAILABLE_STATE else ""
+        elif key == "secant":
+            section, state, ids = _secant_section(study_family, study_family_error, period, zone)
+            excluded = (select_by_start(g(study_family, "secant_excluded", ()),
+                                        lambda item: item.get("start_utc"), period).inside
+                        if study_family is not None else ())
+            details[key] = (f"Separate SECANT episode authority; {len(excluded)} recorder-gap episode(s) excluded."
+                            if excluded else "Separate SECANT episode authority.")
+        else:
+            section, state, ids = _cosecant_section(study_family, study_family_error, period, zone)
+            details[key] = "Separate COSECANT break authority."
         chapters.append(section)
         states[key] = state
         included[key] = ids
@@ -1171,7 +1384,7 @@ def build_report(
         generated_iso=now.astimezone(timezone.utc).isoformat(timespec="seconds"),
         tz_label=tz_label(local_now),
         sections=(overview, *chapters, *integrity),
-        cover_items=tuple(SECTION_TITLES[k] for k in selected),
+        cover_items=tuple(SECTION_TITLES[k] for k in selected if k not in {"secant", "cosecant"}),
         scope_note="Only records inside the selected period are included.",
         states=states,
         included=included,

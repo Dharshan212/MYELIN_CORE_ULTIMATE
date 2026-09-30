@@ -51,7 +51,7 @@ from SCIENCE_LAB.handoff import Chapter3TransferReceipt
 
 
 REPORT_MODEL_SCHEMA_VERSION: Final = "myelin-report-phase4-render-model-v1"
-ORGAN_ORDER: Final = ("SINE", "MINE", "COSINE", "COSECANT")
+ORGAN_ORDER: Final = ("SINE", "MINE", "COSINE", "SECANT", "COSECANT")
 PRIMARY_TABLE_ROW_CAPACITY: Final = 2
 CONTINUATION_TABLE_ROW_CAPACITY: Final = 22
 NANOSECONDS_PER_SECOND: Final = 1_000_000_000
@@ -754,6 +754,60 @@ def _cosecant_model(package: Chapter3ResultPackage) -> OrganRenderModel | Unavai
     )
 
 
+def _secant_model(package):
+    from .secant_adapter import validate_package_rows
+    import textwrap
+    rows, scope = package.secant_episode_rows, package.secant_experiment_scope
+    validate_package_rows(rows, scope, package.parent_session_id,
+                          package.experiment_start_monotonic_ns, package.experiment_end_monotonic_ns)
+    if scope is None:
+        return UnavailableOrgan("SECANT", UNAVAILABLE, "SECANT absent from legacy certified package")
+    if not rows:
+        status = NO_EVIDENCE if scope.status == OUTSIDE_WINDOW else scope.status
+        return UnavailableOrgan("SECANT", status, scope.reason, scope.provenance)
+    summary, chronology = [], []
+    for row in rows:
+        alias = row.display_alias
+        values = (("Stage reached", f"SECANT-{row.stage_reached}"),
+                  ("Founding source", row.founding_source),
+                  ("Source state", row.source_status),
+                  ("Recorded caption", row.founding_caption),
+                  ("Caption state", row.caption_status),
+                  ("Terminal reason", row.terminal_reason or "NOT_RECORDED"))
+        for label, value in values:
+            for index, part in enumerate(textwrap.wrap(str(value), 100) or ["NOT_RECORDED"]):
+                summary.append((alias, label if index == 0 else "continued", part))
+        attempts = {}
+        for event in row.events:
+            if event.attempt_id:
+                attempts.setdefault(event.attempt_id, len(attempts) + 1)
+            attempt = str(attempts[event.attempt_id]) if event.attempt_id else "—"
+            detail = event.name.removeprefix("SECANT_")
+            if event.name == "SECANT_DISPLAYED":
+                detail += f" SECANT-{event.stage}"
+            if event.reason:
+                detail += ": " + event.reason
+            offset = f"+{(event.at_ns-package.experiment_start_monotonic_ns)/1e9:.3f}s"
+            for index, part in enumerate(textwrap.wrap(detail, 100) or [detail]):
+                chronology.append((alias, offset if index == 0 else "", attempt, part))
+    facts = [f for row in rows for f in row.events]
+    recovered = sum(any(f.name == "SECANT_RECOVERY_CLOSED" for f in row.events) for row in rows)
+    return OrganRenderModel("SECANT", "SECANT_RESULTS", AVAILABLE, scope.reason, _scope_note(scope), (
+        SnapshotCard("Episodes", str(len(rows)), "Complete, experiment-contained lifecycles"),
+        SnapshotCard("Highest stage", str(max(r.stage_reached for r in rows)), "Factual displayed stage"),
+        SnapshotCard("Verified returns", str(sum(f.name == "SECANT_RETURN_VERIFIED" for f in facts)), "SECANT attempt events, not MIRL"),
+        SnapshotCard("Recovered episodes", str(recovered), "Native recovery closure recorded"),
+        SnapshotCard("Data status", AVAILABLE, "Experiment-scoped SECANT evidence"),
+    ), ("FACTUAL DISPLAY", "STUDY RETURN", "VERIFICATION", "CONFIRMATION", "CLOSURE"),
+        TableRenderModel(1, "SECANT EPISODE EVIDENCE", "Stored alias, founding metadata and outcome; absent optional fields stay explicit.",
+                         ("EPISODE", "FIELD", "RECORDED VALUE"), tuple(summary), (35, 35, 104)),
+        TableRenderModel(2, "SECANT EVENT CHRONOLOGY", "Every certified event in occurrence order. Attempt numbers are local presentation labels.",
+                         ("EPISODE", "OFFSET", "ATTEMPT", "EVENT / REASON"), tuple(chronology), (35, 21, 18, 100)),
+        ChartRenderModel(UNAVAILABLE, "bar", (), (), "", "No generic recovery score or dwell is inferred", ""),
+        "SECANT verifies Study return independently of MIRL. A behavioural evidence_gap interruption is not recorder loss. "
+        "Episode closure alone does not establish recovery. COSECANT retains approved-break authority.", scope.provenance)
+
+
 def adapt_certified_report_input(source: Chapter3ResultPackage | Chapter3TransferReceipt) -> ReportRenderModel:
     if isinstance(source, Chapter3TransferReceipt):
         package = source.package
@@ -768,6 +822,7 @@ def adapt_certified_report_input(source: Chapter3ResultPackage | Chapter3Transfe
         _sine_model(package),
         _mine_model(package),
         _cosine_model(package),
+        _secant_model(package),
         _cosecant_model(package),
     )
     organ_pages = tuple(item for item in candidates if isinstance(item, OrganRenderModel))
@@ -796,7 +851,7 @@ def plan_report_pages(model: ReportRenderModel) -> ReportPagePlan:
         raise ReportModelError("page planner requires a certified render model")
     draft: list[tuple[str, str, str, int, tuple[tuple[str, ...], ...]]] = [
         ("cover", "COVER", "", 0, ()),
-        *(("static", f"SP{index}", "", 0, ()) for index in range(1, 6)),
+        *(("static", code, "", 0, ()) for code in ("SP1", "SP2", "SP3", "STUDY_ORGANS", "SP4", "SP5")),
         ("overview", "SP6", "", 0, ()),
     ]
     by_organ = {page.organ: page for page in model.organ_pages}
@@ -807,7 +862,7 @@ def plan_report_pages(model: ReportRenderModel) -> ReportPagePlan:
         draft.append(("organ", page.page_code, organ, 0, ()))
         for table in (page.table1, page.table2):
             overflow = table.rows[PRIMARY_TABLE_ROW_CAPACITY:]
-            for chunk in _chunks(overflow, CONTINUATION_TABLE_ROW_CAPACITY):
+            for chunk in _chunks(overflow, 12 if organ == "SECANT" else CONTINUATION_TABLE_ROW_CAPACITY):
                 draft.append(("continuation", f"{page.page_code}-T{table.number}-CONT", organ, table.number, chunk))
     if model.unavailable_organs:
         draft.append(("unavailable", "UNAVAILABLE", "", 0, ()))

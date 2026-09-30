@@ -49,7 +49,7 @@ import hashlib
 import math
 import secrets
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Final
 
@@ -57,7 +57,7 @@ from CORE_ENGINE.browser import BrowserUrlReadStatus, UrlEvidenceKind
 from CORE_ENGINE.resource_intent import ResourceIntent, ResourceSurface
 
 
-POLICY_VERSION: Final = "myelin-executive-blacklist-v2"
+POLICY_VERSION: Final = "myelin-executive-blacklist-v3"
 NANOSECONDS_PER_SECOND: Final = 1_000_000_000
 MAX_CONTINUITY_GAP_SECONDS: Final = 6.0
 
@@ -284,6 +284,7 @@ class BlacklistSnapshot:
     study_context_active: bool
     resource_key: str
     observation_sequence: int
+    sine_watch_inhibited: bool = False
 
     @property
     def should_submit(self) -> bool:
@@ -307,6 +308,7 @@ class BlacklistLiveView:
     next_sine_stage: int | None
     seconds_to_next_stage: float | None
     study_context_active: bool
+    sine_watch_inhibited: bool = False
     policy_version: str = POLICY_VERSION
 
 
@@ -539,6 +541,7 @@ class BlacklistAuthority:
         self._started = False
         self._closed = False
         self._paused = False
+        self._study_inhibited = False
         self._watch_generation = 0
         self._platform_key = ""
         self._source = SourceIdentity("", 0, 0)
@@ -567,6 +570,7 @@ class BlacklistAuthority:
             self._started = True
             self._closed = False
             self._paused = False
+            self._study_inhibited = False
             self._last_observed_ns = -1
             self._last_sequence = -1
             self._latest = None
@@ -598,6 +602,12 @@ class BlacklistAuthority:
             verdict = classify_resource(identity, browser_snapshot, intent_snapshot)
             intent_verdict = getattr(intent_snapshot, "verdict", None)
             study_active = bool(getattr(intent_verdict, "study_context_token", ""))
+            dad_owned = bool(getattr(context, "study_owned", False))
+            if self._study_inhibited and not dad_owned:
+                # A descriptive watch may have run during Study/COSECANT.
+                # None of that time can seed the next Normal SINE offer.
+                self._reset_watch()
+            self._study_inhibited = dad_owned
             resource_identity = getattr(intent_verdict, "resource_identity", None)
             resource_key = str(getattr(resource_identity, "stable_key", "") or "")
             resource_title = str(getattr(resource_identity, "normalised_title", "") or "")[:240]
@@ -626,7 +636,7 @@ class BlacklistAuthority:
                 self._last_sequence = sequence
                 self._resource_title = resource_title
                 elapsed = max(0.0, (now_ns - self._started_ns) / NANOSECONDS_PER_SECOND)
-                threshold_reached = elapsed >= target
+                threshold_reached = elapsed >= target and not dad_owned
                 retry_ns = int(self._thresholds.offer_retry_seconds * NANOSECONDS_PER_SECOND)
                 retry_due = self._last_offer_ns < 0 or now_ns - self._last_offer_ns >= retry_ns
                 if threshold_reached and not self._admitted_offer_uid and retry_due:
@@ -639,18 +649,17 @@ class BlacklistAuthority:
                     )
                     self._last_offer_ns = now_ns
                 state = (
-                    WatchState.SUBMITTED
-                    if self._admitted_offer_uid
-                    else WatchState.THRESHOLD_REACHED
-                    if threshold_reached
-                    else WatchState.WATCHING
+                    WatchState.WATCHING if dad_owned else
+                    WatchState.SUBMITTED if self._admitted_offer_uid else
+                    WatchState.THRESHOLD_REACHED if threshold_reached else
+                    WatchState.WATCHING
                 )
 
             # For inactive samples, remember sequence/time only for deduplication;
             # the next actionable sample starts a fresh visit.
             self._last_sequence = sequence
             self._last_observed_ns = now_ns
-            threshold_reached = elapsed >= target and state not in {
+            threshold_reached = not dad_owned and elapsed >= target and state not in {
                 WatchState.INACTIVE,
                 WatchState.PAUSED,
             }
@@ -666,6 +675,7 @@ class BlacklistAuthority:
                 study_context_active=study_active,
                 resource_key=resource_key,
                 observation_sequence=sequence,
+                sine_watch_inhibited=dad_owned,
             )
             self._latest = snapshot
             return snapshot
@@ -693,6 +703,29 @@ class BlacklistAuthority:
             self._admitted_offer_uid = ""
             return True
 
+    def inhibit_normal_sine_watch(self) -> None:
+        """Fence the Normal watch at an accepted Dad lifecycle transition."""
+
+        with self._lock:
+            self._require_active()
+            self._study_inhibited = True
+            if self._latest is not None:
+                self._latest = replace(
+                    self._latest,
+                    state=(
+                        WatchState.WATCHING
+                        if self._latest.state in {
+                            WatchState.WATCHING,
+                            WatchState.THRESHOLD_REACHED,
+                            WatchState.SUBMITTED,
+                        }
+                        else self._latest.state
+                    ),
+                    threshold_reached=False,
+                    threshold_offer=None,
+                    sine_watch_inhibited=True,
+                )
+
     def rearm(self) -> None:
         """Rearm the current visit after SINE has safely completed."""
 
@@ -711,7 +744,10 @@ class BlacklistAuthority:
             if snapshot is None:
                 return None
             verdict = snapshot.verdict
-            next_stage = 1 if snapshot.state is WatchState.WATCHING else None
+            next_stage = (
+                1 if snapshot.state is WatchState.WATCHING
+                and not snapshot.sine_watch_inhibited else None
+            )
             seconds_to_next = (
                 max(0.0, snapshot.target_seconds - snapshot.elapsed_seconds)
                 if next_stage is not None
@@ -733,6 +769,7 @@ class BlacklistAuthority:
                 next_sine_stage=next_stage,
                 seconds_to_next_stage=seconds_to_next,
                 study_context_active=snapshot.study_context_active,
+                sine_watch_inhibited=snapshot.sine_watch_inhibited,
             )
 
     def shutdown(self) -> None:

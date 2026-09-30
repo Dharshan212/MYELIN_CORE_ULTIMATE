@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import hashlib
+import uuid
 import json
 import math
 import os
@@ -176,6 +178,517 @@ def _profile_learning_state_from_row(profile_key: str, row) -> ProfileLearningSt
     return state
 
 
+_OBSERVATION_EVIDENCE_FIELDS = ("evidence_id", "extension_version", "kind", "session_id",
+    "interval_capture_id", "boundary_capture_id", "study_context_token", "study_block_id", "study_generation",
+    "resource_key", "identity_json", "observation_id", "observation_sequence", "observed_monotonic_ns",
+    "interval_id", "request_id", "confirmation_applied_monotonic_ns", "authority_json")
+
+
+@dataclass(frozen=True, slots=True)
+class StudyObservationEvidenceRecord:
+    """Authority history linked to existing captures, not a Study Jump decision."""
+    row_json: str
+
+
+def _observation_evidence_id(row):
+    return hashlib.sha256(_boundary_json([1, row["interval_capture_id"], row["kind"],
+        row["session_id"], row["observation_id"], row["request_id"]]).encode()).hexdigest()
+
+
+def _validate_observation_evidence(record):
+    from SECANT.read_model import ExactResource, validate_display_metadata
+    from CORE_ENGINE.resource_intent import ResourceIntent, StudyEffectiveState, StudyUserConfirmation
+    if type(record) is not StudyObservationEvidenceRecord or len(record.row_json.encode()) > 65536:
+        raise ValueError("Bounded immutable Study observation evidence required")
+    row = json.loads(record.row_json)
+    if type(row) is not dict or set(row) != set(_OBSERVATION_EVIDENCE_FIELDS):
+        raise ValueError("Unexpected Study observation evidence shape")
+    if type(row["extension_version"]) is not int or row["extension_version"] != 1:
+        raise ValueError("Unsupported Study observation evidence version")
+    for name in ("session_id", "observation_sequence", "observed_monotonic_ns"):
+        if type(row[name]) is not int or not (1 if name == "session_id" else 0) <= row[name] <= 9223372036854775807:
+            raise ValueError("Invalid observation identity/time")
+    for name in ("interval_capture_id", "boundary_capture_id", "study_context_token", "resource_key", "observation_id"):
+        if type(row[name]) is not str or not row[name]:
+            raise ValueError("Exact observation identity required")
+    block, generation = row["study_block_id"], row["study_generation"]
+    if not (block is None and generation is None):
+        if type(block) is not str or not block or type(generation) is not int or not 0 < generation <= 9223372036854775807:
+            raise ValueError("Partial observation scope")
+    payload = json.loads(row["authority_json"])
+    validate_display_metadata(payload.get("display_metadata"),
+        observation_id=row["observation_id"], sequence=row["observation_sequence"],
+        observed_ns=row["observed_monotonic_ns"])
+    exact = ExactResource(**json.loads(row["identity_json"]))
+    if (exact.key != row["resource_key"] or dataclasses.asdict(exact) != payload["resource"]
+            or json.dumps(dataclasses.asdict(exact), sort_keys=True, separators=(",", ":")) != row["identity_json"]):
+        raise ValueError("Exact resource evidence mismatch")
+    for key in ("study_context_token", "observation_id", "observation_sequence", "observed_monotonic_ns"):
+        if payload[key] != row[key]:
+            raise ValueError("Observation authority mismatch")
+    if (payload["study_block_id"] or None) != block or (payload["study_generation"] if block else None) != generation:
+        raise ValueError("Observation scope mismatch")
+    ResourceIntent(payload["classification"]); ResourceIntent(payload["measured_classification"])
+    StudyEffectiveState(payload["effective_operational_state"]); StudyUserConfirmation(payload["user_confirmation"])
+    for key in ("confidence", "measured_confidence"):
+        if type(payload[key]) not in (int, float) or not math.isfinite(payload[key]) or not 0 <= payload[key] <= 1:
+            raise ValueError("Invalid authoritative confidence")
+    if type(payload["confirmation_monotonic_ns"]) is not int or payload["confirmation_monotonic_ns"] < 0:
+        raise ValueError("Invalid authoritative confirmation time")
+    confirmation = payload["confirmation"]
+    if confirmation is not None:
+        if (confirmation["confirmed_monotonic_ns"] != payload["confirmation_monotonic_ns"]
+                or confirmation["authority_resource_key"] != payload["authority_resource_key"]
+                or confirmation["user_confirmation"] != payload["user_confirmation"]):
+            raise ValueError("Confirmation authority mismatch")
+    if row["kind"] == "OBSERVATION":
+        if row["request_id"] != "" or row["confirmation_applied_monotonic_ns"] is not None:
+            raise ValueError("A foreground poll is not a confirmation action")
+        if row["interval_id"] is not None and (type(row["interval_id"]) is not str or not row["interval_id"]):
+            raise ValueError("Invalid exact span reference")
+    elif row["kind"] == "CONFIRMATION":
+        stamp = row["confirmation_applied_monotonic_ns"]
+        if (row["interval_id"] is not None or type(row["request_id"]) is not str or not row["request_id"]
+                or type(stamp) is not int or not row["observed_monotonic_ns"] <= stamp <= 9223372036854775807
+                or stamp != payload["confirmation_monotonic_ns"] or confirmation is None
+                or not confirmation["case1_popup_confirmed"]):
+            raise ValueError("Exact accepted confirmation evidence required")
+    else:
+        raise ValueError("Unsupported observation evidence kind")
+    if row["evidence_id"] != _observation_evidence_id(row):
+        raise ValueError("Observation evidence identity mismatch")
+    return row
+
+
+class _StudyObservationEvidenceCapture:
+    """Bounded, independent writer receipts; missing evidence remains unresolved."""
+    def __init__(self, storage):
+        self.storage = storage
+        self.pending = []
+        self.last_error = ""
+
+    def reap(self):
+        pending = []
+        for rid in self.pending:
+            receipt = self.storage.receipt(rid)
+            if receipt is not None and receipt.state is ReceiptState.RUNNING:
+                pending.append(rid)
+                continue
+            if receipt is None or receipt.state is not ReceiptState.COMMITTED:
+                self.last_error = "Study observation evidence write failed; evidence unresolved"
+            if receipt is not None:
+                self.storage.forget_receipt(rid)
+        self.pending = pending
+
+    def capture(self, session_id, authority_json, request_id, applied_ns):
+        self.reap()
+        if type(authority_json) is not str or len(authority_json.encode()) > 30000:
+            raise ValueError("Bounded immutable authority evidence required")
+        authority = json.loads(authority_json)
+        intervals, boundaries = self.storage._study_interval_observer, self.storage._study_boundary_observer
+        if intervals is None or boundaries is None:
+            raise ValueError("No exact resource capture lifetime exists")
+        block = authority["study_block_id"] or None
+        scope = (session_id, authority["study_context_token"], block, authority["study_generation"] if block else None)
+        row = dict(extension_version=1, kind="CONFIRMATION" if request_id else "OBSERVATION",
+            session_id=session_id, interval_capture_id=intervals.capture_id, boundary_capture_id=boundaries.capture_id,
+            study_context_token=scope[1], study_block_id=scope[2], study_generation=scope[3],
+            resource_key=authority["resource"]["key"],
+            identity_json=json.dumps(authority["resource"], sort_keys=True, separators=(",", ":")),
+            observation_id=authority["observation_id"], observation_sequence=authority["observation_sequence"],
+            observed_monotonic_ns=authority["observed_monotonic_ns"], interval_id=None,
+            request_id=request_id, confirmation_applied_monotonic_ns=applied_ns, authority_json=authority_json)
+        current = intervals.current
+        if not request_id and current is not None:
+            current_scope, identity, first, last, count, limit = current
+            if (scope == current_scope and identity[0] == row["resource_key"]
+                    and last == (row["observation_id"], row["observation_sequence"], row["observed_monotonic_ns"])):
+                row["interval_id"] = _interval_id(dict(capture_id=intervals.capture_id,
+                    span_ordinal=intervals.ordinal + 1, session_id=session_id,
+                    study_context_token=scope[1], first_observation_id=first[0]))
+        row["evidence_id"] = _observation_evidence_id(row)
+        record = StudyObservationEvidenceRecord(_boundary_json(row))
+        _validate_observation_evidence(record)
+        if len(self.pending) >= 16:
+            self.last_error = "Study observation evidence capacity reached; evidence unresolved"
+            return
+        receipt = self.storage.append_study_observation_evidence(record)
+        self.pending.append(receipt.receipt_id)
+        self.reap()
+
+
+
+
+_INTERVAL_FIELDS = ("interval_id", "interval_extension_version", "session_id", "capture_id",
+    "span_ordinal", "study_context_token", "study_block_id", "study_generation", "resource_key",
+    "first_observation_id", "last_observation_id", "first_observation_ordinal", "last_observation_ordinal",
+    "first_observed_monotonic_ns", "last_observed_monotonic_ns", "observation_count",
+    "continuity_max_gap_ns", "supported_duration_ns", "continuity_status", "close_reason")
+_INTERVAL_CLOSE_REASONS = frozenset({"RESOURCE_CHANGE", "SCOPE_CHANGE", "GLOBAL_PAUSE", "STUDY_INACTIVE",
+    "STUDY_EXIT", "BREAK_PENDING", "SESSION_STOP", "STORAGE_SHUTDOWN", "UNSUPPORTED_OBSERVATION",
+    "INACTIVE_STUDY", "CAPTURE_ERROR", "OBSERVATION_SEQUENCE_GAP", "OBSERVATION_TIME_GAP",
+    "NONMONOTONIC_OBSERVATION", "IDENTITY_CONFLICT", "CONTINUITY_POLICY_CHANGE"})
+
+
+@dataclass(frozen=True, slots=True)
+class StudyResourceIntervalRecord:
+    """Completed observation-supported span, never attention or physical exit time."""
+    row_json: str
+
+
+def _interval_id(row):
+    return hashlib.sha256(_boundary_json([1, row["capture_id"], row["span_ordinal"],
+        row["session_id"], row["study_context_token"], row["first_observation_id"]]).encode()).hexdigest()
+
+
+def _validate_interval(record):
+    if type(record) is not StudyResourceIntervalRecord or len(record.row_json.encode()) > 16384:
+        raise ValueError("Bounded immutable Study interval required")
+    row = json.loads(record.row_json)
+    if type(row) is not dict or set(row) != set(_INTERVAL_FIELDS):
+        raise ValueError("Unexpected Study interval shape")
+    if type(row["interval_extension_version"]) is not int or row["interval_extension_version"] != 1:
+        raise ValueError("Unsupported Study interval contract")
+    for key in ("session_id", "span_ordinal", "observation_count", "continuity_max_gap_ns",
+            "first_observation_ordinal", "last_observation_ordinal", "first_observed_monotonic_ns",
+            "last_observed_monotonic_ns", "supported_duration_ns"):
+        minimum = 1 if key in {"session_id", "span_ordinal", "observation_count", "continuity_max_gap_ns"} else 0
+        if type(row[key]) is not int or not minimum <= row[key] <= 9223372036854775807:
+            raise ValueError("Invalid Study interval integer")
+    for key in ("capture_id", "study_context_token", "resource_key", "first_observation_id", "last_observation_id"):
+        if type(row[key]) is not str or not row[key]:
+            raise ValueError("Exact Study interval identity required")
+    block, generation = row["study_block_id"], row["study_generation"]
+    if not (block is None and generation is None):
+        if type(block) is not str or not block or type(generation) is not int or not 0 < generation <= 9223372036854775807:
+            raise ValueError("Partial Study interval scope")
+    count, duration = row["observation_count"], row["supported_duration_ns"]
+    if (row["last_observation_ordinal"] - row["first_observation_ordinal"] != count - 1
+            or row["last_observed_monotonic_ns"] - row["first_observed_monotonic_ns"] != duration):
+        raise ValueError("Study interval endpoint mismatch")
+    if count == 1:
+        if duration != 0 or row["first_observation_id"] != row["last_observation_id"] or row["continuity_status"] != "SINGLE_OBSERVATION":
+            raise ValueError("Single observation supports no positive duration")
+    elif (not count - 1 <= duration <= (count - 1) * row["continuity_max_gap_ns"]
+            or row["first_observation_id"] == row["last_observation_id"] or row["continuity_status"] != "SUPPORTED_SPAN"):
+        raise ValueError("Unsupported Study span")
+    if row["close_reason"] not in _INTERVAL_CLOSE_REASONS or row["interval_id"] != _interval_id(row):
+        raise ValueError("Invalid Study interval closure/identity")
+    return row
+
+
+class _StudyIntervalObserver:
+    """Compress consecutive exact samples into immutable supported spans.
+
+    Only sample monotonic timestamps bound duration. Lifecycle signals flush
+    existing endpoints without supplying a timestamp. A crash loses the open
+    span; a new observer never resumes it. Each completed row stands alone.
+    """
+    def __init__(self, storage):
+        self.storage = storage
+        self.capture_id = uuid.uuid4().hex
+        self.ordinal = 0
+        self.current = None
+        self.last_seen = None
+        self.pending = []
+        self.last_error = ""
+
+    def reap(self):
+        running = []
+        for rid in self.pending:
+            receipt = self.storage.receipt(rid)
+            if receipt is not None and receipt.state is ReceiptState.RUNNING:
+                running.append(rid)
+                continue
+            if receipt is None or receipt.state is not ReceiptState.COMMITTED:
+                self.last_error = "Study interval write failed; missing span unavailable"
+            if receipt is not None:
+                self.storage.forget_receipt(rid)
+        self.pending = running
+
+    def close(self, reason):
+        self.reap()
+        current, self.current = self.current, None
+        if current is None:
+            return
+        scope, identity, first, last, count, limit = current
+        self.ordinal += 1  # A dropped write leaves an ordinal hole, never a guessed span.
+        row = dict(interval_extension_version=1, session_id=scope[0], capture_id=self.capture_id,
+            span_ordinal=self.ordinal, study_context_token=scope[1], study_block_id=scope[2], study_generation=scope[3],
+            resource_key=identity[0], first_observation_id=first[0], last_observation_id=last[0],
+            first_observation_ordinal=first[1], last_observation_ordinal=last[1],
+            first_observed_monotonic_ns=first[2], last_observed_monotonic_ns=last[2], observation_count=count,
+            continuity_max_gap_ns=limit, supported_duration_ns=last[2]-first[2],
+            continuity_status="SUPPORTED_SPAN" if count > 1 else "SINGLE_OBSERVATION",
+            close_reason=reason if reason in _INTERVAL_CLOSE_REASONS else "CAPTURE_ERROR")
+        row["interval_id"] = _interval_id(row)
+        record = StudyResourceIntervalRecord(_boundary_json(row))
+        _validate_interval(record)
+        if len(self.pending) >= 32:
+            self.last_error = "Study interval receipt capacity reached; missing span unavailable"
+            return
+        receipt = self.storage.append_study_resource_interval(record)
+        self.pending.append(receipt.receipt_id)
+        self.reap()
+
+    def observe(self, session_id, sample, limit, reason):
+        self.reap()
+        if sample is None:
+            self.close(reason or "UNSUPPORTED_OBSERVATION")
+            return
+        from SECANT.read_model import ExactResource
+        if (type(session_id) is not int or session_id <= 0 or not isinstance(sample.resource, ExactResource)
+                or type(limit) is not int or not 0 < limit <= 9223372036854775807):
+            raise ValueError("Authoritative Study interval sample/policy required")
+        block = sample.block_id or None
+        scope = (session_id, sample.study_context_token, block, sample.generation if block is not None else None)
+        identity = (sample.resource.key, _boundary_json(dataclasses.asdict(sample.resource)))
+        endpoint = (sample.observation_id, sample.observation_sequence, sample.observed_monotonic_ns)
+        if (type(scope[1]) is not str or not scope[1] or type(identity[0]) is not str or not identity[0]
+                or type(endpoint[0]) is not str or not endpoint[0]
+                or any(type(v) is not int or not 0 <= v <= 9223372036854775807 for v in endpoint[1:])
+                or (block is not None and (type(block) is not str or type(scope[3]) is not int or scope[3] <= 0))
+                or len(_boundary_json([scope, identity, endpoint]).encode()) > 8000):
+            raise ValueError("Invalid exact Study interval sample")
+        seen = (scope, identity, endpoint)
+        if self.last_seen is not None:
+            if seen == self.last_seen:
+                return  # Classification/wall-clock changes cannot turn a replay into new evidence.
+            prior = self.last_seen[2]
+            if endpoint[0] == prior[0] or endpoint[1] <= prior[1] or endpoint[2] <= prior[2]:
+                self.close("NONMONOTONIC_OBSERVATION")
+                return
+        self.last_seen = seen
+        if self.current is not None:
+            old_scope, old_identity, first, last, count, old_limit = self.current
+            gap = ("SCOPE_CHANGE" if scope != old_scope else
+                "IDENTITY_CONFLICT" if identity[0] == old_identity[0] and identity != old_identity else
+                "OBSERVATION_SEQUENCE_GAP" if endpoint[1] != last[1] + 1 else
+                "OBSERVATION_TIME_GAP" if endpoint[2] - last[2] > old_limit else
+                "CONTINUITY_POLICY_CHANGE" if limit != old_limit else
+                "RESOURCE_CHANGE" if identity != old_identity else "")
+            if gap:
+                self.close(gap)
+                if gap == "IDENTITY_CONFLICT":
+                    return  # Contradictory identity is not a fresh supported endpoint.
+            else:
+                self.current = (scope, identity, first, endpoint, count + 1, limit)
+                return
+        self.current = (scope, identity, endpoint, endpoint, 1, limit)
+
+
+_BOUNDARY_ENDPOINT_FIELDS = ("observation_id", "resource_key", "observation_ordinal",
+    "observed_monotonic_ns", "observed_at_utc", "identity_json")
+_BOUNDARY_FACT_FIELDS = ("boundary_id", "contract_version", "session_id", "capture_id",
+    "boundary_ordinal", "study_context_token", "study_block_id", "study_generation") + tuple(
+    prefix + name for prefix in ("from_", "to_") for name in _BOUNDARY_ENDPOINT_FIELDS) + ("capture_gap_reasons_json",)
+_BOUNDARY_GAPS = frozenset({"UNSUPPORTED_OBSERVATION", "GLOBAL_PAUSE", "INACTIVE_STUDY",
+    "OBSERVATION_SEQUENCE_GAP", "OBSERVATION_TIME_GAP", "NONMONOTONIC_OBSERVATION",
+    "IDENTITY_CONFLICT", "RECORDING_GAP", "CAPTURE_ERROR"})
+
+
+def _boundary_json(value):
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+
+
+def _boundary_id(row):
+    anchor = [1, row["capture_id"], row["boundary_ordinal"], row["session_id"],
+        row["study_context_token"], row["from_observation_id"], row["to_observation_id"]]
+    return hashlib.sha256(_boundary_json(anchor).encode()).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class StudyResourceBoundaryRecord:
+    """Immutable pre-transport observed change; contains no classification/duration."""
+    row_json: str
+
+
+def _validate_boundary(record):
+    from SECANT.read_model import ExactResource
+    if type(record) is not StudyResourceBoundaryRecord or len(record.row_json.encode()) > 65536:
+        raise ValueError("Bounded immutable Study boundary required")
+    row = json.loads(record.row_json)
+    if type(row) is not dict or set(row) != set(_BOUNDARY_FACT_FIELDS):
+        raise ValueError("Unexpected Study boundary shape")
+    if type(row["contract_version"]) is not int or row["contract_version"] != 1:
+        raise ValueError("Unsupported Study boundary contract")
+    for name in ("session_id", "boundary_ordinal"):
+        if type(row[name]) is not int or not 0 < row[name] <= 9223372036854775807:
+            raise ValueError("Positive boundary ordinal/session required")
+    for name in ("capture_id", "study_context_token"):
+        if type(row[name]) is not str or not row[name]:
+            raise ValueError("Exact Study capture/scope required")
+    block, generation = row["study_block_id"], row["study_generation"]
+    if not (block is None and generation is None):
+        if type(block) is not str or not block or type(generation) is not int or generation <= 0:
+            raise ValueError("Partial Study block identity")
+    for prefix in ("from_", "to_"):
+        for name in ("observation_id", "resource_key", "observed_at_utc", "identity_json"):
+            if type(row[prefix + name]) is not str or not row[prefix + name]:
+                raise ValueError("Exact observation endpoint required")
+        for name in ("observation_ordinal", "observed_monotonic_ns"):
+            value = row[prefix + name]
+            if type(value) is not int or not 0 <= value <= 9223372036854775807:
+                raise ValueError("Factual observation sequence/time required")
+        stamp = row[prefix + "observed_at_utc"]
+        if not stamp.endswith("Z"):
+            raise ValueError("Observed UTC stamp required")
+        datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        raw = json.loads(row[prefix + "identity_json"])
+        exact = ExactResource(**raw)
+        if _boundary_json(dataclasses.asdict(exact)) != row[prefix + "identity_json"] or exact.key != row[prefix + "resource_key"]:
+            raise ValueError("Exact resource identity mismatch")
+    if (row["from_resource_key"] == row["to_resource_key"]
+            or row["from_observation_id"] == row["to_observation_id"]
+            or row["from_observation_ordinal"] >= row["to_observation_ordinal"]
+            or row["from_observed_monotonic_ns"] >= row["to_observed_monotonic_ns"]):
+        raise ValueError("An ordered observed identity change is required")
+    gaps = json.loads(row["capture_gap_reasons_json"])
+    if type(gaps) is not list or any(type(g) is not str or g not in _BOUNDARY_GAPS for g in gaps):
+        raise ValueError("Unsupported boundary gap evidence")
+    if gaps != sorted(set(gaps)) or _boundary_json(gaps) != row["capture_gap_reasons_json"]:
+        raise ValueError("Canonical gap evidence required")
+    if row["boundary_id"] != _boundary_id(row):
+        raise ValueError("Boundary identity mismatch")
+    return row
+
+
+class _StudyBoundaryObserver:
+    """Monitor-owned observation state, ahead of all replaceable UI transport.
+
+    Uses the existing non-blocking writer lane. No organ decisions or Qt access.
+    Every observed resource change advances ordinal even if recording fails;
+    the writer independently detects holes before certifying continuity.
+    """
+    def __init__(self, storage):
+        self.storage = storage
+        self.capture_id = uuid.uuid4().hex
+        self.previous = None
+        self.ordinal = 0
+        self.gaps = set()
+        self.pending = []
+        self.last_error = ""
+
+    def gap(self, reason):
+        self.gaps.add(reason if reason in _BOUNDARY_GAPS else "CAPTURE_ERROR")
+
+    def reap(self):
+        pending = []
+        for receipt_id in self.pending:
+            receipt = self.storage.receipt(receipt_id)
+            if receipt is not None and receipt.state is ReceiptState.RUNNING:
+                pending.append(receipt_id)
+                continue
+            if receipt is None or receipt.state is not ReceiptState.COMMITTED:
+                self.gap("RECORDING_GAP")
+                self.last_error = "Study boundary write failed"
+            if receipt is not None:
+                self.storage.forget_receipt(receipt_id)
+        self.pending = pending
+
+    def observe(self, session_id, sample, observed_at_utc, max_interval_ns, gap_reason):
+        self.reap()
+        if sample is None:
+            self.gap(gap_reason or "UNSUPPORTED_OBSERVATION")
+            return
+        from SECANT.read_model import ExactResource
+        if type(session_id) is not int or session_id <= 0 or not isinstance(sample.resource, ExactResource):
+            raise ValueError("Authoritative Study sample required")
+        block = sample.block_id or None
+        scope = (session_id, sample.study_context_token, block,
+            sample.generation if block is not None else None)
+        endpoint = dict(observation_id=sample.observation_id, resource_key=sample.resource.key,
+            observation_ordinal=sample.observation_sequence, observed_monotonic_ns=sample.observed_monotonic_ns,
+            observed_at_utc=observed_at_utc, identity_json=_boundary_json(dataclasses.asdict(sample.resource)))
+        if len(_boundary_json(endpoint).encode()) > 30000:
+            raise ValueError("Observation endpoint exceeds capture bound")
+        if self.previous is None or self.previous[0] != scope:
+            self.previous = (scope, endpoint)
+            self.gaps.clear()  # Never bridge unrelated Study scopes or a restart.
+            return
+        prior = self.previous[1]
+        if endpoint == prior:
+            return  # Identical observation replay is harmless.
+        if (endpoint["observation_id"] == prior["observation_id"]
+                or endpoint["observation_ordinal"] <= prior["observation_ordinal"]
+                or endpoint["observed_monotonic_ns"] <= prior["observed_monotonic_ns"]):
+            self.gap("NONMONOTONIC_OBSERVATION")
+            return
+        if endpoint["observation_ordinal"] != prior["observation_ordinal"] + 1:
+            self.gap("OBSERVATION_SEQUENCE_GAP")
+        if endpoint["observed_monotonic_ns"] - prior["observed_monotonic_ns"] > max_interval_ns:
+            self.gap("OBSERVATION_TIME_GAP")
+        if endpoint["resource_key"] == prior["resource_key"]:
+            if endpoint["identity_json"] != prior["identity_json"]:
+                self.gap("IDENTITY_CONFLICT")
+                return
+            self.previous = (scope, endpoint)  # Last observed A, not its first sighting.
+            return
+        self.previous = (scope, endpoint)
+        self.ordinal += 1
+        row = dict(contract_version=1, session_id=session_id, capture_id=self.capture_id,
+            boundary_ordinal=self.ordinal, study_context_token=scope[1], study_block_id=scope[2],
+            study_generation=scope[3], capture_gap_reasons_json=_boundary_json(sorted(self.gaps)))
+        row.update({"from_" + k: v for k, v in prior.items()})
+        row.update({"to_" + k: v for k, v in endpoint.items()})
+        row["boundary_id"] = _boundary_id(row)
+        fact = StudyResourceBoundaryRecord(_boundary_json(row))
+        _validate_boundary(fact)
+        if len(self.pending) >= 64:
+            self.gap("RECORDING_GAP")
+            self.last_error = "Study boundary receipt capacity reached"
+            return
+        receipt = self.storage.append_study_resource_boundary(fact)
+        self.pending.append(receipt.receipt_id)
+        self.gaps.clear()
+        self.reap()
+
+
+def _append_passive_events(storage, events, kind):
+    from PERSISTENCE.secant_recorder import validate_record, validate_founding_source, META_PREFIX
+    if type(events) is not tuple or not events or len(events) > 64:
+        raise ValueError("Passive batch requires 1..64 immutable records")
+    if sum(len(v.row_json.encode("utf-8")) for v in events) > 256 * 1024:
+        raise ValueError("Passive batch exceeds byte limit")
+    rows = tuple(validate_record(v, kind) for v in events)
+    sources = tuple(validate_founding_source(row.pop("founding_source"), row)
+        if "founding_source" in row else None for row in rows)
+    table = "secant_events" if kind == "secant" else "study_resource_events"
+    # SECANT identity survives attachments; first-capture provenance is immutable.
+    capture = {"recorder_run_id", "recorder_received_monotonic_ns", "recorder_received_at_utc", "recording_quality"} if kind == "secant" else set()
+    def write(connection):
+        for row, source in zip(rows, sources):
+            meta = connection.execute("SELECT value FROM myelin_meta WHERE key=?", (META_PREFIX + row["recorder_run_id"],)).fetchone()
+            if not meta:
+                raise ValueError("Recorder run must commit before event rows")
+            prior = connection.execute(f"SELECT * FROM {table} WHERE event_id=?", (row["event_id"],)).fetchone()
+            if prior:
+                if any(prior[name] != value for name, value in row.items() if name not in capture):
+                    raise ValueError("Conflicting immutable passive event retry")
+                if source is not None:
+                    recorded = connection.execute("SELECT * FROM secant_founding_source WHERE event_id=?",
+                        (row["event_id"],)).fetchone()
+                    # An old founding fact without provenance stays unrecorded.
+                    # A retry must never backfill or replace the first capture.
+                    if recorded is None or any(recorded[name] != value for name, value in source.items()):
+                        raise ValueError("Conflicting immutable founding-source retry")
+                if kind == "secant" and row["event_name"] == "SECANT_EPISODE_FOUNDED":
+                    from PERSISTENCE.presentation_aliases import assign_secant_event
+                    assign_secant_event(connection, row["event_id"])
+                continue
+            columns = tuple(row)
+            connection.execute(f"INSERT INTO {table}(" + ",".join(columns) + ",recorded_at_utc) VALUES(" + ",".join("?" for _ in range(len(columns) + 1)) + ")", tuple(row.values()) + (_utc_now(),))
+            if source is not None:
+                columns = tuple(source)
+                connection.execute("INSERT INTO secant_founding_source(" + ",".join(columns)
+                    + ") VALUES(" + ",".join("?" for _ in columns) + ")", tuple(source.values()))
+            if kind == "secant" and row["event_name"] == "SECANT_EPISODE_FOUNDED":
+                from PERSISTENCE.presentation_aliases import assign_secant_event
+                assign_secant_event(connection, row["event_id"])
+        return TransactionResult()
+    return storage._submit("append passive " + kind + " batch", write)
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
         "+00:00", "Z"
@@ -197,6 +710,7 @@ def _jsonable(value: object):
         return {
             field.name: _jsonable(getattr(value, field.name))
             for field in dataclasses.fields(value)
+            if field.name != "display_metadata" or getattr(value, field.name) is not None
         }
     if isinstance(value, Enum):
         return value.value
@@ -207,6 +721,33 @@ def _jsonable(value: object):
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+def _validate_cosecant_target_payload(payload):
+    """Preserve the exact frozen target structure, with no target/title lookups."""
+    from COSECANT_STUDY_MODE.cosecant import (
+        CosecantFactKind, CosecantReturnTarget, _validate_cosecant_return_target)
+    extension = payload.get("return_target_extension_version")
+    raw = payload.get("return_target")
+    target = None
+    if raw is not None:
+        if type(raw) is not dict or set(raw) != {field.name for field in dataclasses.fields(CosecantReturnTarget)} - {"display_metadata"}:
+            raise ValueError("Complete typed return-target payload required")
+        target = CosecantReturnTarget(**raw)
+    from SECANT.read_model import validate_display_metadata
+    metadata = payload.get("return_target_display_metadata")
+    if metadata is not None:
+        if target is None or payload.get("kind") != "BREAK_STARTED":
+            raise ValueError("Display metadata requires its frozen return target")
+        validate_display_metadata(metadata, observed_ns=target.observed_monotonic_ns)
+    _validate_cosecant_return_target(
+        kind=CosecantFactKind.BREAK_STARTED if payload.get("kind") == "BREAK_STARTED" else None,
+        extension_version=extension, target=target, study_block_id=payload.get("study_block_id"),
+        study_generation=payload.get("return_target_study_generation"),
+        effective_monotonic_ns=payload.get("effective_monotonic_ns"))
+    if extension is None or payload.get("kind") != "BREAK_STARTED":
+        for name in ("return_target_extension_version", "return_target", "return_target_study_generation"):
+            payload.pop(name, None)
 
 
 def _json_text(value: object) -> str:
@@ -634,6 +1175,9 @@ class EngineStorage:
         self._lifetime_lock = threading.Lock()
         self._closed = False
         self._lane = _SharedStorageLane.acquire(self._owner_token)
+        self._study_boundary_observer = None
+        self._study_interval_observer = None
+        self._study_observation_evidence_capture = None
 
     # The shared lane is deliberately NOT exposed.  Publishing it would hand
     # every consumer a ``shutdown()`` handle on process-wide persistence and
@@ -669,6 +1213,105 @@ class EngineStorage:
     def _submit(self, operation: str, callback) -> TransactionReceipt:
         self._require_open()
         return self._lane.submit(operation, callback)
+
+    def capture_study_resource_observation(self, *, session_id, sample=None,
+            observed_at_utc="", max_interval_ns=0, gap_reason=""):
+        """Observational side channel; failure must never affect Monitor decisions."""
+        if self._study_boundary_observer is None:
+            self._study_boundary_observer = _StudyBoundaryObserver(self)
+        observer = self._study_boundary_observer
+        try:
+            observer.observe(session_id, sample, observed_at_utc, max_interval_ns, gap_reason)
+        except Exception as error:
+            observer.gap("CAPTURE_ERROR")
+            observer.last_error = type(error).__name__ + ": " + str(error)[:180]
+        # Independent capture and failure containment preserve Correction 2.
+        if self._study_interval_observer is None:
+            self._study_interval_observer = _StudyIntervalObserver(self)
+        intervals = self._study_interval_observer
+        try:
+            intervals.observe(session_id, sample, max_interval_ns, gap_reason)
+        except Exception as error:
+            intervals.current = None  # Incomplete evidence must never extend a later span.
+            intervals.last_error = type(error).__name__ + ": " + str(error)[:180]
+        return observer.last_error or intervals.last_error
+
+    def end_study_resource_interval(self, reason="SESSION_STOP"):
+        """Flush only already-observed evidence; no lifecycle timestamp is accepted."""
+        observer = self._study_interval_observer
+        if observer is not None:
+            try:
+                observer.close(reason)
+            except Exception as error:
+                observer.current = None
+                observer.last_error = type(error).__name__ + ": " + str(error)[:180]
+
+    def append_study_resource_interval(self, record):
+        row = _validate_interval(record)
+        def write(connection):
+            prior = connection.execute("SELECT * FROM study_resource_intervals WHERE interval_id=?",
+                (row["interval_id"],)).fetchone()
+            if prior is not None:
+                if any(prior[name] != value for name, value in row.items()):
+                    raise ValueError("Conflicting immutable Study interval retry")
+                return TransactionResult()
+            overlap = connection.execute("SELECT interval_id FROM study_resource_intervals WHERE capture_id=? "
+                "AND first_observation_ordinal<=? AND last_observation_ordinal>=? LIMIT 1",
+                (row["capture_id"], row["last_observation_ordinal"], row["first_observation_ordinal"])).fetchone()
+            if overlap is not None:
+                raise ValueError("Overlapping Study interval evidence")
+            connection.execute("INSERT INTO study_resource_intervals(" + ",".join(row)
+                + ") VALUES(" + ",".join("?" for _ in row) + ")", tuple(row.values()))
+            return TransactionResult()
+        return self._submit("append supported Study foreground interval", write)
+
+    def append_study_resource_boundary(self, record):
+        row = _validate_boundary(record)
+        def write(connection):
+            prior = connection.execute("SELECT * FROM study_resource_boundaries WHERE boundary_id=?",
+                (row["boundary_id"],)).fetchone()
+            if prior is not None:
+                if any(prior[name] != value for name, value in row.items()):
+                    raise ValueError("Conflicting immutable Study boundary retry")
+                return TransactionResult()
+            # FIFO commit order makes a skipped/failed earlier boundary visible
+            # even when its failure receipt has not reached the capture thread.
+            previous = connection.execute("SELECT MAX(boundary_ordinal) FROM study_resource_boundaries "
+                "WHERE capture_id=?", (row["capture_id"],)).fetchone()[0] or 0
+            gaps = set(json.loads(row["capture_gap_reasons_json"]))
+            if previous != row["boundary_ordinal"] - 1:
+                gaps.add("RECORDING_GAP")
+            durable = dict(row, continuity="CHANGE_ACROSS_EVIDENCE_GAP" if gaps else "CONTIGUOUS_OBSERVED_CHANGE",
+                gap_reasons_json=_boundary_json(sorted(gaps)))
+            connection.execute("INSERT INTO study_resource_boundaries(" + ",".join(durable)
+                + ") VALUES(" + ",".join("?" for _ in durable) + ")", tuple(durable.values()))
+            return TransactionResult()
+        return self._submit("append Study resource boundary", write)
+
+    def capture_study_observation_evidence(self, *, session_id, authority_json, request_id="", applied_ns=None):
+        """Independent evidence side channel; cannot change physiology decisions."""
+        if self._study_observation_evidence_capture is None:
+            self._study_observation_evidence_capture = _StudyObservationEvidenceCapture(self)
+        capture = self._study_observation_evidence_capture
+        try:
+            capture.capture(session_id, authority_json, request_id, applied_ns)
+        except Exception as error:
+            capture.last_error = type(error).__name__ + ": " + str(error)[:180]
+        return capture.last_error
+
+    def append_study_observation_evidence(self, record):
+        row = _validate_observation_evidence(record)
+        def write(connection):
+            prior = connection.execute("SELECT * FROM study_resource_observation_evidence WHERE evidence_id=?",
+                (row["evidence_id"],)).fetchone()
+            if prior is not None:
+                if any(prior[name] != value for name, value in row.items()):
+                    raise ValueError("Conflicting immutable Study observation evidence retry")
+                return TransactionResult()
+            connection.execute("INSERT INTO study_resource_observation_evidence(" + ",".join(row)
+                + ") VALUES(" + ",".join("?" for _ in row) + ")", tuple(row.values()))
+            return TransactionResult()
+        return self._submit("append authoritative Study observation evidence", write)
 
     def load_profile_learning(self, *, profile_key: str) -> ProfileLearningState:
         """Load the latest committed learning state for one profile.
@@ -1228,25 +1871,97 @@ class EngineStorage:
         if not batch:
             return True
 
+        # Freeze serialized evidence before queueing; never consult runtime later.
+        rows = []
+        for fact in batch:
+            payload = json.loads(_json_text(fact))
+            if type(payload) is not dict:
+                raise ValueError("Structured COSECANT fact required")
+            # Keep the V1 identity payload byte-compatible; metadata is independent.
+            raw_target = payload.get("return_target")
+            if type(raw_target) is dict and "display_metadata" in raw_target:
+                metadata = raw_target.pop("display_metadata")
+                if metadata is not None:
+                    payload["return_target_display_metadata"] = metadata
+            version, kind = payload.get("schema_version"), payload.get("kind")
+            selected = payload.get("selected_break_seconds")
+            extension = payload.get("selected_break_extension_version")
+            if kind == "BREAK_STARTED":
+                if version != "myelin-cosecant-v2":
+                    raise ValueError("Unsupported COSECANT start payload version")
+                if extension is not None and (type(extension) is not int or extension != 1
+                        or type(selected) is not int or not 60 <= selected <= 86400):
+                    raise ValueError("New BREAK_STARTED requires its exact integer selected allowance")
+                if extension is None and selected is not None:
+                    raise ValueError("Selected allowance requires its payload extension version")
+            elif selected is not None:
+                raise ValueError("Selected allowance belongs only to BREAK_STARTED")
+            if selected is None:
+                payload.pop("selected_break_seconds", None)  # Absent on old and non-start facts.
+            if kind != "BREAK_STARTED" or extension is None:
+                payload.pop("selected_break_extension_version", None)
+            _validate_cosecant_target_payload(payload)
+            rows.append((session_id, str(_field(fact, "break_id", "")),
+                int(_field(fact, "sequence", 0) or 0), str(_enum_value(_field(fact, "kind", ""))),
+                int(_field(fact, "observed_monotonic_ns", 0) or 0), _boundary_json(payload)))
+
         def write(connection):
-            for fact in batch:
-                connection.execute(
+            for values in rows:
+                prior = connection.execute("SELECT session_id,break_id,sequence,kind,occurred_monotonic_ns,payload_json "
+                    "FROM cosecant_events WHERE break_id=? AND sequence=?", (values[1], values[2])).fetchone()
+                if prior is not None:
+                    if tuple(prior[:5]) != values[:5] or json.loads(prior[5]) != json.loads(values[5]):
+                        raise ValueError("Conflicting immutable COSECANT fact retry")
+                    if values[3] == "BREAK_STARTED":
+                        from PERSISTENCE.presentation_aliases import assign_cosecant_event
+                        event_id = connection.execute("SELECT id FROM cosecant_events WHERE break_id=? AND sequence=?",
+                            (values[1], values[2])).fetchone()[0]
+                        assign_cosecant_event(connection, event_id)
+                    continue
+                if values[3] == "BREAK_STARTED" and json.loads(values[5]).get("selected_break_extension_version") != 1:
+                    raise ValueError("Legacy BREAK_STARTED may be replayed, but new starts require selected allowance")
+                if values[3] == "BREAK_STARTED" and json.loads(values[5]).get("return_target_extension_version") != 1:
+                    raise ValueError("Legacy BREAK_STARTED may be replayed, but new starts require exact return target")
+                inserted = connection.execute(
                     "INSERT INTO cosecant_events(session_id, break_id, sequence, kind, occurred_monotonic_ns, payload_json, created_at_utc) "
                     "VALUES(?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        session_id,
-                        str(_field(fact, "break_id", "")),
-                        int(_field(fact, "sequence", 0) or 0),
-                        str(_enum_value(_field(fact, "kind", ""))),
-                        int(_field(fact, "observed_monotonic_ns", 0) or 0),
-                        _json_text(fact),
-                        _utc_now(),
-                    ),
+                    values + (_utc_now(),),
                 )
+                if values[3] == "BREAK_STARTED":
+                    from PERSISTENCE.presentation_aliases import assign_cosecant_event
+                    assign_cosecant_event(connection, inserted.lastrowid)
             return TransactionResult()
 
         receipt = _terminal(self._lane, self._submit("append COSECANT fact batch", write))
         return receipt.state is ReceiptState.COMMITTED
+
+    def record_study_resource(self, fact) -> TransactionReceipt:
+        """Return the ordered-lane receipt; RUNNING is never treated as committed."""
+        from SECANT.read_model import StudyResourceFact, validate_display_metadata
+        if not isinstance(fact, StudyResourceFact):
+            raise TypeError("Immutable StudyResourceFact required")
+        identity_json = json.dumps(dataclasses.asdict(fact.resource),sort_keys=True,separators=(",", ":"))
+        provenance = json.loads(fact.provenance_json)
+        if provenance.get("display_metadata") is not None:
+            if not provenance.get("observation_id"):
+                raise ValueError("Caption requires its qualifying observation")
+            validate_display_metadata(provenance["display_metadata"],
+                observation_id=provenance["observation_id"], observed_ns=fact.qualified_monotonic_ns)
+        provenance_json = json.dumps(provenance,sort_keys=True,separators=(",", ":"))
+        values = (fact.resource_fact_id, fact.session_id, fact.study_block_id, fact.study_generation,
+            fact.study_context_token, fact.resource.key, fact.resource.kind, fact.resource.version,
+            identity_json, fact.role, fact.first_aligned_monotonic_ns, fact.qualified_monotonic_ns,
+            fact.first_aligned_at_utc, fact.qualified_at_utc, provenance_json, fact.contract_version)
+        columns = "resource_fact_id,session_id,study_block_id,study_generation,study_context_token,resource_key,identity_kind,identity_version,identity_json,role,first_aligned_monotonic_ns,qualified_monotonic_ns,first_aligned_at_utc,qualified_at_utc,provenance_json,contract_version"
+        def write(connection):
+            prior = connection.execute("SELECT " + columns + " FROM study_resources WHERE resource_fact_id=?",(fact.resource_fact_id,)).fetchone()
+            if prior is not None:
+                if tuple(prior) != values:
+                    raise ValueError("Conflicting immutable Study-resource retry")
+                return TransactionResult(session_id=fact.session_id)
+            connection.execute("INSERT INTO study_resources("+columns+",inserted_at_utc) VALUES("+",".join("?" for _ in range(17))+")",values+(_utc_now(),))
+            return TransactionResult(session_id=fact.session_id)
+        return self._submit("record immutable Study resource", write)
 
     def record_study_snapshot(self, *, session_id: int | None, action: str, snapshot: object) -> bool:
         block_id = str(_field(snapshot, "block_id", ""))
@@ -1774,6 +2489,106 @@ class EngineStorage:
     def read_mine_events(self):
         return read_mine_events()
 
+    def append_secant_events(self, events) -> TransactionReceipt:
+        """Submit immutable passive SECANT facts on the existing shared lane."""
+        return _append_passive_events(self, events, "secant")
+
+    def append_study_resource_events(self, events) -> TransactionReceipt:
+        """Submit observed resource changes; never infer domain transitions."""
+        return _append_passive_events(self, events, "resource")
+
+    def record_passive_recorder_status(self, status) -> TransactionReceipt:
+        from PERSISTENCE.secant_recorder import RecorderStatusRecord, META_PREFIX, _utc
+        if type(status) is not RecorderStatusRecord:
+            raise TypeError("Immutable recorder status required")
+        value = json.loads(status.status_json)
+        if (type(value) is not dict or type(value.get("contract_version")) is not int or value.get("contract_version") != 1
+                or type(value.get("run_id")) is not str or not value["run_id"]
+                or type(value.get("status_revision")) is not int or value["status_revision"] <= 0
+                or value.get("writer_state") not in {"STARTING", "ACTIVE", "DRAINING", "CLOSED", "FAILED"}
+                or value.get("coverage") not in {"BOUNDED_OBSERVATION", "RECORDING_GAP_DETECTED"}):
+            raise ValueError("Invalid recorder status")
+        _utc(value["opened_at_utc"])
+        _utc(value["last_recorded_at_utc"])
+        if value.get("closed_at_utc") is not None:
+            _utc(value["closed_at_utc"])
+        if value.get("writer_state") == "CLOSED" and value.get("final_flush_committed") is not True:
+            raise ValueError("Closed recorder requires confirmed flush")
+        key = META_PREFIX + value["run_id"]
+        payload = status.status_json
+        def write(connection):
+            row = connection.execute("SELECT value FROM myelin_meta WHERE key=?", (key,)).fetchone()
+            if row:
+                prior = json.loads(row[0])
+                if prior["opened_at_utc"] != value["opened_at_utc"]:
+                    raise ValueError("Recorder run identity conflict")
+                if prior["status_revision"] == value["status_revision"] and row[0] == payload:
+                    return TransactionResult()
+                if prior["status_revision"] >= value["status_revision"]:
+                    raise ValueError("Recorder status revision conflict")
+                if prior["coverage"] == "RECORDING_GAP_DETECTED" and value["coverage"] != prior["coverage"]:
+                    raise ValueError("Recorder quality cannot improve")
+            connection.execute("INSERT INTO myelin_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, payload))
+            return TransactionResult()
+        return self._submit("passive recorder status", write)
+
+    def flush_passive_recorder(self) -> TransactionReceipt:
+        """FIFO barrier only; caller still checks all its earlier receipts."""
+        return self._submit("passive recorder flush barrier", lambda connection: TransactionResult())
+
+    def read_passive_recorder_status(self, recorder_run_id):
+        from PERSISTENCE.secant_recorder import META_PREFIX, RecorderStatusRecord
+        if type(recorder_run_id) is not str or not recorder_run_id:
+            raise ValueError("Recorder run ID required")
+        connection = connect_database(read_only=True)
+        try:
+            row = connection.execute("SELECT value FROM myelin_meta WHERE key=?", (META_PREFIX + recorder_run_id,)).fetchone()
+            return RecorderStatusRecord(row[0]) if row else None
+        finally:
+            connection.close()
+
+    def read_study_resource_event_roles(self, event_ids):
+        """Join only committed qualification facts; ambiguity remains explicit."""
+        from PERSISTENCE.secant_recorder import RoleResolution
+        if type(event_ids) is not tuple or len(event_ids) > 2048 or any(type(v) is not str for v in event_ids):
+            raise ValueError("Bounded tuple of event IDs required")
+        connection = connect_database(read_only=True)
+        try:
+            connection.execute("BEGIN")
+            output = []
+            for event_id in event_ids:
+                event = connection.execute("SELECT * FROM study_resource_events WHERE event_id=?", (event_id,)).fetchone()
+                if event is None:
+                    output.append(RoleResolution(event_id, "EVENT_NOT_FOUND")); continue
+                candidates = connection.execute("SELECT * FROM study_resources WHERE session_id=? AND study_context_token=?", (event["session_id"], event["study_context_token"])).fetchall()
+                provenance = json.loads(event["provenance_json"])
+                exact = provenance.get("exact_resource_identity")
+                certified = (event["source_lane"] == "CONTROL_VIEW"
+                    and event["timestamp_basis"] == "COHERENT_FOREGROUND_OBSERVATION"
+                    and provenance.get("source_rejection_reason") == ""
+                    and isinstance(exact, dict) and exact.get("kind") == "BROWSER"
+                    and type(exact.get("version")) is int and exact["version"] == 1
+                    and type(exact.get("platform_key")) is str and bool(exact["platform_key"])
+                    and type(exact.get("resource_token")) is str and bool(exact["resource_token"]))
+                rows = []
+                for candidate in candidates:
+                    same_key = candidate["resource_key"] == event["resource_key"]
+                    same_identity = False
+                    if certified and candidate["identity_kind"] == "BROWSER" and candidate["identity_version"] == 1:
+                        identity = json.loads(candidate["identity_json"])
+                        same_identity = all(identity.get(k) == exact[k] for k in ("kind", "version", "platform_key", "resource_token"))
+                    if same_key or same_identity:
+                        rows.append(candidate)
+                if event["study_block_id"] is not None:
+                    rows = [r for r in rows if r["study_block_id"] == event["study_block_id"] and r["study_generation"] == event["study_generation"]]
+                if len(rows) != 1:
+                    output.append(RoleResolution(event_id, "AMBIGUOUS" if rows else "PENDING_OR_UNQUALIFIED")); continue
+                r = rows[0]
+                output.append(RoleResolution(event_id, "RESOLVED", r["resource_fact_id"], r["study_block_id"], r["study_generation"], r["identity_kind"], r["identity_version"], r["role"], r["qualified_monotonic_ns"], r["qualified_at_utc"]))
+            return tuple(output)
+        finally:
+            connection.close()
+
     def shutdown(self) -> None:
         """Release this facade's ownership of the shared lane.
 
@@ -1782,6 +2597,9 @@ class EngineStorage:
         that the Control Station is still using.
         """
 
+        self.end_study_resource_interval("STORAGE_SHUTDOWN")
+        if self._study_boundary_observer is not None:
+            self._study_boundary_observer.reap()
         # The claim is made under a lock so two threads shutting this SAME
         # facade cannot both pass the check and release the owner twice.
         with self._lifetime_lock:
@@ -1790,6 +2608,8 @@ class EngineStorage:
             self._closed = True
             lane = self._lane
         _SharedStorageLane.release(lane, self._owner_token)
+        if self._study_observation_evidence_capture is not None:
+            self._study_observation_evidence_capture.reap()
 
 
 # ---------------------------------------------------------------------------
@@ -2338,7 +3158,7 @@ def _counts() -> tuple[int, int]:
     connection = connect_database(read_only=True)
     try:
         sessions = int(connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0])
-        triggers = int(connection.execute("SELECT COUNT(*) FROM triggers").fetchone()[0])
+        triggers = len(_operational_trigger_rows(connection))
         return sessions, triggers
     finally:
         connection.close()
@@ -2372,30 +3192,93 @@ def _trigger_evidence(payload_text: str) -> dict:
     return {}
 
 
-def read_trigger_fire_times() -> dict[str, str]:
-    """Map each trigger's ``candidate_uid`` to the UTC instant Trigger minted it.
+def _operational_trigger_rows(connection) -> tuple[dict, ...]:
+    """Join factual SINE acceptance to immutable candidate evidence.
 
-    This is the moment the trigger actually fired, which is NOT the moment
-    SINE-1 appeared: on real evidence SINE-1 follows about three seconds
-    later.  MIRL's episode only knows the later instant, so a surface that
-    wants to show the true trigger time has to be handed this.
-
-    Read-only.  ``created_at_utc`` is the stamp written as the trigger row was
-    committed, so it is the closest recorded wall clock to the firing itself.
+    A candidate or PREPARED event is never sufficient. Invalid acceptance
+    evidence fails the read instead of producing a plausible wrong count.
+    JSON is validated in Python; SQLite JSON1 is not required.
     """
+    owns_snapshot = not connection.in_transaction
+    if owns_snapshot:
+        connection.execute("BEGIN")
+    try:
+        return _operational_trigger_rows_in_snapshot(connection)
+    finally:
+        if owns_snapshot:
+            connection.rollback()
+
+
+def _operational_trigger_rows_in_snapshot(connection) -> tuple[dict, ...]:
+    """Both append-only ledgers are read from the same SQLite snapshot."""
+    candidates = {
+        (row["session_id"], row["candidate_uid"], row["id"]): dict(row)
+        for row in connection.execute(
+            "SELECT id, session_id, candidate_uid, payload_json, created_at_utc "
+            "FROM triggers ORDER BY id"
+        ).fetchall()
+    }
+    accepted: dict[tuple, dict] = {}
+    for row in connection.execute(
+        "SELECT session_id, candidate_uid, episode_uid, kind, payload_json "
+        "FROM sine_facts WHERE kind='SINE_TRIGGER_ACCEPTED' ORDER BY id"
+    ).fetchall():
+        payload = json.loads(row["payload_json"])
+        if not isinstance(payload, dict):
+            raise ValueError("SINE acceptance payload must be an object")
+        event_id = payload.get("operational_event_id")
+        stamp = payload.get("occurred_wall_time_utc")
+        episode_uid = payload.get("episode_uid")
+        key = (row["session_id"], row["candidate_uid"], event_id)
+        if (
+            type(event_id) is not int or event_id <= 0
+            or payload.get("kind") != row["kind"]
+            or payload.get("session_id") != row["session_id"]
+            or payload.get("candidate_uid") != row["candidate_uid"]
+            or not episode_uid or episode_uid != row["episode_uid"]
+            or not isinstance(stamp, str) or not stamp
+            or key not in candidates
+        ):
+            raise ValueError("Unbound SINE operational acceptance")
+        parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("SINE acceptance time must be timezone-aware")
+        prior = accepted.get(key)
+        if prior is not None:
+            if prior["episode_uid"] != episode_uid or prior["accepted_at_utc"] != stamp:
+                raise ValueError("Conflicting SINE operational acceptance")
+            continue
+        accepted[key] = {
+            **candidates[key], "episode_uid": episode_uid, "accepted_at_utc": stamp,
+        }
+    return tuple(sorted(accepted.values(), key=lambda row: row["id"]))
+
+
+def read_trigger_candidate_evidence() -> tuple[dict, ...]:
+    """Raw committed candidates, including candidates that never intervened."""
+    connection = connect_database(read_only=True)
+    try:
+        return tuple(dict(row) for row in connection.execute(
+            "SELECT id, session_id, candidate_uid, payload_json, created_at_utc "
+            "FROM triggers ORDER BY id"
+        ).fetchall())
+    finally:
+        connection.close()
+
+
+def read_trigger_fire_times() -> dict[str, str]:
+    """Exact operational acceptance times; these are not display times."""
 
     connection = connect_database(read_only=True)
     try:
-        rows = connection.execute(
-            "SELECT candidate_uid, created_at_utc FROM triggers ORDER BY id"
-        ).fetchall()
+        rows = _operational_trigger_rows(connection)
     finally:
         connection.close()
 
     fired: dict[str, str] = {}
     for row in rows:
         candidate_uid = str(row["candidate_uid"] or "").strip()
-        stamp = str(row["created_at_utc"] or "").strip()
+        stamp = str(row["accepted_at_utc"] or "").strip()
         if candidate_uid and stamp:
             fired[candidate_uid] = stamp
     return fired
@@ -2417,9 +3300,7 @@ def read_trigger_identities() -> dict[str, str]:
 
     connection = connect_database(read_only=True)
     try:
-        rows = connection.execute(
-            "SELECT candidate_uid, payload_json FROM triggers ORDER BY id"
-        ).fetchall()
+        rows = _operational_trigger_rows(connection)
     finally:
         connection.close()
 
@@ -2438,8 +3319,7 @@ def read_trigger_identities() -> dict[str, str]:
 
 
 def read_trigger_platform_keys() -> tuple[str, ...]:
-    """Every durable trigger's certified structured ``platform_key``, in
-    trigger order, one entry per trigger row that carries one.
+    """Each operationally accepted trigger's certified platform key.
 
     Read-only, and it invents nothing: unlike ``read_trigger_identities``
     (which falls back to ``process_name`` for a presentation label), this
@@ -2454,9 +3334,7 @@ def read_trigger_platform_keys() -> tuple[str, ...]:
 
     connection = connect_database(read_only=True)
     try:
-        rows = connection.execute(
-            "SELECT payload_json FROM triggers ORDER BY id"
-        ).fetchall()
+        rows = _operational_trigger_rows(connection)
     finally:
         connection.close()
 
@@ -2675,20 +3553,35 @@ def record_emergency_followup_reason(reason_code: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def _read_study_records_for_report(snapshot: object) -> tuple:
-    """Read every durable Study Mode snapshot through the existing reader.
-
-    The only Study Mode reader is per session (``read_science_lab_study_records``),
-    so the sessions come from the snapshot's session list.  Read-only; nothing
-    is written and no new SQL is introduced here.
-    """
+    """Read durable Study snapshots for report sessions without schema bootstrap."""
 
     hub = getattr(snapshot, "lifetime_metric_hub", None)
     if hub is None:
         raise RuntimeError("the session list needed to read Study Mode is unavailable")
-    records: list = []
-    for row in tuple(getattr(hub, "session_rows", ()) or ()):
-        records.extend(read_science_lab_study_records(int(row.session_id)))
-    return tuple(records)
+    session_ids = {int(row.session_id) for row in tuple(getattr(hub, "session_rows", ()) or ())}
+    if not session_ids:
+        return ()
+    connection = connect_database(read_only=True)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        rows = connection.execute(
+            "SELECT id, session_id, action, occurred_monotonic_ns, payload_json, created_at_utc "
+            "FROM study_events ORDER BY session_id, occurred_monotonic_ns, id"
+        ).fetchall()
+    finally:
+        connection.close()
+    return tuple(
+        ScienceLabSourceRecord(
+            source_system="STUDY",
+            source_event_id=f"study_events:{int(row['id'])}",
+            session_id=int(row["session_id"]),
+            kind=str(row["action"]),
+            occurred_monotonic_ns=int(row["occurred_monotonic_ns"]),
+            payload_json=str(row["payload_json"]),
+            created_at_utc=str(row["created_at_utc"]),
+        )
+        for row in rows if int(row["session_id"]) in session_ids
+    )
 
 
 def export_analytics_sheet(*, snapshot: object, request: object) -> str:
@@ -2702,11 +3595,20 @@ def export_analytics_sheet(*, snapshot: object, request: object) -> str:
         raise ValueError("at least one analytics section is required")
     study_records = None
     study_error = None
+    study_family = None
+    study_family_error = None
     if "study-mode" in selected:
         try:
             study_records = _read_study_records_for_report(snapshot)
         except Exception as error:  # reported as "unavailable", never as zero
             study_error = type(error).__name__
+        try:
+            from GET_CHART.study_family_evidence import read_study_family
+            from PERSISTENCE.database import database_path
+
+            study_family = read_study_family(database_path(create_parent=False))
+        except Exception as error:
+            study_family_error = type(error).__name__
     downloads = Path.home() / "Downloads"
     downloads.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -2719,6 +3621,8 @@ def export_analytics_sheet(*, snapshot: object, request: object) -> str:
             output_path=temporary,
             study_records=study_records,
             study_error=study_error,
+            study_family=study_family,
+            study_family_error=study_family_error,
         )
         # Never claim no-clobber after a check/replace race.  A hard-link commit
         # is atomic on the same filesystem and fails if the target appeared.
@@ -2762,3 +3666,25 @@ __all__ = [
     "read_science_lab_study_records",
     "record_emergency_followup_reason",
 ]
+
+
+def read_study_resources(*, session_id: int, study_block_id: str | None = None):
+    """Read-only query with no EngineStorage construction, bootstrap or migration."""
+    from SECANT.read_model import ExactResource, StudyResourceFact
+    if type(session_id) is not int or session_id <= 0:
+        raise ValueError("Positive parent session ID required")
+    connection = connect_database(read_only=True)
+    try:
+        sql = "SELECT * FROM study_resources WHERE session_id=?"
+        args = [session_id]
+        if study_block_id is not None:
+            sql += " AND study_block_id=?"
+            args.append(study_block_id)
+        sql += " ORDER BY qualified_monotonic_ns, resource_fact_id"
+        rows = connection.execute(sql,args).fetchall()
+        return tuple(StudyResourceFact(row["resource_fact_id"],row["session_id"],row["study_block_id"],
+            row["study_generation"],row["study_context_token"],ExactResource(**json.loads(row["identity_json"])),
+            row["role"],row["first_aligned_monotonic_ns"],row["qualified_monotonic_ns"],
+            row["first_aligned_at_utc"],row["qualified_at_utc"],row["provenance_json"],row["contract_version"]) for row in rows)
+    finally:
+        connection.close()

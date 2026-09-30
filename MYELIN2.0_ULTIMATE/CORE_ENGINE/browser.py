@@ -416,7 +416,7 @@ def _opaque_resource_token(
     ).hexdigest()
 
 
-def classify_address_value(
+def _classify_address_value(
     address_value: object,
     *,
     identity_secret: bytes | None = None,
@@ -565,6 +565,38 @@ def classify_address_value(
             )
 
     return _evidence(UrlEvidenceKind.UNSUPPORTED_PLATFORM, "", "", "", EvidenceConfidence.NONE, "The certified host is not managed by MYELIN.")
+
+
+def classify_address_value(
+    address_value: object,
+    *,
+    identity_secret: bytes | None = None,
+) -> UrlSurfaceEvidence:
+    """Reduce an address and retain only a session-keyed exact-page identity."""
+
+    evidence = _classify_address_value(
+        address_value, identity_secret=identity_secret
+    )
+    if evidence.resource_token or evidence.kind in {
+        UrlEvidenceKind.URL_UNAVAILABLE,
+        UrlEvidenceKind.INVALID_ADDRESS,
+    }:
+        return evidence
+    # Route evidence may be weak or unsupported. Keep an opaque identity for
+    # the exact address so a user's clarification cannot follow another page
+    # that happens to reuse the same browser title and HWND.
+    prepared = _prepare_for_split(address_value)
+    try:
+        host = (urlsplit(prepared).hostname or "").casefold().strip(".")
+    except (TypeError, ValueError):
+        return evidence
+    token = _opaque_resource_token(
+        identity_secret=identity_secret,
+        platform=host,
+        marker="exact-address",
+        content_identity=prepared,
+    )
+    return replace(evidence, resource_token=token) if token else evidence
 
 
 def _looks_like_address(value: object) -> bool:

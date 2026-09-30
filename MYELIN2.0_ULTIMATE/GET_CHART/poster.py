@@ -7,10 +7,9 @@ Layers
    read model already certified; it never queries SQLite and never re-derives a
    scientific classification.  Anything the evidence cannot support is simply
    not drawn (or is drawn as an explicit UNAVAILABLE / NO DATA state).
-2. ``paint_poster`` draws that model on a fixed logical canvas
-   (1680 x 1188 units, the exact A3-landscape aspect ratio).  The interactive
-   window, the A3 PDF and the 300-DPI JPG all call this one function, so their
-   content cannot diverge.
+2. ``paint_poster`` draws that model on a fixed 16:9 logical canvas. The
+   interactive window, A3 PDF and 300-DPI JPG all call this one function;
+   A3 output centres the wide artwork without distortion.
 3. ``NeonPosterWindow`` hosts the canvas, keeps access tokens honest and
    publishes exports through a temporary file that is discarded on any failure
    or revocation.
@@ -84,7 +83,7 @@ from PERSISTENCE.database import resource_path
 # --------------------------------------------------------------------------
 
 CANVAS_W: Final = 1680.0
-CANVAS_H: Final = 1188.0  # 1680 x 1188 == 420 mm x 297 mm (A3 landscape)
+CANVAS_H: Final = 945.0  # 16:9 composition; A3 exports fit this art on the page.
 A3_LANDSCAPE_MM: Final = (420.0, 297.0)
 EXPORT_DPI: Final = 300
 A3_LANDSCAPE_PX: Final = (4961, 3508)  # 420 mm / 297 mm at 300 DPI
@@ -115,6 +114,7 @@ ORANGE: Final = "#ff8a1f"
 PINK: Final = "#ff2fb8"
 VIOLET: Final = "#a44dff"
 GREEN: Final = "#2dff6f"
+BLUE: Final = "#168cff"
 PURPLE_RETURN: Final = "#b060ff"
 
 ORGAN_COLOR: Final = {
@@ -122,6 +122,7 @@ ORGAN_COLOR: Final = {
     "MINE": PINK,
     "COSINE": VIOLET,
     "COSECANT": GREEN,
+    "SECANT": BLUE,
 }
 ORGAN_TINT: Final = {
     "SINE": "#1d0f04",
@@ -269,6 +270,18 @@ class CosecantPanel:
 
 
 @dataclass(frozen=True, slots=True)
+class SecantPanel:
+    status: str
+    stages: tuple[int, int, int] | None
+    founded: int | None
+    attempts: int | None
+    verified: int | None
+    interrupted: int | None
+    recovered: int | None
+    incomplete: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class PosterModel:
     snapshot_id: str
     generated_at_utc: str
@@ -278,6 +291,9 @@ class PosterModel:
     mine: MinePanel
     cosine: CosinePanel
     cosecant: CosecantPanel
+    secant: SecantPanel | None = None
+    system_counts: tuple[int | None, int | None, int | None] = (None, None, None)
+    sample_banner: str = ""
 
     @property
     def snapshot_label(self) -> str:
@@ -587,7 +603,7 @@ def _first_milestone(break_row, kind: str):
 
 def _model_cosecant(chart, lifetime) -> CosecantPanel:
     status = chart.status
-    lifetime_card = _lifetime_card(lifetime.cosecant.triggers, "LIFETIME TRIGGERS")
+    lifetime_card = _lifetime_card(lifetime.cosecant.triggers, "REMINDER STAGES")
     if status != AVAILABLE:
         cards = (
             _card("BREAKS", None, status),
@@ -635,12 +651,21 @@ def _model_cosecant(chart, lifetime) -> CosecantPanel:
     return CosecantPanel(status, total, tuple(steps), confirmed, slices, cards)
 
 
-def build_poster_model(data, *, tz: tzinfo | None = None) -> PosterModel:
+def build_poster_model(data, *, tz: tzinfo | None = None, sample_banner: str = "") -> PosterModel:
     """Project immutable poster data to a presentation model (no I/O)."""
 
     zone = tz if tz is not None else datetime.now().astimezone().tzinfo
     lifetime = data.lifetime_summary
     generated = _parse_utc(data.generated_at_utc).astimezone(zone)
+    secant_source = getattr(data, "secant", None)
+    secant = (SecantPanel(secant_source.status, secant_source.highest_stage_counts,
+                          secant_source.founded_episodes, secant_source.return_attempts,
+                          secant_source.verified_events, secant_source.interrupted_recoveries,
+                          secant_source.recovered_episodes, secant_source.incomplete_episodes)
+              if secant_source is not None else None)
+    sessions = lifetime.sessions.value if lifetime.sessions.available else None
+    study = getattr(data, "study_blocks_started", None)
+    breaks = data.cosecant.break_denominator if data.cosecant.status != UNAVAILABLE else None
     return PosterModel(
         snapshot_id=str(data.snapshot_id),
         generated_at_utc=str(data.generated_at_utc),
@@ -650,6 +675,9 @@ def build_poster_model(data, *, tz: tzinfo | None = None) -> PosterModel:
         mine=_model_mine(data.mine, lifetime),
         cosine=_model_cosine(data.cosine, lifetime, zone),
         cosecant=_model_cosecant(data.cosecant, lifetime),
+        secant=secant,
+        system_counts=(sessions, study, breaks),
+        sample_banner=sample_banner,
     )
 
 
@@ -1011,6 +1039,17 @@ def _paint_background(ctx: _Ctx) -> None:
     p = ctx.p
     canvas = QRectF(0, 0, CANVAS_W, CANVAS_H)
     p.fillRect(canvas, _vgradient(canvas, QColor("#050a18"), QColor("#02040a")))
+    p.setPen(QPen(_color("#1b5b82", 0.15), 0.8))
+    for x in range(0, int(CANVAS_W) + 1, 42):
+        p.drawLine(QPointF(x, 0), QPointF(x, CANVAS_H))
+    for y in range(0, int(CANVAS_H) + 1, 42):
+        p.drawLine(QPointF(0, y), QPointF(CANVAS_W, y))
+    for i in range(72):
+        x = 18 + (i * 337) % 1644
+        y = 8 + (i * 191) % 930
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(_color(CYAN, 0.11 if i % 3 else 0.25))
+        p.drawEllipse(QPointF(x, y), 1.0 if i % 3 else 1.5, 1.0 if i % 3 else 1.5)
     p.save()
     p.setClipRect(canvas)
     for cx, cy, radius, tone, alpha in (
@@ -1021,6 +1060,28 @@ def _paint_background(ctx: _Ctx) -> None:
     ):
         radial_glow(ctx, cx, cy, radius, tone, alpha)
     p.restore()
+
+
+def _paint_background_logo(ctx: _Ctx, logo: QImage) -> None:
+    """The complete official mark, ghosted behind the poster content."""
+
+    p = ctx.p
+    p.save()
+    try:
+        p.setClipRect(QRectF(0, 0, CANVAS_W, CANVAS_H))
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        radial_glow(ctx, 840, 455, 500, BLUE, 0.035)
+        mark = QRectF(140, -220, 1400, 1400)
+        # Small offset passes soften the existing transparent logo edges while
+        # keeping the combined opacity below the approved eight percent.
+        for dx, dy in ((-5, 0), (5, 0), (0, -5), (0, 5),
+                       (-3, -3), (3, -3), (-3, 3), (3, 3)):
+            p.setOpacity(0.002)
+            p.drawImage(mark.translated(dx, dy), logo)
+        p.setOpacity(0.06)
+        p.drawImage(mark, logo)
+    finally:
+        p.restore()
 
 
 def _paint_mountains(ctx: _Ctx) -> None:
@@ -1697,6 +1758,321 @@ _PANEL_PAINTERS: Final = {
 }
 
 
+# The five-organ poster is a presentation layer over the existing four-organ
+# snapshot.  SECANT and whole-system numbers deliberately have no data binding.
+POSTER_RECTS: Final = {
+    "SINE": QRectF(15, 110, 570, 312),
+    "MINE": QRectF(1095, 110, 570, 312),
+    "COSINE": QRectF(15, 435, 570, 225),
+    "COSECANT": QRectF(1095, 435, 570, 225),
+    "SECANT": QRectF(15, 672, 810, 205),
+    "SYSTEM": QRectF(838, 672, 827, 205),
+}
+
+
+def _new_frame_fill(ctx: _Ctx, rect: QRectF) -> None:
+    p = ctx.p
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(_vgradient(rect, QColor("#0b1730"), QColor("#030711")))
+    p.drawRoundedRect(rect, 13, 13)
+
+
+def _new_frame(ctx: _Ctx, rect: QRectF, tone: str, name: str, subtitle: str) -> None:
+    p = ctx.p
+    glow_path(ctx, rounded_path(rect.adjusted(1, 1, -1, -1), 12), tone, 2.0, layers=4, strength=0.42)
+    p.setPen(QPen(_color(tone, 0.42), 1.1))
+    p.drawLine(QPointF(rect.x() + 14, rect.y() + 56), QPointF(rect.right() - 14, rect.y() + 56))
+    icon = {"SINE": _icon_shield, "MINE": _icon_chat, "COSINE": _icon_play,
+            "SECANT": _icon_target, "COSECANT": _icon_book,
+            "SYSTEM SUMMARY": _icon_bars}[name]
+    _draw_icon(ctx, icon, QRectF(rect.x() + 19, rect.y() + 15, 31, 29), tone, 2.0)
+    draw_text(ctx, name, rect.x() + 61, rect.y() + 39, 32, tone, bold=True, black=True, glow=tone)
+    draw_text(ctx, subtitle, rect.right() - 20, rect.y() + 37, 13, INK, align="r", max_w=rect.width() - 200)
+
+
+def _box(ctx: _Ctx, rect: QRectF, tone: str = CYAN) -> None:
+    p = ctx.p
+    p.setPen(QPen(_color(tone, 0.58), 1.1))
+    p.setBrush(_color("#050d1d", 0.92))
+    p.drawRoundedRect(rect, 8, 8)
+
+
+def _heading(ctx: _Ctx, title: str, x: float, y: float, width: float, tone: str = INK) -> None:
+    draw_text(ctx, title, x, y, 13, tone, bold=True, spacing=0.04, max_w=width)
+
+
+def _stat(ctx: _Ctx, rect: QRectF, value: str, label: str, tone: str) -> None:
+    _box(ctx, rect, tone)
+    draw_text(ctx, value, rect.center().x(), rect.y() + 32, 25, tone, align="c", bold=True, max_w=rect.width() - 15)
+    draw_text(ctx, label, rect.center().x(), rect.bottom() - 11, 11.5, INK, align="c", bold=True, max_w=rect.width() - 12)
+
+
+def _ring(ctx: _Ctx, cx: float, cy: float, radius: float, pieces: Sequence[DonutSlice], total: int, tone: str, label: str) -> None:
+    p = ctx.p
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.setPen(QPen(_color("#263553"), 13))
+    p.drawEllipse(QPointF(cx, cy), radius, radius)
+    angle = 90.0
+    if total > 0:
+        for piece in pieces:
+            span = -360.0 * piece.count / total
+            color = tone if piece is pieces[0] else piece.color
+            glow_path(ctx, _donut_arc(QPointF(cx, cy), radius, angle, span), color, 13, layers=2, strength=0.3)
+            angle += span
+    draw_text(ctx, f"{total:,}", cx, cy + 5, 23, INK, align="c", bold=True, max_w=66)
+    draw_text(ctx, label, cx, cy + 22, 10.5, MUTED, align="c", bold=True, max_w=78)
+
+
+def _status(ctx: _Ctx, rect: QRectF, state: str, noun: str, tone: str) -> bool:
+    if state == AVAILABLE:
+        return False
+    label = f"NO RECORDED {noun}" if state == NO_DATA else "EVIDENCE UNAVAILABLE"
+    draw_text(ctx, label, rect.center().x(), rect.center().y() + 8, 22, tone, align="c", bold=True, max_w=rect.width() - 40)
+    return True
+
+
+def _new_sine(ctx: _Ctx, model: SinePanel) -> None:
+    r = POSTER_RECTS["SINE"]
+    _new_frame(ctx, r, ORANGE, "SINE", "GENERAL DRIFT REGULATION")
+    if _status(ctx, r, model.status, "SINE EPISODES", ORANGE):
+        return
+    _heading(ctx, "INTERVENTION STAGES", 33, 185, 240)
+    for i, stage in enumerate(model.stages[:3]):
+        x = 34 + i * 181
+        _box(ctx, QRectF(x, 198, 170, 54), ORANGE)
+        draw_text(ctx, stage.label, x + 85, 221, 15, ORANGE, align="c", bold=True)
+        draw_text(ctx, f"{stage.count:,}  ·  {stage.share_text}", x + 85, 241, 13, INK, align="c", max_w=155)
+    _box(ctx, QRectF(30, 263, 300, 143), ORANGE)
+    _heading(ctx, "EPISODE ESCALATION", 43, 285, 260)
+    maximum = max((s.count for s in model.stages), default=1) or 1
+    for i, stage in enumerate(model.stages[:3]):
+        y = 301 + i * 30
+        draw_text(ctx, stage.label, 44, y + 13, 12, INK)
+        p = ctx.p
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(_color(ORANGE, 0.25))
+        p.drawRoundedRect(QRectF(124, y, 172, 16), 4, 4)
+        p.setBrush(_color(ORANGE, 0.9))
+        if stage.count:
+            p.drawRoundedRect(QRectF(124, y, 172 * stage.count / maximum, 16), 4, 4)
+        draw_text(ctx, f"{stage.count:,}", 309, y + 13, 11, INK, align="r")
+    _box(ctx, QRectF(341, 263, 228, 143), ORANGE)
+    _heading(ctx, "RETURN OUTCOME", 353, 285, 190)
+    _ring(ctx, 397, 343, 34, model.slices, model.total or 0, ORANGE, "EPISODES")
+    draw_text(ctx, f"{model.returned or 0:,} returned", 451, 335, 13, INK, max_w=108)
+    draw_text(ctx, model.return_share_text, 451, 357, 17, ORANGE, bold=True)
+
+
+def _new_mine(ctx: _Ctx, model: MinePanel) -> None:
+    r = POSTER_RECTS["MINE"]
+    _new_frame(ctx, r, PINK, "MINE", "MESSAGING PATHWAY")
+    if _status(ctx, r, model.status, "MINE-1 CHOICES", PINK):
+        return
+    _box(ctx, QRectF(1110, 176, 312, 230), PINK)
+    _heading(ctx, "DECISION PATHWAY", 1123, 198, 260)
+    total = model.total or 0
+    _stat(ctx, QRectF(1124, 211, 105, 56), f"{total:,}", "CHOICES", PINK)
+    for i, choice in enumerate(model.choices[:2]):
+        y = 280 + i * 55
+        _box(ctx, QRectF(1130, y, 276, 45), PINK)
+        draw_text(ctx, choice.label, 1142, y + 20, 13, INK, bold=True, max_w=184)
+        draw_text(ctx, f"{choice.count:,} ({choice.share_text})", 1395, y + 35, 12, PINK, align="r", max_w=110)
+    draw_text(ctx, "Each choice has its own outcome path.", 1127, 391, 11.5, MUTED, max_w=260)
+    _box(ctx, QRectF(1432, 176, 217, 230), PINK)
+    _heading(ctx, "RECORDED OUTCOMES", 1444, 198, 190)
+    _ring(ctx, 1491, 277, 46, model.slices, total, PINK, "CHOICES")
+    draw_text(ctx, f"{model.documented or 0:,} documented", 1446, 366, 13, INK, max_w=185)
+    draw_text(ctx, "No inference from missing closure", 1446, 388, 11, MUTED, max_w=185)
+
+
+def _new_cosine(ctx: _Ctx, model: CosinePanel) -> None:
+    r = POSTER_RECTS["COSINE"]
+    _new_frame(ctx, r, VIOLET, "COSINE", "OTT VIEWING AWARENESS")
+    if _status(ctx, r, model.status, "COSINE EPISODES", VIOLET):
+        return
+    _box(ctx, QRectF(30, 502, 334, 143), VIOLET)
+    _heading(ctx, "RECORDED EVENT TIMELINE", 43, 524, 300)
+    rows = model.rows[:5]
+    max_events = max((row.event_count for row in rows), default=1) or 1
+    for i, row in enumerate(rows):
+        y = 535 + i * 20
+        draw_text(ctx, row.date_label, 44, y + 14, 11, INK, max_w=105)
+        p = ctx.p
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(_color(VIOLET, 0.27))
+        p.drawRoundedRect(QRectF(145, y + 2, 166, 13), 3, 3)
+        p.setBrush(_color(VIOLET, 0.85))
+        if row.event_count:
+            p.drawRoundedRect(QRectF(145, y + 2, 166 * row.event_count / max_events, 13), 3, 3)
+        draw_text(ctx, str(row.event_count), 344, y + 14, 11, INK, align="r")
+    draw_text(ctx, f"LATEST {len(rows)} OF {model.total_episodes or 0} EPISODES", 44, 643, 10.5, MUTED, max_w=300)
+    _box(ctx, QRectF(374, 502, 195, 143), VIOLET)
+    _heading(ctx, "EVENTS", 387, 524, 140)
+    _ring(ctx, 430, 581, 34, model.slices, model.total_events or 0, VIOLET, "EVENTS")
+    draw_text(ctx, f"{model.total_episodes or 0:,} episodes", 482, 574, 13, INK, max_w=75)
+    draw_text(ctx, model.tz_label, 482, 599, 11, MUTED, max_w=72)
+
+
+def _new_cosecant(ctx: _Ctx, model: CosecantPanel) -> None:
+    r = POSTER_RECTS["COSECANT"]
+    _new_frame(ctx, r, GREEN, "COSECANT", "APPROVED STUDY BREAKS")
+    if _status(ctx, r, model.status, "COSECANT BREAKS", GREEN):
+        return
+    _box(ctx, QRectF(1110, 502, 335, 143), GREEN)
+    _heading(ctx, "RETURN LADDER", 1123, 524, 300)
+    maximum = model.total or 1
+    for i, step in enumerate(model.steps):
+        y = 531 + i * 18
+        label = " ".join(step.lines).title()
+        draw_text(ctx, label, 1124, y + 13, 10.5, INK, max_w=150)
+        p = ctx.p
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(_color(GREEN, 0.22))
+        p.drawRoundedRect(QRectF(1278, y + 2, 115, 11), 3, 3)
+        p.setBrush(_color(GREEN, 0.85))
+        if step.count:
+            p.drawRoundedRect(QRectF(1278, y + 2, 115 * step.count / maximum, 11), 3, 3)
+        draw_text(ctx, str(step.count), 1428, y + 13, 10.5, INK, align="r")
+    _box(ctx, QRectF(1455, 502, 194, 143), GREEN)
+    _heading(ctx, "RETURN OUTCOME", 1468, 524, 165)
+    _ring(ctx, 1510, 582, 34, model.slices, model.total or 0, GREEN, "BREAKS")
+    draw_text(ctx, f"{model.confirmed or 0:,} confirmed", 1561, 575, 12, INK, max_w=73)
+
+
+def _new_secant(ctx: _Ctx, model: SecantPanel | None) -> None:
+    r = POSTER_RECTS["SECANT"]
+    _new_frame(ctx, r, BLUE, "SECANT", "STUDY OFF-TASK AND RECOVERY REGULATION")
+    _box(ctx, QRectF(30, 739, 282, 123), BLUE)
+    _heading(ctx, "STAGE DISTRIBUTION", 43, 761, 246)
+    maximum = max(model.stages) if model is not None and model.stages else 0
+    for i, stage in enumerate(("SECANT-1", "SECANT-2", "SECANT-3")):
+        y = 770 + i * 25
+        draw_text(ctx, stage, 44, y + 15, 12, INK)
+        p = ctx.p
+        p.setPen(QPen(_color(BLUE, 0.55), 1))
+        p.setBrush(_color(BLUE, 0.12))
+        p.drawRoundedRect(QRectF(149, y + 3, 147, 14), 3, 3)
+        if model is not None and model.stages is not None and maximum:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(_color(BLUE, 0.72))
+            p.drawRoundedRect(QRectF(149, y + 3, 147 * model.stages[i] / maximum, 14), 3, 3)
+        value = str(model.stages[i]) if model is not None and model.stages is not None else "—"
+        draw_text(ctx, value, 286, y + 15, 12, INK if value != "—" else MUTED, align="r")
+    _box(ctx, QRectF(322, 739, 488, 123), BLUE)
+    _heading(ctx, "RECOVERY JOURNEY", 335, 761, 450)
+    stages = ("OFF-TASK", "RETURN PROMPT", "RETURN", "VERIFICATION")
+    for i, stage in enumerate(stages):
+        x = 335 + i * 118
+        _box(ctx, QRectF(x, 782, 105, 45), BLUE if i < 3 else GREEN)
+        draw_text(ctx, stage, x + 52.5, 809, 11, INK, align="c", bold=True, max_w=96)
+        if i < 3:
+            draw_text(ctx, "→", x + 111, 811, 17, CYAN, align="c")
+    if model is None or model.status == UNAVAILABLE:
+        draw_text(ctx, "AWAITING APPROVED SECANT ANALYTICS", 564, 849, 12, MUTED, align="c", max_w=445)
+    else:
+        draw_text(ctx, f"EPISODES {model.founded}  ·  ATTEMPTS {model.attempts}  ·  VERIFIED EVENTS {model.verified}",
+                  564, 838, 10.5, CYAN, align="c", max_w=445)
+        draw_text(ctx, f"INTERRUPTED EVENTS {model.interrupted}  ·  RECOVERED EPISODES {model.recovered}  ·  OPEN {model.incomplete}",
+                  564, 854, 10.5, MUTED, align="c", max_w=445)
+
+
+def _new_system(ctx: _Ctx, model: PosterModel) -> None:
+    r = POSTER_RECTS["SYSTEM"]
+    _new_frame(ctx, r, CYAN, "SYSTEM SUMMARY", "LIFETIME / ALL RECORDED EVIDENCE")
+    labels = ("SESSIONS", "INTERVENTIONS", "RETURNS", "STUDY BLOCKS", "COSECANT BREAKS")
+    sessions, study, breaks = model.system_counts
+    values = (sessions, None, None, study, breaks)
+    for i, (label, value) in enumerate(zip(labels, values)):
+        x = 853 + i * 159
+        _stat(ctx, QRectF(x, 743, 149, 78), f"{value:,}" if value is not None else "—", label, CYAN)
+    draw_text(ctx, "Interventions and returns await shared definitions", 1250, 849, 13, MUTED, align="c", max_w=780)
+
+
+def _architecture_node(ctx: _Ctx, rect: QRectF, name: str, detail: str, tone: str) -> None:
+    p = ctx.p
+    path = QPainterPath()
+    bevel = 17
+    path.moveTo(rect.left() + bevel, rect.top())
+    path.lineTo(rect.right() - bevel, rect.top())
+    path.lineTo(rect.right(), rect.top() + bevel)
+    path.lineTo(rect.right(), rect.bottom() - bevel)
+    path.lineTo(rect.right() - bevel, rect.bottom())
+    path.lineTo(rect.left() + bevel, rect.bottom())
+    path.lineTo(rect.left(), rect.bottom() - bevel)
+    path.lineTo(rect.left(), rect.top() + bevel)
+    path.closeSubpath()
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(_vgradient(rect, _darken(tone, 0.24), QColor("#030914")))
+    p.drawPath(path)
+    glow_path(ctx, path, tone, 2.1, layers=4, strength=0.46)
+    icon = {"SINE": _icon_shield, "MINE": _icon_chat, "COSINE": _icon_play,
+            "SECANT": _icon_target, "COSECANT": _icon_book}[name]
+    _draw_icon(ctx, icon, QRectF(rect.center().x() - 12, rect.y() + 6, 24, 24), tone, 1.7)
+    draw_text(ctx, name, rect.center().x(), rect.y() + 50, 24, tone, align="c", bold=True, black=True, glow=tone, max_w=rect.width() - 15)
+    draw_text(ctx, detail, rect.center().x(), rect.y() + 66, 11.5, INK, align="c", max_w=rect.width() - 15)
+
+
+def _new_architecture(ctx: _Ctx) -> None:
+    p = ctx.p
+    lines = ((840, 212, 840, 230), (840, 230, 708, 230), (840, 230, 972, 230),
+             (708, 230, 708, 251), (972, 230, 972, 251),
+             (708, 341, 708, 366), (972, 341, 972, 366),
+             (708, 454, 708, 501), (972, 454, 972, 501),
+             (708, 501, 840, 501), (972, 501, 840, 501), (840, 501, 840, 530))
+    for x1, y1, x2, y2 in lines:
+        p.setPen(QPen(_color(CYAN, 0.8), 1.6))
+        p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+    _architecture_node(ctx, QRectF(740, 118, 200, 94), "SINE", "DETECT · NUDGE · RECOVER", ORANGE)
+    _architecture_node(ctx, QRectF(598, 251, 220, 90), "COSINE", "OTT VIEWING AWARENESS", VIOLET)
+    _architecture_node(ctx, QRectF(862, 251, 220, 90), "MINE", "MESSAGING CHOICES", PINK)
+    _architecture_node(ctx, QRectF(598, 366, 220, 88), "SECANT", "STUDY RECOVERY", BLUE)
+    _architecture_node(ctx, QRectF(862, 366, 220, 88), "COSECANT", "APPROVED BREAKS", GREEN)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(_color("#07162b", 0.95))
+    p.drawEllipse(QPointF(840, 565), 72, 72)
+    glow_path(ctx, _donut_arc(QPointF(840, 565), 72, 0, 359.9), CYAN, 2.0, layers=4, strength=0.35)
+    draw_text(ctx, "MYELIN", 840, 555, 20, CYAN, align="c", bold=True)
+    draw_text(ctx, "SYSTEM CORE", 840, 580, 13, INK, align="c", bold=True)
+    draw_text(ctx, "DATA     →     INSIGHT     →     BETTER HABITS", 840, 657, 13, CYAN, align="c", spacing=0.09, max_w=480)
+
+
+def _new_header(ctx: _Ctx, logo: QImage) -> None:
+    p = ctx.p
+    ctx.push_region("header", QRectF(0, 0, CANVAS_W, 105))
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    scale = min(50 / logo.width(), 50 / logo.height())
+    lw, lh = logo.width() * scale, logo.height() * scale
+    p.drawImage(QRectF(606, 22, lw, lh), logo)
+    draw_text(ctx, "MYELIN", 847, 70, 65, CYAN, align="c", bold=True, black=True, glow=CYAN, max_w=420)
+    draw_text(ctx, "2.0", 1047, 70, 53, "#8daaff", align="c", bold=True, black=True, glow=BLUE)
+    draw_text(ctx, "BEHAVIOUR INTELLIGENCE FOR A FOCUSED TOMORROW", 840, 96, 13, CYAN, align="c", spacing=0.1, max_w=520)
+    draw_text(ctx, "OBSERVE  ·  UNDERSTAND  ·  NUDGE  ·  RECOVER  ·  REPEAT", 55, 41, 14, CYAN, spacing=0.13, max_w=515)
+    draw_text(ctx, "FIVE ORGANS  ·  ONE SYSTEM  ·  A BRIGHTER YOU", 92, 78, 13, CYAN, spacing=0.1, max_w=475)
+    draw_text(ctx, "“Distraction is a signal.", 1295, 43, 19, INK, align="c", italic=True, max_w=350)
+    draw_text(ctx, "A better you is the response.”", 1295, 72, 19, INK, align="c", italic=True, max_w=350)
+    p.setPen(QPen(_color(CYAN, 0.68), 1.4))
+    p.drawLine(QPointF(1464, 12), QPointF(1464, 96))
+    for i, line in enumerate(("AWARENESS", "DISCIPLINE", "SELF-CONTROL", "BETTER HABITS")):
+        draw_text(ctx, line, 1481, 28 + i * 21, 13, CYAN, spacing=0.08, max_w=181)
+    ctx.pop_region()
+
+
+def _new_footer(ctx: _Ctx, model: PosterModel) -> None:
+    p = ctx.p
+    ctx.push_region("footer", QRectF(0, 884, CANVAS_W, 61))
+    p.setPen(QPen(_color(CYAN, 0.4), 1))
+    p.drawLine(QPointF(15, 885), QPointF(1665, 885))
+    for i, label in enumerate(("PRODUCTIVE USE", "SELF-CONTROL", "BETTER HABITS", "A CALMER MIND", "A BRIGHTER TOMORROW")):
+        cx = 305 + i * 218
+        draw_text(ctx, label, cx, 916, 13, CYAN, align="c", bold=True, spacing=0.05, max_w=200)
+    draw_text(ctx, "Small Steps · Big Change", 23, 916, 17, INK, italic=True, max_w=247)
+    draw_text(ctx, "MYELIN 2.0", 1470, 914, 23, CYAN, bold=True, black=True, max_w=188)
+    evidence = ((model.sample_banner + " · ") if model.sample_banner else "") + (f"Recorded MYELIN data (non-clinical) · {model.generated_label} · snapshot {model.snapshot_label} "
+                "· lifetime and episode evidence read separately")
+    draw_text(ctx, evidence, 840, 937, 11.5, MUTED, align="c", max_w=1550)
+    ctx.pop_region()
+
+
 def paint_poster(
     painter: QPainter,
     model: PosterModel,
@@ -1706,31 +2082,43 @@ def paint_poster(
     height: float,
     log: list[TextPlacement] | None = None,
 ) -> None:
-    """Draw the complete poster to fill ``width`` x ``height`` device units."""
+    """Draw the wide poster without distortion, centred on any export page."""
 
-    if abs(width / height - CANVAS_W / CANVAS_H) > 0.01:
-        raise ValueError("poster target must keep the A3 landscape aspect ratio")
+    if width <= 0 or height <= 0:
+        raise ValueError("poster target must have positive dimensions")
     painter.save()
     try:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        painter.scale(width / CANVAS_W, height / CANVAS_H)
+        painter.fillRect(QRectF(0, 0, width, height), QColor(NAVY_DEEP))
+        scale = min(width / CANVAS_W, height / CANVAS_H)
+        painter.translate((width - CANVAS_W * scale) / 2, (height - CANVAS_H * scale) / 2)
+        painter.scale(scale, scale)
         ctx = _Ctx(painter, log)
         ctx.push_region("canvas", QRectF(0, 0, CANVAS_W, CANVAS_H))
         _paint_background(ctx)
-        _paint_header(ctx, logo)
-        for organ in PANEL_ORDER:
-            attr, function = _PANEL_PAINTERS[organ]
-            x, y = PANEL_ORIGINS[organ]
-            painter.save()
-            painter.translate(x, y)
-            ctx.push_region(f"panel:{organ}", QRectF(0, 0, PANEL_W, PANEL_H))
-            _paint_panel_chrome(ctx, organ)
-            function(ctx, getattr(model, attr))
+        for rect in POSTER_RECTS.values():
+            _new_frame_fill(ctx, rect)
+        _paint_background_logo(ctx, logo)
+        _new_header(ctx, logo)
+        _new_architecture(ctx)
+        for organ, function, data in (
+            ("SINE", _new_sine, model.sine),
+            ("MINE", _new_mine, model.mine),
+            ("COSINE", _new_cosine, model.cosine),
+            ("COSECANT", _new_cosecant, model.cosecant),
+        ):
+            ctx.push_region(f"panel:{organ}", POSTER_RECTS[organ])
+            function(ctx, data)
             ctx.pop_region()
-            painter.restore()
-        _paint_footer(ctx, model)
+        ctx.push_region("panel:SECANT", POSTER_RECTS["SECANT"])
+        _new_secant(ctx, model.secant)
+        ctx.pop_region()
+        ctx.push_region("panel:SYSTEM", POSTER_RECTS["SYSTEM"])
+        _new_system(ctx, model)
+        ctx.pop_region()
+        _new_footer(ctx, model)
     finally:
         painter.restore()
 
@@ -1740,10 +2128,11 @@ def render_poster_image(
     logo: QImage,
     width_px: int,
     *,
+    height_px: int | None = None,
     dpi: int | None = None,
     log: list[TextPlacement] | None = None,
 ) -> QImage:
-    height_px = int(round(width_px * CANVAS_H / CANVAS_W))
+    height_px = height_px or int(round(width_px * CANVAS_H / CANVAS_W))
     image = QImage(width_px, height_px, QImage.Format.Format_RGB32)
     image.fill(QColor(NAVY_DEEP))
     if dpi:
@@ -2154,7 +2543,7 @@ class NeonPosterWindow(QDialog):
                 raise ValueError("PDF is not one A3 landscape page")
             return
         width, height = A3_LANDSCAPE_PX
-        image = render_poster_image(model, logo, width, dpi=EXPORT_DPI)
+        image = render_poster_image(model, logo, width, height_px=height, dpi=EXPORT_DPI)
         if (image.width(), image.height()) != (width, height):
             raise ValueError("JPG has unexpected dimensions")
         if not image.save(str(target), "JPG", 95):

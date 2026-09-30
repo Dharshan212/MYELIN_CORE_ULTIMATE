@@ -636,7 +636,7 @@ class _BoundaryNote(QFrame):
 #: Whole-MYELIN Analysis panel.
 _EPISODE_CHART_ORGANS: Final = ("SINE", "MINE", "COSINE")
 _EPISODE_CHART_HELD_NOTE: Final = (
-    "MIRL (verified recoveries), COSECANT (completed returns), STUDY (completed "
+    "SECANT is shown separately in its Study journey and result tables. MIRL (verified recoveries), COSECANT (completed returns), STUDY (completed "
     "study blocks) and NORMAL BREAK (completed break events) use a different "
     "certified unit than a completed episode and are not included in this "
     "comparison. Their certified values remain in Chapter 3's Whole-MYELIN "
@@ -1150,11 +1150,12 @@ class _EpisodeShareDonutCard(QFrame):
 #: OFF_TASK_DWELL is a declared valid stage constant but no builder in
 #: _build_timeline ever emits it for any organ -- it is never rendered as a
 #: node because no certified event of that stage exists to draw.
-_JOURNEY_ORGANS: Final = ("SINE", "MINE", "COSINE", "COSECANT")
+_JOURNEY_ORGANS: Final = ("SINE", "MINE", "COSINE", "SECANT", "COSECANT")
 _JOURNEY_SOURCES_BY_ORGAN: Final = {
     "SINE": ("SINE", "MIRL"),
     "MINE": ("MINE",),
     "COSINE": ("COSINE",),
+    "SECANT": ("SECANT",),
     "COSECANT": ("COSECANT",),
 }
 _JOURNEY_NO_EVENTS_NOTE: Final = (
@@ -1769,6 +1770,16 @@ class Chapter5ResultsView(QWidget):
         charts_row.addWidget(self._episode_bar_chart, 1)
         charts_row.addWidget(self._episode_share_donut, 1)
         dashboard_layout.addLayout(charts_row)
+        from PyQt6.QtWidgets import QPlainTextEdit
+        self._secant_results = QPlainTextEdit()
+        self._secant_results.setReadOnly(True)
+        self._secant_results.setFont(make_font(13, 400))
+        self._secant_results.setStyleSheet("QPlainTextEdit { background: #111827; color: #E5E7EB; border: 1px solid #334155; border-radius: 10px; padding: 12px; }")
+        self._secant_results.setAccessibleName("SECANT experiment results")
+        self._secant_results.setMinimumHeight(180)
+        self._secant_results.setMaximumHeight(300)
+        self._secant_results.setPlainText("SECANT — awaiting a certified experiment package.")
+        dashboard_layout.addWidget(self._secant_results)
         self._journey_card = _BehavioralJourneyCard()
         dashboard_layout.addWidget(self._journey_card)
         root.addWidget(self._dashboard_container)
@@ -1827,6 +1838,18 @@ class Chapter5ResultsView(QWidget):
         self._current_presentation = presentation
 
     def _apply_presentation(self, presentation: Chapter5Presentation) -> None:
+        from .report_model import _secant_model, UnavailableOrgan
+        result = _secant_model(presentation.package)
+        if isinstance(result, UnavailableOrgan):
+            self._secant_results.setPlainText(f"SECANT — {result.status}\n{result.reason}\nNo evidence does not prove non-use.")
+        else:
+            lines = ["SECANT — experiment-scoped Study recovery", result.reason, result.overlap_note]
+            lines.extend(f"{c.label}: {c.value}" for c in result.snapshot_cards)
+            for table in (result.table1, result.table2):
+                lines.extend(("", table.title, " | ".join(table.headers)))
+                lines.extend(" | ".join(row) for row in table.rows)
+            lines.extend(("", result.discussion_note))
+            self._secant_results.setPlainText("\n".join(lines))
         sections = (
             presentation.results_overview_lines,
             presentation.behavioral_result_lines,
