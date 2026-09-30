@@ -2556,7 +2556,6 @@ class Chapter3TimelineView(QWidget):
 
     def _render_metrics(self, metrics: tuple[object, ...]) -> None:
         by_code = {str(getattr(metric, "code", "")): metric for metric in metrics}
-        self._metrics_badge.setText("FINAL CERTIFIED METRICS")
         for code, card in self._metric_cards.items():
             metric = by_code.get(code)
             if metric is None:
@@ -2689,14 +2688,13 @@ class Chapter3TimelineView(QWidget):
         header.setFont(make_font(13, 800, spacing=1.0))
         header_row.addWidget(header)
         header_row.addStretch(1)
-        self._metrics_badge = QLabel("DUMMY LAYOUT")
-        self._metrics_badge.setObjectName("chapter3DemoBadge")
-        self._metrics_badge.setFont(make_font(9, 700, spacing=0.6))
-        self._metrics_badge.setToolTip(
+        # V05: the "DUMMY LAYOUT" badge was removed.  Its honest scope note
+        # is kept as the heading's tooltip; every tile still states its own
+        # availability.
+        header.setToolTip(
             "These cards summarize measured or derived behavioural quantities from the "
             "selected Science Lab experiment. No neuroscience claim is made."
         )
-        header_row.addWidget(self._metrics_badge)
         layout.addLayout(header_row)
 
         layout.addWidget(

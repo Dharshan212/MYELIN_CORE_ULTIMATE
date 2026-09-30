@@ -435,7 +435,7 @@ def build_application_stylesheet(tokens: ThemeTokens | None = None) -> str:
 
     return f"""
 /* ---------- base ---------- */
-QWidget#appRoot, QWidget#pagesHost, QWidget#pageBody, QWidget#scrollHost,
+QWidget#appRoot, QWidget#pageBody, QWidget#scrollHost,
 QWidget#pageGrid, QWidget#plainBox {{
     background: {base};
 }}

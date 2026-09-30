@@ -58,6 +58,7 @@ from time_projection import (
     timezone_tag,
 )
 from SCIENCE_LAB.lab import ScienceLabWorkspace
+from UI_THEMES.theme import DEFAULT_THEME, alpha
 
 
 POLL_INTERVAL_MS: Final = 120
@@ -620,10 +621,76 @@ class ScienceLabPage(DashboardPage):
         self.limitation.setParent(self)
         self.limitation.hide()
 
+        # V06: the header badge reports the EXPERIMENT, not evidence
+        # availability.  ONLINE only while the host has confirmed a running
+        # experiment attached to the current MYELIN session; OFFLINE
+        # otherwise.  Evidence-read status moves to the badge's tooltip.
+        self._experiment_online = False
+        self._evidence_note = "Evidence: not loaded"
+        self._tokens = DEFAULT_THEME
+        self.status._retheme = self._retheme_status
+        self._paint_experiment_status()
+
+    # ---------------------------------------------- experiment status badge
+    def set_experiment_online(self, online: bool) -> None:
+        """Host-driven: True only for a confirmed running, attached experiment."""
+
+        online = bool(online)
+        if online != self._experiment_online:
+            self._experiment_online = online
+            self._paint_experiment_status()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        # The button's real height is only known once it has been styled.
+        self.status.setMinimumHeight(self.refresh_button.sizeHint().height())
+
+    def _retheme_status(self, tokens) -> None:
+        self._tokens = tokens
+        self._paint_experiment_status()
+
+    def _paint_experiment_status(self) -> None:
+        colour = self._tokens.green if self._experiment_online else self._tokens.red
+        self.status.setText("ONLINE" if self._experiment_online else "OFFLINE")
+        self.status.setToolTip(
+            (
+                "Science experiment running"
+                if self._experiment_online
+                else "No science experiment running"
+            )
+            + f"\n{self._evidence_note}"
+        )
+        # Same height as the REFRESH button beside it.
+        self.status.setMinimumHeight(self.refresh_button.sizeHint().height())
+        self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status.setStyleSheet(
+            f"color: {colour}; background: {alpha(colour, 0.14)};"
+            f"border: 1px solid {alpha(colour, 0.40)}; border-radius: 999px;"
+            "padding: 4px 22px; font-size: 12px; font-weight: 700;"
+        )
+
+    def set_refreshing(self, refreshing: bool) -> None:
+        # Only the button: a refresh must not overwrite the experiment badge.
+        self.refresh_button.setEnabled(not refreshing)
+        if refreshing:
+            self._evidence_note = "Evidence: refreshing"
+            self._paint_experiment_status()
+
+    def show_refresh_failure(self) -> None:
+        self._evidence_note = (
+            "Evidence: refresh failed"
+            if self._last_projection is not None
+            else "Evidence: unavailable"
+        )
+        self._paint_experiment_status()
+
     def render_projection(self, projection: object) -> None:
         super().render_projection(projection)
         available = bool(_field(projection, "available", False))
-        self.status.setText("ONLINE" if available else "NO EVIDENCE")
+        self._evidence_note = (
+            "Evidence: available" if available else "Evidence: no evidence"
+        )
+        self._paint_experiment_status()
         limitation = _safe_text(
             _field(projection, "scientific_evidence_limitation"),
             "No scientific evidence statement supplied",

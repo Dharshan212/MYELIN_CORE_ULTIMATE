@@ -2431,6 +2431,11 @@ class StudyView(QWidget):
     continuity_popup_presented = pyqtSignal(object)
     planner_requested = pyqtSignal()
     menu_action_requested = pyqtSignal(str)
+    #: V04: presentation-only request to open the Control Station.  The host
+    #: routes it through the normal NavigationController gate (Notes save,
+    #: protected-red guard); this view never switches pages or touches any
+    #: Study / COSECANT authority itself.
+    control_station_requested = pyqtSignal()
 
     def __init__(
         self,
@@ -2520,6 +2525,19 @@ class StudyView(QWidget):
         self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.menu_button.setMenu(self._build_menu())
         header.addWidget(self.menu_button)
+        self.control_station_button = QToolButton(body)
+        self.control_station_button.setObjectName("studyMenuButton")
+        self.control_station_button.setText("CONTROL STATION")
+        self.control_station_button.setFont(make_font(12, 700, spacing=0.8))
+        self.control_station_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.control_station_button.setToolTip(
+            "Go to the Control Station. Study keeps running."
+        )
+        self.control_station_button.setAccessibleName("Open Control Station")
+        self.control_station_button.clicked.connect(
+            self.control_station_requested.emit
+        )
+        header.addWidget(self.control_station_button)
         layout.addLayout(header)
 
         # ``.sm-grid`` -- a 1.3fr timer column beside a 1fr telemetry column.

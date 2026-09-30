@@ -29,6 +29,7 @@ from PyQt6.QtCore import (
     QSize,
     Qt,
     QTimer,
+    pyqtProperty,
     pyqtSignal,
 )
 from PyQt6.QtGui import (
@@ -41,6 +42,7 @@ from PyQt6.QtGui import (
     QLinearGradient,
     QPainter,
     QPainterPath,
+    QPalette,
     QPen,
     QPixmap,
     QRadialGradient,
@@ -124,6 +126,7 @@ from UI_THEMES.animation import (
 from UI_THEMES.theme import (
     AMBER_ALERT_THEME,
     Atmosphere,
+    BASE_THEMES,
     DEFAULT_THEME,
     FEED_BADGE_COSINE,
     FEED_BADGE_OTT,
@@ -203,6 +206,32 @@ class ControlStationPages:
         }
 
 
+class _ThemeNavIcon(NavIcon):
+    """NavIcon plus the one glyph the shared table does not carry (V08).
+
+    Kept here so the shared ``UI_THEMES.animation.NavIcon`` glyph table stays
+    untouched.  Every other name falls through to it unchanged, and painting,
+    sizing and colouring are all the inherited NavIcon behaviour.
+    """
+
+    @staticmethod
+    def _glyph(name: str) -> list:
+        if name != "change-theme":
+            return NavIcon._glyph(name)
+        disc = QPainterPath()
+        disc.addEllipse(QPointF(12, 12), 9, 9)
+        # Right half filled-in by hatching: a "light / dark" contrast disc.
+        half = QPainterPath()
+        half.moveTo(12, 3)
+        half.arcTo(3, 3, 18, 18, 90, -180)
+        half.lineTo(12, 3)
+        hatch = QPainterPath()
+        for y in (8.0, 12.0, 16.0):
+            hatch.moveTo(12.6, y)
+            hatch.lineTo(17.4 if y == 12.0 else 16.4, y)
+        return [disc, half, hatch]
+
+
 class ControlStationSidebar(QFrame):
     """Launcher-owned navigation drawer for the approved Control Station pages.
 
@@ -250,6 +279,7 @@ class ControlStationSidebar(QFrame):
         self._is_open = False
         self._theme = DEFAULT_THEME
         self._coming_soon_icon: NavIcon | None = None
+        self._theme_icon: NavIcon | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 20, 0, 14)
@@ -350,7 +380,8 @@ class ControlStationSidebar(QFrame):
         foot = QWidget(self)
         foot.setObjectName("sidebarFoot")
         row = QVBoxLayout(foot)
-        row.setContentsMargins(20, 14, 20, 2)
+        # 10px side inset, like the nav rows, so the icon lines up with them.
+        row.setContentsMargins(10, 14, 10, 2)
         row.setSpacing(4)
         row.addWidget(self._settings_row())
         row.addSpacing(10)
@@ -365,15 +396,23 @@ class ControlStationSidebar(QFrame):
 
         button = QPushButton(self)
         button.setObjectName("sidebarNavigationButton")
-        button.setAccessibleName("Open MYELIN settings")
+        # V08: labelled for what it does -- it opens the theme picker.
+        button.setAccessibleName("Change theme")
+        button.setToolTip("Change theme")
         # QPushButton sizes itself from its own (empty) text; see _nav_row.
         button.setMinimumHeight(42)
         button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         row = QHBoxLayout(button)
         row.setContentsMargins(12, 11, 12, 11)
         row.setSpacing(13)
-        row.addWidget(label("Settings", 13.5, 400, "text"))
-        row.addStretch(1)
+        icon = _ThemeNavIcon("change-theme", button)
+        icon.set_colour(self._theme.muted)
+        self._theme_icon = icon
+        row.addWidget(icon)
+        row_label = label("Change Theme", 13.5, 400, "text")
+        row_label.setObjectName("navRowLabel")
+        row_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        row.addWidget(row_label, 1)
         button.clicked.connect(self.settings_requested.emit)
         return button
 
@@ -502,6 +541,8 @@ class ControlStationSidebar(QFrame):
         self._theme = tokens
         for name, button in self._buttons.items():
             self._paint_row(name, button.isChecked())
+        if self._theme_icon is not None:
+            self._theme_icon.set_colour(tokens.muted)
         if self._coming_soon_icon is not None:
             self._coming_soon_icon.set_colour(
                 mix(tokens.muted, 55, tokens.surface_soft)
@@ -9454,6 +9495,9 @@ class CosineLiveCard(QWidget):
         chosen, self._break = stat_box("Break", "—", "text", 16.0)
         for widget in (platform, state, chosen):
             top.addWidget(widget, 1)
+        for value_label in (self._platform, self._state, self._break):
+            value_label.setMinimumWidth(0)
+            value_label.setWordWrap(True)
         body.addLayout(top)
         body.addSpacing(14)
 
@@ -9609,6 +9653,7 @@ _MINE_STATE_LABELS: Final = {
     "RETURN_VISUAL_CONFIRMING": "Return Confirming",
     "RETURN_VERIFYING": "Return Verifying",
     "CLOSURE_CONFIRMING": "Closure Confirming",
+    "STUDY_PREEMPTION_PENDING": "Study Preemption Pending",
     "CLOSED": "Closed",
     "SHUTDOWN": "Shutdown",
 }
@@ -9684,6 +9729,9 @@ class MineLiveCard(QWidget):
         branch, self._branch = stat_box("Branch", "—", "text", 16.0)
         for widget in (source, state, branch):
             top.addWidget(widget, 1)
+        for value_label in (self._source, self._state, self._branch):
+            value_label.setMinimumWidth(0)
+            value_label.setWordWrap(True)
         body.addLayout(top)
         body.addSpacing(14)
 
@@ -11670,6 +11718,7 @@ class CosineLivePage(QWidget):
 
         self._projection = None
         self._live_snapshot = None
+        self._live_raw_snapshot = None
         self._selected_episode_key = None
         self._refreshing = False
         self._refresh_failed = False
@@ -11705,6 +11754,14 @@ class CosineLivePage(QWidget):
         self._wrap.setSpacing(20)
         self._topline = self._build_topline()
         self._wrap.addWidget(self._topline)
+
+        # V07: a live episode-status strip (modelled on the MINE page's) sits
+        # directly under the title.  It reads COSINE's own live snapshot only;
+        # the durable "recent episode" card below is history and never decides
+        # whether an episode is active.
+        self._episode_slot = QVBoxLayout()
+        self._episode_slot.setContentsMargins(0, 0, 0, 0)
+        self._wrap.addLayout(self._episode_slot)
 
         self._hold_slot = QVBoxLayout()
         self._hold_slot.setContentsMargins(0, 0, 0, 0)
@@ -12407,6 +12464,7 @@ class CosineLivePage(QWidget):
 
     def render_live_view(self, snapshot: object) -> None:
         """Live facts affect only the banner, never durable history or selection."""
+        self._live_raw_snapshot = snapshot
         self._live_snapshot = snapshot if _cosine_live_episode_present(snapshot) else None
         self._render_banner()
 
@@ -12414,7 +12472,37 @@ class CosineLivePage(QWidget):
         self._refreshing = refreshing
         self._overlay._refresh_button.setEnabled(not refreshing)
 
+    def _render_episode_strip(self) -> None:
+        """Active / paused / unavailable / inactive, from the live snapshot only."""
+
+        self._clear(self._episode_slot)
+        live = self._live_snapshot
+        raw = self._live_raw_snapshot
+        if live is not None:
+            paused = bool(_cosine_field(live, "global_paused", False))
+            banner = showcase_episode_banner(
+                "Episode",
+                "COSINE episode active",
+                "Live Status",
+                "PAUSED" if paused else "ACTIVE",
+                ok=True,
+                status_size=16.0,
+            )
+        elif raw is not None and not bool(_cosine_field(raw, "available", False)):
+            banner = showcase_episode_banner(
+                "Episode", "Evidence unavailable", "", "UNAVAILABLE",
+                ok=False, status_size=16.0,
+            )
+        else:
+            banner = showcase_episode_banner(
+                "Episode", "No active episode", "", "INACTIVE",
+                ok=False, status_size=16.0,
+            )
+        self._episode_slot.addWidget(banner)
+        _retheme_subtree(banner)
+
     def _render_banner(self) -> None:
+        self._render_episode_strip()
         self._clear(self._banner_slot)
         self._clear(self._hold_slot)
         if self._live_snapshot is not None:
@@ -12518,6 +12606,284 @@ class CosineLivePage(QWidget):
             self._overlay._body.verticalScrollBar().setValue(deep_scroll)
 
 
+class _PagerDots(QWidget):
+    """Arrow / dot / arrow strip for :class:`EscalationPager` (paint only)."""
+
+    selected = pyqtSignal(int)
+    _DOT = 7
+    _GAP = 14
+    _ARROW = 26
+
+    def __init__(self, count: int, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("plainBox")
+        self._count = count
+        self._position = 0.0
+        self._theme = DEFAULT_THEME
+        self._retheme = self.apply_theme
+        self.setFixedHeight(26)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_position(self, position: float) -> None:
+        self._position = position
+        self.update()
+
+    def apply_theme(self, tokens) -> None:
+        self._theme = tokens
+        self.update()
+
+    def _centres(self) -> list[float]:
+        span = (self._count - 1) * (self._DOT + self._GAP)
+        start = (self.width() - span) / 2
+        return [start + i * (self._DOT + self._GAP) for i in range(self._count)]
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        del event
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        muted = QColor(self._theme.muted)
+        cyan = QColor(self._theme.cyan)
+        for index, cx in enumerate(self._centres()):
+            near = max(0.0, 1.0 - abs(self._position - index))
+            colour = QColor(muted)
+            colour.setAlpha(int(90 + 0 * near))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(colour)
+            p.drawEllipse(QPointF(cx, self.height() / 2), self._DOT / 2, self._DOT / 2)
+            if near > 0.0:
+                lit = QColor(cyan)
+                lit.setAlpha(int(255 * near))
+                p.setBrush(lit)
+                radius = self._DOT / 2 + 1.0 * near
+                p.drawEllipse(QPointF(cx, self.height() / 2), radius, radius)
+        arrow_pen_colour = QColor(muted)
+        for direction, cx, enabled in (
+            (-1, self._ARROW / 2, self._position > 0.01),
+            (1, self.width() - self._ARROW / 2, self._position < self._count - 1.01),
+        ):
+            arrow_pen_colour.setAlpha(230 if enabled else 60)
+            pen = QPen(arrow_pen_colour, 1.8)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            cy = self.height() / 2
+            path = QPainterPath()
+            path.moveTo(cx - direction * 2.5, cy - 5)
+            path.lineTo(cx + direction * 2.5, cy)
+            path.lineTo(cx - direction * 2.5, cy + 5)
+            p.drawPath(path)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        x = event.position().x()
+        if x <= self._ARROW * 1.6:
+            self.selected.emit(-1000)
+            return
+        if x >= self.width() - self._ARROW * 1.6:
+            self.selected.emit(1000)
+            return
+        for index, cx in enumerate(self._centres()):
+            if abs(x - cx) <= (self._DOT + self._GAP) / 2:
+                self.selected.emit(index)
+                return
+
+
+class EscalationPager(QWidget):
+    """Swipeable stack of read-only pages that slide like a drawn card.
+
+    Presentation only.  It owns no clock and reads no runtime: each page is
+    filled by its own ``render`` method from an existing snapshot.  Pages can
+    be changed by dragging (mouse or touch), horizontal wheel/trackpad, the
+    Left/Right keys, or the arrow / dot strip.
+    """
+
+    page_changed = pyqtSignal(int)
+    drag_finished = pyqtSignal()
+
+    _SWIPE_FRACTION = 0.16
+    _DRAG_THRESHOLD = 8
+
+    def __init__(self, pages: list[QWidget], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("plainBox")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+        self._pages = list(pages)
+        self._index = 0
+        self._offset = 0.0
+        self._press_x: float | None = None
+        self._press_offset = 0.0
+        self._dragging = False
+        self._animation = QPropertyAnimation(self, b"offset", self)
+        self._animation.setDuration(240)
+        self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        for page in self._pages:
+            page.setParent(self)
+            page.installEventFilter(self)
+            for child in page.findChildren(QWidget):
+                child.installEventFilter(self)
+            page.show()
+        self._layout_pages()
+
+    # ------------------------------------------------------------ geometry
+    def _get_offset(self) -> float:
+        return self._offset
+
+    def _set_offset(self, value: float) -> None:
+        self._offset = float(value)
+        self._layout_pages()
+        self.offset_changed.emit(self._offset)
+
+    offset_changed = pyqtSignal(float)
+    offset = pyqtProperty(float, _get_offset, _set_offset)
+
+    def _layout_pages(self) -> None:
+        width, height = self.width(), self.height()
+        for index, page in enumerate(self._pages):
+            page.setGeometry(round((index - self._offset) * width), 0, width, height)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._layout_pages()
+
+    @staticmethod
+    def _page_height(page: QWidget, width: int) -> int:
+        layout = page.layout()
+        if layout is None:
+            return page.sizeHint().height()
+        margins = layout.contentsMargins()
+        inner = max(0, width - margins.left() - margins.right())
+        height = layout.heightForWidth(inner)
+        if height < 0:
+            return layout.totalSizeHint().height()
+        return height + margins.top() + margins.bottom()
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        return max(self._page_height(page, width) for page in self._pages)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(360, self.heightForWidth(360))
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, self.heightForWidth(max(self.width(), 1)))
+
+    # ---------------------------------------------------------- navigation
+    def current_index(self) -> int:
+        return self._index
+
+    @property
+    def is_dragging(self) -> bool:
+        """Whether a real swipe gesture is currently controlling the pager."""
+
+        return bool(self._dragging)
+
+    def go_to(self, index: int, animated: bool = True) -> None:
+        index = max(0, min(len(self._pages) - 1, int(index)))
+        changed = index != self._index
+        self._index = index
+        self._animation.stop()
+        if animated:
+            self._animation.setStartValue(self._offset)
+            self._animation.setEndValue(float(index))
+            self._animation.start()
+        else:
+            self._set_offset(float(index))
+        if changed:
+            self.page_changed.emit(index)
+
+    def step(self, delta: int) -> None:
+        self.go_to(self._index + delta)
+
+    def dot_selected(self, value: int) -> None:
+        if value <= -1000:
+            self.step(-1)
+        elif value >= 1000:
+            self.step(1)
+        else:
+            self.go_to(value)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Left:
+            self.step(-1)
+        elif event.key() == Qt.Key.Key_Right:
+            self.step(1)
+        else:
+            super().keyPressEvent(event)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        delta = event.angleDelta()
+        if abs(delta.x()) > abs(delta.y()) and abs(delta.x()) >= 60:
+            if self._animation.state() != QAbstractAnimation.State.Running:
+                self.step(-1 if delta.x() > 0 else 1)
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    # ------------------------------------------------------------ dragging
+    def _press(self, global_x: float) -> None:
+        self._press_x = global_x
+        self._press_offset = self._offset
+        self._dragging = False
+
+    def _move(self, global_x: float) -> bool:
+        if self._press_x is None:
+            return False
+        travelled = global_x - self._press_x
+        if not self._dragging:
+            if abs(travelled) < self._DRAG_THRESHOLD:
+                return False
+            self._dragging = True
+            self._animation.stop()
+        width = max(1, self.width())
+        target = self._press_offset - travelled / width
+        self._set_offset(max(-0.15, min(len(self._pages) - 0.85, target)))
+        return True
+
+    def _release(self, global_x: float) -> bool:
+        was_dragging = self._dragging
+        travelled = 0.0 if self._press_x is None else global_x - self._press_x
+        self._press_x = None
+        self._dragging = False
+        if not was_dragging:
+            return False
+        if abs(travelled) >= self.width() * self._SWIPE_FRACTION:
+            self.go_to(self._index + (-1 if travelled > 0 else 1))
+        else:
+            self.go_to(self._index)
+        self.drag_finished.emit()
+        return True
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        kind = event.type()
+        if kind == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            self._press(event.globalPosition().x())
+        elif kind == QEvent.Type.MouseMove and event.buttons() & Qt.MouseButton.LeftButton:
+            if self._move(event.globalPosition().x()):
+                return True
+        elif kind == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+            if self._release(event.globalPosition().x()):
+                return True
+        return super().eventFilter(watched, event)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        self._press(event.globalPosition().x())
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        self._move(event.globalPosition().x())
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._release(event.globalPosition().x())
+        event.accept()
+
+
 class ControlPage(QWidget):
     """Control Station home page, composed from the donor card vocabulary.
 
@@ -12531,6 +12897,19 @@ class ControlPage(QWidget):
     # SINE owns stages 1-3.  The donor's fourth "Firm" chip is WEED 02
     # (obsolete SINE-4) and is deliberately not restored here.
     SINE_STAGES: Final = ((1, "Gentle"), (2, "Aware"), (3, "Direct"))
+    #: COSINE and MINE each expose two factual intervention families.  A chip
+    #: is current only while the backend's canonical phase is pending/active;
+    #: durable request/display history remains visible in the rows below.
+    COSINE_ESCALATION_STAGES: Final = (
+        (1, "Intention Gate"),
+        (2, "Final Callback"),
+    )
+    MINE_ESCALATION_STAGES: Final = ((1, "MINE-1"), (2, "MINE-2"))
+    _ESCALATION_PAGES: Final = (
+        ("SINE Escalation Stage", "Authoritative runtime state"),
+        ("COSINE Intervention Status", "Current authoritative COSINE phase"),
+        ("MINE Intervention Status", "Current authoritative MINE phase"),
+    )
 
     def __init__(self, *, engine, lifecycle, profiles, parent=None) -> None:
         super().__init__(parent)
@@ -12540,6 +12919,9 @@ class ControlPage(QWidget):
         self._last_sine_console_signature: tuple[object, ...] | None = None
         self._latest_blacklist_live_view = None
         self._latest_sine_live_view = None
+        self._latest_mirl_live_view = None
+        self._resource_sine_text = "—"
+        self._escalation_base_tokens = DEFAULT_THEME
         self._active_normal_break_fact = None
         self._normal_break_stop_in_flight = False
         self._engine_paused = False
@@ -12604,25 +12986,58 @@ class ControlPage(QWidget):
 
         # ------------------------------------------------- Current Resource
         current, current_body = make_card()
-        head, self._current_hint = card_head("Current Resource", "Idle")
+        # V01: same card language as COSINE Live (dot head, three stat
+        # boxes, cyan timer readout, progress bar).  Presentation only: the
+        # fields below are the same blacklist/SINE facts the card always
+        # showed, and the timer readout mirrors the SINE authority timer.
+        head, self._current_hint = card_head("Current Resource", "Idle", dot=True)
         current_body.addWidget(head)
         current_body.addSpacing(16)
-        self._resource_label = label("\u2014", 13.5, 600, "text", mono=True)
-        self._resource_label.setMinimumWidth(0)
-        self._resource_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored,
-            QSizePolicy.Policy.Preferred,
+        identity_row = QHBoxLayout()
+        identity_row.setSpacing(14)
+        platform_box, self._resource_label = stat_box(
+            "Platform", "\u2014", "text", 16.0
         )
-        current_body.addWidget(self._resource_label)
-        self._resource_title = label("", 11.5, 400, "muted", mono=True)
-        self._resource_title.setMinimumWidth(0)
-        self._resource_title.setSizePolicy(
-            QSizePolicy.Policy.Ignored,
-            QSizePolicy.Policy.Preferred,
+        state_box, self._resource_state = stat_box(
+            "State", "Inactive", "text", 16.0
         )
-        current_body.addWidget(self._resource_title)
+        disposition_box, self._resource_disposition = stat_box(
+            "Disposition", "\u2014", "text", 16.0
+        )
+        for widget in (platform_box, state_box, disposition_box):
+            identity_row.addWidget(widget, 1)
+        for value_label in (
+            self._resource_label,
+            self._resource_state,
+            self._resource_disposition,
+        ):
+            value_label.setMinimumWidth(0)
+            value_label.setWordWrap(True)
+        current_body.addLayout(identity_row)
         current_body.addSpacing(10)
-        dwell_row, self._dwell_track, self._dwell_value = bar_row("Dwell / target")
+        title_box, self._resource_title = stat_box(
+            "Title", "\u2014", "text", 12.5
+        )
+        self._resource_title.setMinimumWidth(0)
+        self._resource_title.setWordWrap(True)
+        current_body.addWidget(title_box)
+        current_body.addSpacing(14)
+        timer_host = QWidget()
+        timer_host.setObjectName("plainBox")
+        timer_lay = QVBoxLayout(timer_host)
+        timer_lay.setContentsMargins(0, 0, 0, 0)
+        timer_lay.setSpacing(4)
+        self._resource_timer_caption = label(
+            "Next authority timer", 11, 400, "muted", spacing=1.0, upper=True
+        )
+        timer_lay.addWidget(self._resource_timer_caption)
+        self._resource_timer =label("\u2014", 30, 600, "cyan", mono=True)
+        timer_lay.addWidget(self._resource_timer)
+        current_body.addWidget(timer_host)
+        current_body.addSpacing(12)
+        dwell_row, self._dwell_track, self._dwell_value = bar_row(
+            "Dwell / target", "cyan", 118
+        )
         self._dwell_value.setFixedWidth(118)
         current_body.addWidget(dwell_row)
         current_body.addSpacing(10)
@@ -12675,36 +13090,24 @@ class ControlPage(QWidget):
         self._normal_break_stop.hide()
         left.addWidget(normal_break)
 
-        # -------------------------------------------- SINE Escalation Stage
+        # -------------------------------------------- Escalation Stages
+        # V02 (reworked): one card, three swipeable read-only pages -- SINE
+        # (3 stages), COSINE (2) and MINE (2).  SINE keeps its own live
+        # authority fields; COSINE and MINE only PROJECT the snapshots their
+        # own signals already deliver (render_cosine / render_mine), so this
+        # card owns no clock and infers no stage of its own.
         sine, sine_body = make_card()
-        head, _ = card_head("SINE Escalation Stage", "Authoritative runtime state")
+        head, self._escalation_hint = card_head(
+            "SINE Escalation Stage", "Authoritative runtime state"
+        )
+        self._escalation_title = head.layout().itemAt(0).widget()
         sine_body.addWidget(head)
         sine_body.addSpacing(16)
-        strip = QHBoxLayout()
-        strip.setSpacing(8)
-        self._sine_chips: dict[int, QFrame] = {}
-        for number, name in self.SINE_STAGES:
-            chip = QFrame()
-            chip.setObjectName("sineStage")
-            chip.setFrameShape(QFrame.Shape.NoFrame)
-            chip.setProperty("current", "false")
-            chip_layout = QVBoxLayout(chip)
-            chip_layout.setContentsMargins(6, 10, 6, 10)
-            chip_layout.setSpacing(2)
-            digit = label(str(number), 15, 400, "muted", mono=True)
-            digit.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            word = label(name, 11, 400, "muted")
-            word.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            chip_layout.addWidget(digit)
-            chip_layout.addWidget(word)
-            strip.addWidget(chip, 1)
-            self._sine_chips[number] = chip
-        sine_body.addLayout(strip)
-        sine_body.addSpacing(14)
 
-        sine_grid = QGridLayout()
-        sine_grid.setHorizontalSpacing(24)
-        sine_grid.setVerticalSpacing(6)
+        self._sine_chips: dict[int, QFrame] = {}
+        sine_page, sine_grid = self._escalation_page(
+            [(number, name) for number, name in self.SINE_STAGES], self._sine_chips
+        )
         self._sine_timer = self._metric_value(sine_grid, 0, "Next authority timer")
         self._sine_stage = self._metric_value(sine_grid, 1, "Stage")
         self._sine_phase = self._metric_value(sine_grid, 2, "Phase")
@@ -12714,8 +13117,63 @@ class ControlPage(QWidget):
         self._sine_popup = self._metric_value(sine_grid, 6, "Popup")
         self._sine_fact = self._metric_value(sine_grid, 7, "Last SINE fact")
         self._sine_fact.setWordWrap(True)
-        sine_body.addLayout(sine_grid)
+
+        self._esc_cosine_chips: dict[int, QFrame] = {}
+        cosine_page, cosine_grid = self._escalation_page(
+            self.COSINE_ESCALATION_STAGES, self._esc_cosine_chips
+        )
+        self._esc_cosine = {
+            key: self._metric_value(cosine_grid, row, caption)
+            for row, (key, caption) in enumerate(
+                (
+                    ("state", "State"),
+                    ("platform", "Platform"),
+                    ("timer_source", "Timer source"),
+                    ("timer", "Timer"),
+                    ("intent_gate", "Intention gate record"),
+                    ("final_callback", "Final callback record"),
+                    ("break", "Break"),
+                    ("data", "Data"),
+                )
+            )
+        }
+
+        self._esc_mine_chips: dict[int, QFrame] = {}
+        mine_page, mine_grid = self._escalation_page(
+            self.MINE_ESCALATION_STAGES, self._esc_mine_chips
+        )
+        self._esc_mine = {
+            key: self._metric_value(mine_grid, row, caption)
+            for row, (key, caption) in enumerate(
+                (
+                    ("state", "State"),
+                    ("source", "Source"),
+                    ("branch", "Branch"),
+                    ("timer_source", "Timer source"),
+                    ("timer", "Timer"),
+                    ("mine1", "MINE-1 popup record"),
+                    ("mine2", "MINE-2 popup record"),
+                    ("variant", "MINE-2 variant"),
+                )
+            )
+        }
+
+        self._escalation_pager = EscalationPager(
+            [sine_page, cosine_page, mine_page]
+        )
+        self._escalation_pager.setAccessibleName(
+            "Intervention status: swipe or use the arrow keys to switch between "
+            "SINE, COSINE and MINE"
+        )
+        sine_body.addWidget(self._escalation_pager)
+        sine_body.addSpacing(8)
+        self._escalation_dots = _PagerDots(3)
+        self._escalation_dots.selected.connect(self._escalation_pager.dot_selected)
+        self._escalation_pager.offset_changed.connect(self._escalation_dots.set_position)
+        self._escalation_pager.page_changed.connect(self._escalation_page_changed)
+        sine_body.addWidget(self._escalation_dots)
         left.addWidget(sine)
+        self._reset_escalation_pages()
 
         # -------------------------------------------------------- COSINE Live
         # Phase 1I: COSINE gets its own organ on the Control page, between the
@@ -12734,21 +13192,7 @@ class ControlPage(QWidget):
         self._mine_live_card = MineLiveCard()
         left.addWidget(self._mine_live_card)
 
-        # ---------------------------------------------------------- Research
-        research, research_body = make_card()
-        head, _ = card_head("Research", "Read-only")
-        research_body.addWidget(head)
-        research_body.addSpacing(16)
-        research_row = QHBoxLayout()
-        research_row.setSpacing(14)
-        episodes, self._stat_episodes = stat_box("MIRL episodes", "0", "cyan")
-        evidence, self._stat_evidence = stat_box(
-            "Evidence source", "Read model", "text", 16.0
-        )
-        for widget in (episodes, evidence):
-            research_row.addWidget(widget, 1)
-        research_body.addLayout(research_row)
-        left.addWidget(research)
+        # V03: the standalone Research mini-card was removed from this page.
         left.addStretch(1)
 
         for card in (
@@ -12758,7 +13202,6 @@ class ControlPage(QWidget):
             sine,
             self._cosine_live_card,
             self._mine_live_card,
-            research,
         ):
             card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
@@ -12846,6 +13289,280 @@ class ControlPage(QWidget):
         grid.addWidget(value, row, 1)
         return value
 
+    def _escalation_page(
+        self,
+        stages: Sequence[tuple[int, str]], chips: dict[int, QFrame]
+    ) -> tuple[QWidget, QGridLayout]:
+        """One escalation page: numbered stage tiles above authority rows."""
+
+        page = QWidget()
+        page.setObjectName("plainBox")
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(14)
+        strip = QHBoxLayout()
+        strip.setSpacing(8)
+        for number, name in stages:
+            chip = QFrame()
+            chip.setObjectName("sineStage")
+            chip.setFrameShape(QFrame.Shape.NoFrame)
+            chip.setProperty("current", "false")
+            chip.setProperty("highlightTone", "neutral")
+            chip_layout = QVBoxLayout(chip)
+            chip_layout.setContentsMargins(6, 10, 6, 10)
+            chip_layout.setSpacing(2)
+            digit = label(str(number), 15, 400, "muted", mono=True)
+            digit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            word = label(name, 11, 400, "muted")
+            word.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            chip_layout.addWidget(digit)
+            chip_layout.addWidget(word)
+            strip.addWidget(chip, 1)
+            chips[number] = chip
+
+            def _repaint(tokens, target=chip) -> None:
+                tone = str(target.property("highlightTone") or "neutral")
+                self._apply_escalation_chip_style(target, tokens, tone)
+
+            _remember_retheme(chip, _repaint)
+            _repaint(live_tokens())
+        page_layout.addLayout(strip)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(24)
+        grid.setVerticalSpacing(6)
+        page_layout.addLayout(grid)
+        page_layout.addStretch(1)
+        return page, grid
+
+    def _apply_escalation_chip_style(
+        self, chip: QFrame, effective_tokens, tone: str
+    ) -> None:
+        """Paint one stage tile strongly without changing its authority."""
+
+        selected = tone != "neutral"
+        if not selected:
+            source = effective_tokens
+            background = source.surface_soft
+            border = source.border
+            text = source.muted
+        else:
+            if tone == "amber":
+                source = AMBER_ALERT_THEME
+                accent = source.amber
+            elif tone == "red":
+                source = RED_ALERT_THEME
+                accent = source.red
+            elif tone == "base":
+                source = self._escalation_base_tokens
+                accent = source.cyan
+            else:
+                source = effective_tokens
+                accent = source.cyan
+            background = mix(accent, 22, source.surface)
+            border = accent
+            text = source.text_primary
+
+        chip.setStyleSheet(
+            "QFrame#sineStage {"
+            f"background: {background};"
+            f"border: 2px solid {border};"
+            f"border-radius: {RADIUS_SM}px;"
+            "}"
+            "QFrame#sineStage QLabel {"
+            f"color: {text};"
+            "background: transparent;"
+            "border: none;"
+            "}"
+        )
+
+    def _set_chip_tone(
+        self,
+        chips: dict[int, QFrame],
+        active: int,
+        tone: str = "base",
+    ) -> None:
+        for number, chip in chips.items():
+            selected = bool(active and number == active)
+            value = tone if selected else "neutral"
+            chip.setProperty("current", "true" if selected else "false")
+            if chip.property("highlightTone") != value:
+                chip.setProperty("highlightTone", value)
+                retheme = getattr(chip, "_retheme", None)
+                if callable(retheme):
+                    retheme(live_tokens())
+
+    def _mark_escalation_stage(self, chips: dict[int, QFrame], active: int) -> None:
+        self._set_chip_tone(chips, active)
+
+    def set_escalation_base_tokens(self, tokens) -> None:
+        """Keep COSINE's accent in the selected base world during alerts."""
+
+        self._escalation_base_tokens = tokens
+        for chips in (
+            self._sine_chips,
+            self._esc_cosine_chips,
+            self._esc_mine_chips,
+        ):
+            for chip in chips.values():
+                retheme = getattr(chip, "_retheme", None)
+                if callable(retheme):
+                    retheme(live_tokens())
+
+    def set_mine_claim_highlight(self, atmosphere: Atmosphere | None) -> None:
+        """Project the coordinator's existing MINE claim onto the two tiles."""
+
+        if atmosphere is Atmosphere.RED_ALERT:
+            self._set_chip_tone(self._esc_mine_chips, 2, "red")
+        elif atmosphere is Atmosphere.AMBER_ALERT:
+            self._set_chip_tone(self._esc_mine_chips, 1, "amber")
+        else:
+            self._set_chip_tone(self._esc_mine_chips, 0, "neutral")
+
+    def _escalation_page_changed(self, index: int) -> None:
+        title, hint = self._ESCALATION_PAGES[index]
+        self._escalation_title.setText(title.upper())
+        self._escalation_hint.setText(hint)
+
+    def _reset_escalation_pages(self) -> None:
+        self._render_cosine_escalation(None)
+        self._render_mine_escalation(None)
+
+    @staticmethod
+    def _request_state(requested: bool, displayed: bool, visible: bool) -> str:
+        """Popup lifecycle exactly as the snapshot reports it, or a dash."""
+
+        if visible:
+            return "Visible"
+        if displayed:
+            return "Displayed"
+        if requested:
+            return "Requested"
+        return "\u2014"
+
+    @staticmethod
+    def _cosine_escalation_stage(snapshot: object, phase: str) -> int:
+        """Return only an intervention that is factually on display now."""
+
+        if snapshot is None or not bool(
+            _cosine_field(snapshot, "available", False)
+        ):
+            return 0
+        if phase == "FINAL_CALLBACK_ACTIVE" and bool(
+            _cosine_field(snapshot, "final_callback_visible", False)
+        ):
+            return 2
+        if phase in {"INTENT_GATE_ACTIVE", "RETURN_INTENT_OBSERVING"} and bool(
+            _cosine_field(snapshot, "checkin_displayed", False)
+        ):
+            return 1
+        return 0
+
+    def _render_cosine_escalation(self, snapshot: object) -> None:
+        rows = self._esc_cosine
+        if snapshot is None:
+            for value_label in rows.values():
+                value_label.setText("\u2014")
+            rows["state"].setText("Inactive")
+            self._mark_escalation_stage(self._esc_cosine_chips, 0)
+            return
+        if not bool(_cosine_field(snapshot, "available", False)):
+            for value_label in rows.values():
+                value_label.setText("\u2014")
+            rows["state"].setText("Unavailable")
+            self._mark_escalation_stage(self._esc_cosine_chips, 0)
+            return
+        phase = _cosine_phase_key(snapshot)
+        paused = bool(_cosine_field(snapshot, "global_paused", False))
+        state = _COSINE_STATE_LABELS.get(phase, _cosine_words(phase))
+        rows["state"].setText(f"{state} \u00b7 PAUSED" if paused else state)
+        platform = str(
+            _cosine_field(snapshot, "current_platform_label", "") or ""
+        ).strip()
+        rows["platform"].setText(platform or "\u2014")
+        caption, field = _COSINE_TIMER_SOURCES.get(phase, ("", ""))
+        rows["timer_source"].setText(caption or "\u2014")
+        rows["timer"].setText(
+            _cosine_clock(_cosine_field(snapshot, field)) if field else "\u2014"
+        )
+        rows["intent_gate"].setText(
+            self._request_state(
+                bool(str(_cosine_field(snapshot, "checkin_request_id", "") or "")),
+                bool(_cosine_field(snapshot, "checkin_displayed", False)),
+                False,
+            )
+        )
+        rows["final_callback"].setText(
+            self._request_state(
+                bool(str(_cosine_field(snapshot, "final_callback_request_id", "") or "")),
+                False,
+                bool(_cosine_field(snapshot, "final_callback_visible", False)),
+            )
+        )
+        minutes = _cosine_break_minutes(snapshot)
+        rows["break"].setText("\u2014" if minutes is None else f"{minutes} min")
+        rows["data"].setText(
+            _cosine_words(_cosine_field(snapshot, "data_quality"))
+        )
+        self._set_chip_tone(
+            self._esc_cosine_chips,
+            self._cosine_escalation_stage(snapshot, phase),
+            "base",
+        )
+
+    def _render_mine_escalation(self, snapshot: object) -> None:
+        rows = self._esc_mine
+        if snapshot is None:
+            for value_label in rows.values():
+                value_label.setText("\u2014")
+            rows["state"].setText("Inactive")
+            self._mark_escalation_stage(self._esc_mine_chips, 0)
+            return
+        if not bool(_cosine_field(snapshot, "available", False)):
+            for value_label in rows.values():
+                value_label.setText("\u2014")
+            rows["state"].setText("Unavailable")
+            self._mark_escalation_stage(self._esc_mine_chips, 0)
+            return
+        phase = _cosine_phase_key(snapshot)
+        paused = bool(_cosine_field(snapshot, "global_paused", False))
+        state = _MINE_STATE_LABELS.get(phase, "Unknown")
+        rows["state"].setText(f"{state} \u00b7 PAUSED" if paused else state)
+        source = str(
+            _cosine_field(snapshot, "current_platform_label", "")
+            or _cosine_field(snapshot, "current_platform_key", "")
+            or ""
+        ).strip()
+        rows["source"].setText(source or "\u2014")
+        rows["branch"].setText(
+            _mine_branch_words(_cosine_field(snapshot, "selected_branch"))
+        )
+        caption, field = _MINE_TIMER_SOURCES.get(phase, ("", None))
+        rows["timer_source"].setText(caption or "\u2014")
+        rows["timer"].setText(
+            _cosine_clock(_cosine_field(snapshot, field)) if field else "\u2014"
+        )
+        rows["mine1"].setText(
+            self._request_state(
+                bool(_cosine_field(snapshot, "mine1_requested", False)),
+                bool(_cosine_field(snapshot, "mine1_displayed", False)),
+                bool(_cosine_field(snapshot, "mine1_visible", False)),
+            )
+        )
+        rows["mine2"].setText(
+            self._request_state(
+                bool(_cosine_field(snapshot, "mine2_requested", False)),
+                bool(_cosine_field(snapshot, "mine2_displayed", False)),
+                bool(_cosine_field(snapshot, "mine2_visible", False)),
+            )
+        )
+        rows["variant"].setText(
+            str(_cosine_field(snapshot, "mine2_variant", "") or "").strip()
+            or "—"
+        )
+        # Tile ownership is deliberately not derived from phase.  The final
+        # subscriber reads the existing coordinator claim after it consumes
+        # this snapshot, so Return Intent/recovery cannot erase MINE-1 Amber.
+
     @staticmethod
     def _value(payload: object, name: str, default=None):
         if isinstance(payload, dict):
@@ -12912,6 +13629,14 @@ class ControlPage(QWidget):
         restyle(self._status)
 
         self._engine_paused = paused
+        focused = QApplication.focusWidget()
+        if running and focused is self._buttons["start"]:
+            self._buttons["pause"].setEnabled(True)
+            self._buttons["pause"].setFocus(Qt.FocusReason.OtherFocusReason)
+        elif not running and focused is self._buttons["stop"]:
+            self._buttons["start"].setEnabled(True)
+            self._buttons["start"].setFocus(Qt.FocusReason.OtherFocusReason)
+
         self._buttons["start"].setEnabled(not running)
         self._buttons["pause"].setEnabled(running)
         self._buttons["pause"].setText("RESUME" if paused else "PAUSE")
@@ -13057,6 +13782,36 @@ class ControlPage(QWidget):
         self._normal_break_stop.hide()
         self._normal_break_stop.setEnabled(False)
 
+    def _clear_current_resource_presentation(self) -> None:
+        """Clear cached resource facts without manufacturing idle values."""
+
+        self._latest_blacklist_live_view = None
+        self._resource_label.setText("\u2014")
+        self._resource_title.setText("\u2014")
+        self._resource_label.setToolTip("")
+        self._resource_title.setToolTip("")
+        self._resource_state.setText("Inactive")
+        self._resource_disposition.setText("\u2014")
+        self._current_hint.setText("Idle")
+        self._resource_reason.setText("No managed resource is in the foreground.")
+        self._dwell_track.set_progress(0.0)
+        self._dwell_value.setText("\u2014 / \u2014")
+        self._ring.set_progress(0.0)
+
+    def reset_runtime_presentation(self) -> None:
+        """Retire all session-owned Control-page facts at a terminal boundary.
+
+        This is presentation cleanup only.  It neither advances nor resets any
+        backend authority, and is intentionally safe to call more than once
+        when session-loss, failure and stop signals describe the same exit.
+        """
+
+        self._clear_current_resource_presentation()
+        self.render_sine(None)
+        self.render_mirl(None)
+        self.render_cosine(None)
+        self.render_mine(None)
+
     # -------------------------------------------------------------- render
     def render(self, payload: object) -> None:
         """Format the prepared control view; no value here is recalculated."""
@@ -13073,13 +13828,18 @@ class ControlPage(QWidget):
             name = str(self._value(blacklist, "resource_label", "") or "").strip()
             title = str(self._value(blacklist, "resource_title", "") or "").strip()
             self._resource_label.setText(name or "\u2014")
-            self._resource_title.setText(title)
+            self._resource_title.setText(title or "\u2014")
             self._resource_label.setToolTip(name)
             self._resource_title.setToolTip(title)
 
             disposition = self._enum_text(self._value(blacklist, "disposition"), "")
             state = self._enum_text(self._value(blacklist, "state"), "INACTIVE")
             confidence = self._enum_text(self._value(blacklist, "confidence"), "")
+            self._resource_state.setText(state.title())
+            self._resource_disposition.setText(
+                disposition.title() if disposition.upper() != "NONE" and disposition
+                else "\u2014"
+            )
             parts = [p for p in (state, disposition, confidence) if p and p.upper() != "NONE"]
             self._current_hint.setText(" \u00b7 ".join(p.upper() for p in parts) or "Idle")
 
@@ -13089,12 +13849,11 @@ class ControlPage(QWidget):
             )
 
             self._render_current_authority_interval()
-
-        mirl = self._value(payload, "mirl")
-        if mirl is not None:
-            episodes = self._value(mirl, "episode_count")
-            if episodes is not None:
-                self._stat_episodes.setText(str(episodes))
+        else:
+            # ``None`` is the engine's authoritative no-resource value.  It
+            # must retire the previous title, tooltip, dwell and progress;
+            # otherwise a later SINE reset redraws the stale cached visit.
+            self._clear_current_resource_presentation()
 
         # Dedicated specialist signals feed COSINE and MINE below.  This
         # composite view never becomes a second timing authority.
@@ -13108,6 +13867,7 @@ class ControlPage(QWidget):
         """
 
         self._cosine_live_card.render(snapshot)
+        self._render_cosine_escalation(snapshot)
 
     def render_handover(self, payload: object) -> None:
         """Render the prepared Mr Hand view without owning a clock or decision."""
@@ -13165,6 +13925,7 @@ class ControlPage(QWidget):
         """
 
         self._mine_live_card.render(snapshot)
+        self._render_mine_escalation(snapshot)
 
     def render_today_session_health(self, snapshot: object) -> None:
         """Place three already-calculated Today Health integers into labels.
@@ -13210,7 +13971,8 @@ class ControlPage(QWidget):
 
         if payload is None:
             self._latest_sine_live_view = None
-            self._sine_timer.setText("--:--")
+            self._latest_mirl_live_view = None
+            self._set_resource_sine_text("—")
             for label in (
                 self._sine_stage,
                 self._sine_phase,
@@ -13223,6 +13985,10 @@ class ControlPage(QWidget):
                 label.setText("—")
             self._last_sine_console_signature = None
             self._highlight_sine_stage(None)
+            # The controller uses ``None`` as a session-boundary sentinel,
+            # not as a runtime SINE state.  Retire the resource cache too so
+            # startup/stop cannot resurrect an earlier dwell interval.
+            self._clear_current_resource_presentation()
             self._render_current_authority_interval()
             return
 
@@ -13238,7 +14004,7 @@ class ControlPage(QWidget):
         popup = self._enum_text(self._value(payload, "popup_state"), "NONE")
         last_fact = str(self._value(payload, "last_fact", "") or "—")
 
-        self._sine_timer.setText(timer_text)
+        self._set_resource_sine_text(timer_text)
         self._sine_stage.setText(stage)
         self._highlight_sine_stage(self._value(payload, "stage"))
         self._sine_phase.setText(phase)
@@ -13251,6 +14017,7 @@ class ControlPage(QWidget):
         )
         self._sine_popup.setText(popup)
         self._sine_fact.setText(last_fact)
+        self._escalation_pager.updateGeometry()
         self._render_current_authority_interval()
 
         # A one-second console cadence makes VS Code's terminal useful without
@@ -13281,6 +14048,55 @@ class ControlPage(QWidget):
                 flush=True,
             )
 
+    def render_mirl(self, view: object) -> None:
+        """Remember the newest MIRL live view for the Current Resource timer.
+
+        Presentation only: MIRL's own elapsed/target facts are displayed, never
+        advanced here.  ``None`` (session start/stop) clears the readout.
+        """
+
+        self._latest_mirl_live_view = view
+        self._sync_resource_timer()
+
+    def _set_resource_sine_text(self, text: str) -> None:
+        self._resource_sine_text = "—" if text == "--:--" else text
+        self._sine_timer.setText(self._resource_sine_text)
+        self._sync_resource_timer()
+
+    def _mirl_recovery_countdown(self) -> tuple[str, str] | None:
+        """Return (caption, clock) while MIRL is verifying return or closure."""
+
+        view = self._latest_mirl_live_view
+        if view is None:
+            return None
+        phase = self._value(view, "phase")
+        phase = str(getattr(phase, "value", phase) or "")
+        if phase == "RETURN_VERIFICATION":
+            caption, prefix = "Initial return", "return_verification"
+        elif phase == "CLOSURE_CONFIRMATION":
+            caption, prefix = "Final episode closure", "closure_confirmation"
+        else:
+            return None
+        try:
+            target = float(self._value(view, f"{prefix}_target_seconds"))
+            elapsed = float(self._value(view, f"{prefix}_elapsed_seconds"))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if target <= 0.0:
+            return None
+        return caption, self._format_seconds(max(0.0, target - elapsed))
+
+    def _sync_resource_timer(self) -> None:
+        """One readout: MIRL return/closure countdown, else the SINE timer."""
+
+        recovery = self._mirl_recovery_countdown()
+        if recovery is not None:
+            caption, text = recovery
+        else:
+            caption, text = "Next authority timer", self._resource_sine_text
+        self._resource_timer_caption.setText(caption.upper())
+        self._resource_timer.setText(text)
+
     def _sine_actively_counting_deadline(self) -> int | None:
         """Return the authoritative deadline to project, or None while frozen.
 
@@ -13290,6 +14106,11 @@ class ControlPage(QWidget):
 
         sine = self._latest_sine_live_view
         if sine is None:
+            return None
+        # A resolved / cancelled / stopped episode keeps its old stage and
+        # deadline fields; the backend reports no next deadline for it, so the
+        # label must stop rather than keep counting toward a dead deadline.
+        if self._value(sine, "next_deadline_seconds") is None:
             return None
         if bool(self._value(sine, "protected_red_active", False)):
             return None
@@ -13323,7 +14144,7 @@ class ControlPage(QWidget):
         if deadline_ns is None:
             return
         remaining = max(0.0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)
-        self._sine_timer.setText(self._format_seconds(remaining))
+        self._set_resource_sine_text(self._format_seconds(remaining))
 
     def _render_current_authority_interval(self) -> None:
         """Project the current owner without inventing any timing value."""
@@ -13374,6 +14195,26 @@ class ControlPage(QWidget):
                 return
 
         blacklist = self._latest_blacklist_live_view
+        if blacklist is None:
+            self._dwell_track.set_progress(0.0)
+            self._dwell_value.setText("\u2014 / \u2014")
+            self._ring.set_progress(0.0)
+            return
+
+        blacklist_state = self._enum_text(
+            self._value(blacklist, "state"), "INACTIVE"
+        ).upper()
+        blacklist_label = str(
+            self._value(blacklist, "resource_label", "") or ""
+        ).strip()
+        if blacklist_state == "INACTIVE" or not blacklist_label:
+            # Blacklist keeps its configured target on an inactive snapshot;
+            # that target is policy, not evidence that a dwell is underway.
+            self._dwell_track.set_progress(0.0)
+            self._dwell_value.setText("\u2014 / \u2014")
+            self._ring.set_progress(0.0)
+            return
+
         elapsed = self._value(blacklist, "dwell_elapsed_seconds", 0.0)
         target = self._value(blacklist, "dwell_target_seconds", 0.0)
         fraction = 0.0
@@ -13405,9 +14246,7 @@ class ControlPage(QWidget):
             active = int(getattr(stage, "value", stage))
         except (TypeError, ValueError):
             active = 0
-        for number, chip in self._sine_chips.items():
-            chip.setProperty("current", "true" if number == active else "false")
-            restyle(chip)
+        self._set_chip_tone(self._sine_chips, active, "effective")
 
 
 def _sine_owner_claim_id(fact: object) -> str | None:
@@ -13587,6 +14426,12 @@ class _NormalSinePresentationCoordinator:
         # pointers, not a dictionary.
         self._mine_claim_id: str | None = None
         self._mine_atmosphere: "Atmosphere | None" = None
+
+    @property
+    def mine_claim_state(self) -> tuple[str | None, Atmosphere | None]:
+        """Expose MINE's existing presentation claim without transferring ownership."""
+
+        return self._mine_claim_id, self._mine_atmosphere
 
     def handle_sine_fact(self, fact: object) -> None:
         kind = str(getattr(fact, "kind", ""))
@@ -13939,6 +14784,16 @@ class ControlStationWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self._shutdown_is_authorized = False
+        self._escalation_seen_events: set[tuple] = set()
+        self._escalation_parent_session_id = None
+        self._escalation_pending_page: int | None = None
+        self._escalation_latest_cosine_snapshot = None
+        self._escalation_latest_mine_snapshot = None
+        self._cosine_popup_types: tuple[type, ...] = ()
+        self._cosine_popup_kind_by_type: dict[type, str] = {}
+        self._cosine_popup_filter_installed = False
+        self._application_theme_stylesheet_initialized = False
+        self._current_theme_stylesheet = ""
 
         self.setObjectName("myelinControlStation")
         # The Control Station is an ordinary Windows application window.  The
@@ -13967,6 +14822,7 @@ class ControlStationWindow(QMainWindow):
         self._create_pages()
         self._create_shell()
         self._connect_components()
+        self._install_cosine_popup_receipt_filter()
         self._restore_preferences()
 
     def _create_authorities(self) -> None:
@@ -14118,11 +14974,252 @@ class ControlStationWindow(QMainWindow):
         self.get_chart.register_button(self.shell.get_chart_button)
         self.get_chart.register_poster(NeonPosterWindow(parent=self))
 
+    def _current_parent_session_id(self):
+        getter = getattr(self.engine, "current_session_id", None)
+        return getter() if callable(getter) else None
+
+    def _select_escalation_for_event(self, key: tuple, page: int) -> None:
+        """Select once for one immutable presentation event."""
+
+        if not key or key in self._escalation_seen_events:
+            return
+        self._escalation_seen_events.add(key)
+        pager = self.pages.control._escalation_pager
+        if pager.is_dragging:
+            self._escalation_pending_page = page
+            return
+        pager.go_to(page)
+
+    def _apply_deferred_escalation_selection(self) -> None:
+        page = self._escalation_pending_page
+        self._escalation_pending_page = None
+        if page is not None:
+            self.pages.control._escalation_pager.go_to(page)
+
+    def _reset_escalation_selection_ledger(self, session_id=None) -> None:
+        self._escalation_seen_events.clear()
+        self._escalation_pending_page = None
+        self._escalation_latest_cosine_snapshot = None
+        self._escalation_latest_mine_snapshot = None
+        self._escalation_parent_session_id = session_id
+
+    def _escalation_session_changed(self, session_id) -> None:
+        if session_id != self._escalation_parent_session_id:
+            self._reset_escalation_selection_ledger(session_id)
+
+    def _observe_sine_fact_for_escalation_selection(self, fact: object) -> None:
+        if str(getattr(fact, "kind", "")) != "SINE_DISPLAYED":
+            return
+        stage = getattr(fact, "stage", None)
+        try:
+            stage = int(getattr(stage, "value", stage))
+            occurrence = int(getattr(fact, "occurrence", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        if stage not in (1, 2, 3) or occurrence <= 0:
+            return
+        session_id = getattr(fact, "session_id", None)
+        episode_uid = str(getattr(fact, "episode_uid", "") or "")
+        request_id = str(getattr(fact, "popup_request_id", "") or "")
+        current = self._current_parent_session_id()
+        if current is None or session_id != current:
+            return
+        if not episode_uid or not request_id:
+            return
+        self._select_escalation_for_event(
+            (
+                "SINE_DISPLAYED",
+                session_id,
+                episode_uid,
+                request_id,
+                stage,
+                occurrence,
+            ),
+            0,
+        )
+
+    def _observe_mine_snapshot_for_escalation_selection(self, snapshot: object) -> None:
+        self._escalation_latest_mine_snapshot = snapshot
+        if snapshot is None or not bool(getattr(snapshot, "available", False)):
+            return
+        parent = getattr(snapshot, "parent_session_id", None)
+        episode_id = str(getattr(snapshot, "mine_episode_id", "") or "")
+        try:
+            generation = int(getattr(snapshot, "generation", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        current = self._current_parent_session_id()
+        if current is None or parent != current:
+            return
+        if not episode_id or generation <= 0:
+            return
+        if _mine_phase_key(snapshot) in ("CLOSED", "SHUTDOWN"):
+            return
+        if bool(getattr(snapshot, "mine1_displayed", False)):
+            request_id = str(getattr(snapshot, "mine1_request_id", "") or "")
+            if request_id:
+                self._select_escalation_for_event(
+                    ("MINE1_DISPLAYED", parent, episode_id, generation, request_id),
+                    2,
+                )
+        if bool(getattr(snapshot, "mine2_displayed", False)):
+            request_id = str(getattr(snapshot, "mine2_request_id", "") or "")
+            variant = str(getattr(snapshot, "mine2_variant", "") or "")
+            if request_id:
+                self._select_escalation_for_event(
+                    (
+                        "MINE2_DISPLAYED",
+                        parent,
+                        episode_id,
+                        generation,
+                        variant,
+                        request_id,
+                    ),
+                    2,
+                )
+
+    def _observe_cosine_snapshot_for_escalation_selection(self, snapshot: object) -> None:
+        self._escalation_latest_cosine_snapshot = snapshot
+        if snapshot is None or not bool(_cosine_field(snapshot, "available", False)):
+            return
+        parent = _cosine_field(snapshot, "session_id")
+        cosine_session_id = str(
+            _cosine_field(snapshot, "cosine_session_id", "") or ""
+        )
+        try:
+            generation = int(_cosine_field(snapshot, "generation", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        phase = _cosine_phase_key(snapshot)
+        current = self._current_parent_session_id()
+        if current is None or parent != current:
+            return
+        if not cosine_session_id or generation <= 0:
+            return
+        if phase in {"", "IDLE", "CLOSED", "SHUTDOWN"}:
+            return
+        self._select_escalation_for_event(
+            ("COSINE_EPISODE", parent, cosine_session_id, generation), 1
+        )
+
+    def _sync_mine_escalation_claim(self, _snapshot: object = None) -> None:
+        _claim_id, atmosphere = self._sine_presentation.mine_claim_state
+        self.pages.control.set_mine_claim_highlight(atmosphere)
+
+    def _install_cosine_popup_receipt_filter(self) -> None:
+        """Install one exact-type Qt paint receipt for COSINE presentations."""
+
+        if self._cosine_popup_filter_installed:
+            return
+        try:
+            from COSINE.popup import (
+                CosineBreakAckPopup,
+                CosineDurationPopup,
+                CosineFinalCallbackPopup,
+                CosineIntentionPopup,
+            )
+        except Exception:
+            return
+        self._cosine_popup_kind_by_type = {
+            CosineIntentionPopup: "SHOW_INTENT_GATE",
+            CosineDurationPopup: "SHOW_DURATION_ENTRY",
+            CosineBreakAckPopup: "SHOW_BREAK_ACK",
+            CosineFinalCallbackPopup: "SHOW_FINAL_CALLBACK",
+        }
+        self._cosine_popup_types = tuple(self._cosine_popup_kind_by_type)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+            self._cosine_popup_filter_installed = True
+
+    def _observe_cosine_popup_paint(self, popup) -> None:
+        if not popup.isVisible():
+            return
+        expected_kind = self._cosine_popup_kind_by_type.get(type(popup))
+        if not expected_kind:
+            return
+        request = getattr(popup, "_request", None)
+        effect = getattr(request, "effect", None)
+        if effect is None:
+            return
+        snapshot = self._escalation_latest_cosine_snapshot
+        if snapshot is None or not bool(_cosine_field(snapshot, "available", False)):
+            return
+        parent = _cosine_field(snapshot, "session_id")
+        cosine_session_id = str(
+            _cosine_field(snapshot, "cosine_session_id", "") or ""
+        )
+        try:
+            snapshot_generation = int(
+                _cosine_field(snapshot, "generation", 0) or 0
+            )
+            effect_generation = int(getattr(effect, "generation", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        phase = _cosine_phase_key(snapshot)
+        current = self._current_parent_session_id()
+        if current is None or parent != current:
+            return
+        if (
+            not cosine_session_id
+            or snapshot_generation <= 0
+            or phase in {"", "IDLE", "CLOSED", "SHUTDOWN"}
+        ):
+            return
+        request_id = str(getattr(effect, "request_id", "") or "")
+        kind = getattr(effect, "kind", None)
+        kind_name = str(getattr(kind, "name", kind) or "")
+        if effect_generation != snapshot_generation or not request_id:
+            return
+        if kind_name != expected_kind:
+            return
+        duration = kind_name == "SHOW_DURATION_ENTRY"
+        if not duration and not bool(getattr(popup, "_display_acknowledged", False)):
+            return
+        variant = str(getattr(effect, "presentation_variant", "") or "")
+        self._select_escalation_for_event(
+            (
+                "COSINE_POPUP_PAINT",
+                parent,
+                cosine_session_id,
+                snapshot_generation,
+                kind_name,
+                request_id,
+                variant,
+            ),
+            1,
+        )
+
+    def _reset_live_organ_presentations(self) -> None:
+        """Clear session-owned live views without touching durable history."""
+
+        self.pages.control.reset_runtime_presentation()
+        self.pages.cosine.render_live_view(None)
+        self.pages.mine.render_live_view(None)
+        self._sync_mine_escalation_claim(None)
+
+    def _is_terminal_engine_failure(self) -> bool:
+        """Only actual ERROR plus inactivity permits failure-driven teardown."""
+
+        return (
+            self.engine.status is EngineStatus.ERROR
+            and not self.engine.is_session_active()
+        )
+
+    def _handle_terminal_live_presentation_failure(self, _message: str) -> None:
+        if self._is_terminal_engine_failure():
+            self._reset_live_organ_presentations()
+
     def _connect_components(self) -> None:
         """Connect requests to authorities and facts back to the views."""
 
         self.pages.control.study_mode_requested.connect(
             lambda: self.navigation.open_page(PAGE_STUDY)
+        )
+        # V04: Study header -> Control Station, through the same gated router
+        # as every other page change (Notes save + protected-red guard).
+        self.pages.study.control_station_requested.connect(
+            lambda: self.navigation.open_page(PAGE_CONTROL)
         )
         self.shell.menu_requested.connect(self.navigation.toggle_sidebar)
         self.shell.sidebar_dismiss_requested.connect(self.navigation.close_sidebar)
@@ -14153,6 +15250,30 @@ class ControlStationWindow(QMainWindow):
         # interpret or recalculate any telemetry value.
         self.engine.control_view_changed.connect(self.pages.control.render)
         self.engine.sine_watch_status_changed.connect(self.pages.control.render_sine)
+        # Current Resource timer: MIRL's own 10 s return / 60 s closure facts,
+        # plus one idempotent terminal/session-boundary reset so no stale
+        # countdown or cached resource can survive stop, failure or detach.
+        self.engine.mirl_health_status_changed.connect(self.pages.control.render_mirl)
+        self.engine.engine_stopped.connect(self._reset_live_organ_presentations)
+        self.engine.engine_failed.connect(
+            self._handle_terminal_live_presentation_failure
+        )
+        self.engine.current_session_id_changed.connect(
+            lambda session_id: (
+                self._reset_live_organ_presentations()
+                if session_id is None
+                else None
+            )
+        )
+        self.engine.current_session_id_changed.connect(
+            self._escalation_session_changed
+        )
+        self.engine.engine_stopped.connect(
+            lambda: self._reset_escalation_selection_ledger(None)
+        )
+        self.pages.control._escalation_pager.drag_finished.connect(
+            self._apply_deferred_escalation_selection
+        )
         # Phase 1I: COSINE's two presentation surfaces subscribe to the ONE
         # existing live signal the controller already coalesces in place.  No
         # new poller, worker, timer or database read is created, and neither
@@ -14164,6 +15285,9 @@ class ControlStationWindow(QMainWindow):
         )
         self.engine.cosine_live_status_changed.connect(
             self.pages.cosine.render_live_view
+        )
+        self.engine.cosine_live_status_changed.connect(
+            self._observe_cosine_snapshot_for_escalation_selection
         )
         self.engine.handover_live_status_changed.connect(
             self.pages.control.render_handover
@@ -14186,6 +15310,12 @@ class ControlStationWindow(QMainWindow):
         self.engine.mine_watch_status_changed.connect(
             self._sine_presentation.handle_mine_snapshot
         )
+        self.engine.mine_watch_status_changed.connect(
+            self._sync_mine_escalation_claim
+        )
+        self.engine.mine_watch_status_changed.connect(
+            self._observe_mine_snapshot_for_escalation_selection
+        )
         # Live MIRL's "Episode Active" badge must read the running engine,
         # not be inferred from the read model's history -- see ruling
         # 3.1/4.2 (myelin-mirl-live-signal-roadmap memory). The other four
@@ -14207,7 +15337,6 @@ class ControlStationWindow(QMainWindow):
         # uses (AnalyticsController._create_page wires refresh_requested to
         # the real refresh); this is not a second refresh mechanism.
         self.engine.engine_stopped.connect(self.pages.live_mirl.refresh_requested.emit)
-        self.engine.engine_stopped.connect(lambda: self.pages.cosine.render_live_view(None))
         self.engine.engine_stopped.connect(self.pages.cosine.refresh_requested.emit)
         # Session No. (and, so the three live readouts never disagree, the
         # episode badge and SINE Stage too) must not sit on a frozen number
@@ -14292,6 +15421,9 @@ class ControlStationWindow(QMainWindow):
 
         self.theme.theme_changed.connect(self._apply_theme)
         self.engine.sine_fact_received.connect(self._sine_presentation.handle_sine_fact)
+        self.engine.sine_fact_received.connect(
+            self._observe_sine_fact_for_escalation_selection
+        )
         self.engine.mirl_fact_received.connect(self._sine_presentation.handle_mirl_fact)
         self.engine.cosecant_fact_received.connect(self._sine_presentation.handle_cosecant_fact)
         self.pages.study.continuity_popup_presented.connect(
@@ -14305,6 +15437,17 @@ class ControlStationWindow(QMainWindow):
         self.pages.metric_hub.set_session_active(self.engine.is_session_active())
         self._render_science_lab_experiment_state()
 
+    def _science_lab_mark_offline(self) -> None:
+        """V06: MYELIN stopped / failed / lost its session -> badge OFFLINE.
+
+        The stop, failure and session-loss paths render their own
+        presentation without going through the experiment-state renderer,
+        so each one clears the badge here.  Display only: nothing is ended
+        or written.
+        """
+
+        self.pages.science_lab.set_experiment_online(False)
+
     def _handle_science_lab_session_change(self, session_id: object) -> None:
         """Mirror the engine's authoritative session identity into Science
         Lab's coordinator.  Presentation-only: starts no engine, opens no
@@ -14317,6 +15460,7 @@ class ControlStationWindow(QMainWindow):
             self._render_science_lab_experiment_state()
             self._science_lab_chapter3.render_transfer_waiting_for_stop()
         else:
+            self._science_lab_mark_offline()
             attached = self.science_lab_coordinator.attached_session_id
             if type(attached) is not int or attached <= 0:
                 self._render_science_lab_experiment_state()
@@ -14621,6 +15765,7 @@ class ControlStationWindow(QMainWindow):
         }:
             self._science_lab_normal_stop_armed = False
             self._science_lab_pending_end_session_id = None
+            self._science_lab_mark_offline()
             if self.science_lab_live_timeline.mode in {
                 MODE_LIVE,
                 MODE_EXPERIMENT_ENDED,
@@ -14635,6 +15780,10 @@ class ControlStationWindow(QMainWindow):
         error_badge: str | None = None,
     ) -> None:
         chapter3 = self._science_lab_chapter3
+        # V06: the header badge is OFFLINE unless the confirmed-running
+        # branch below is reached, so a read failure can never leave a stale
+        # ONLINE on screen.
+        self.pages.science_lab.set_experiment_online(False)
         sid = self.science_lab_coordinator.attached_session_id
         if type(sid) is not int or sid <= 0:
             chapter3.render_experiment_state(
@@ -14656,6 +15805,7 @@ class ControlStationWindow(QMainWindow):
 
         running = self.science_lab_experiments.current()
         if running is not None and running.parent_session_id == sid:
+            self.pages.science_lab.set_experiment_online(True)
             chapter3.render_experiment_state(
                 experiment_id=running.experiment_id,
                 parent_session=str(sid),
@@ -14753,6 +15903,9 @@ class ControlStationWindow(QMainWindow):
             )
 
     def _finalize_science_lab_normal_stop(self) -> None:
+        # engine_stopped: MYELIN is no longer running, whichever way it was
+        # stopped (End Experiment first, or Stop directly).
+        self._science_lab_mark_offline()
         if not self._science_lab_normal_stop_armed:
             return
         sid = self._science_lab_pending_end_session_id
@@ -14823,6 +15976,9 @@ class ControlStationWindow(QMainWindow):
             )
 
     def _handle_science_lab_engine_failure(self, message: str) -> None:
+        if not self._is_terminal_engine_failure():
+            return
+        self._science_lab_mark_offline()
         self._science_lab_normal_stop_armed = False
         self._science_lab_pending_end_session_id = None
         self._science_lab_finalization_error = self._bounded_science_lab_error(
@@ -14894,6 +16050,7 @@ class ControlStationWindow(QMainWindow):
     def _engine_status_changed(self, status: EngineStatus) -> None:
         self.pages.study.set_monitoring_active(status is EngineStatus.ACTIVE)
         self._sine_presentation.handle_engine_status(status)
+        self._sync_mine_escalation_claim(None)
         print(f"[MYELIN][ENGINE] status={status}", flush=True)
 
     def _activity_time(self, timestamp: str) -> str:
@@ -15051,10 +16208,21 @@ class ControlStationWindow(QMainWindow):
         """Apply visual truth, then refresh the native Windows caption."""
 
         app = QApplication.instance()
-        if app is not None:
-            app.setStyleSheet(build_application_stylesheet(theme))
+        qss = build_application_stylesheet(theme)
+        self._current_theme_stylesheet = qss
+        if app is not None and not self._application_theme_stylesheet_initialized:
+            # Install the complete selector language once so widgets created
+            # later retain the same defaults. Replacing QApplication's sheet
+            # on every atmosphere transition forces Qt to restyle the entire
+            # 2,800+ widget tree synchronously, including hidden Lab chapters.
+            app.setStyleSheet(qss)
+            self._application_theme_stylesheet_initialized = True
+        self._apply_scoped_theme_stylesheet(qss, theme)
         set_active_theme(theme)
         _set_live_tokens(theme)
+        self.pages.control.set_escalation_base_tokens(
+            BASE_THEMES[self.theme.base_theme]
+        )
         self.navigation.apply_theme(theme)
         self.shell.apply_theme(theme)
         self.pages.study.apply_theme(theme)
@@ -15081,6 +16249,67 @@ class ControlStationWindow(QMainWindow):
         self.shell.style().unpolish(self.shell)
         self.shell.style().polish(self.shell)
         self._apply_native_titlebar(theme)
+
+    @staticmethod
+    def _set_theme_stylesheet(widget: QWidget | None, qss: str) -> None:
+        if widget is not None:
+            widget.setStyleSheet(qss)
+
+    @staticmethod
+    def _set_top_level_theme_stylesheet(widget: QWidget | None, qss: str) -> None:
+        """Theme only windows that do not own a presentation stylesheet."""
+
+        if widget is None:
+            return
+        managed = bool(widget.property("myelinAppThemeManaged"))
+        if not managed and widget.styleSheet().strip():
+            return
+        widget.setProperty("myelinAppThemeManaged", True)
+        widget.setStyleSheet(qss)
+
+    def _apply_scoped_theme_stylesheet(self, qss: str, theme) -> None:
+        """Restyle bounded roots without invalidating the whole application."""
+
+        palette = self.page_stack.palette()
+        palette.setColor(QPalette.ColorRole.Window, QColor(theme.window_background))
+        palette.setColor(QPalette.ColorRole.Base, QColor(theme.window_background))
+        self.page_stack.setPalette(palette)
+        self.page_stack.setAutoFillBackground(True)
+
+        for root in (
+            self.shell.top_bar,
+            self.sidebar,
+            self.navigation.loading_overlay,
+            self.shell.sidebar_backdrop,
+            self.shell.clock,
+            self.shell.brand,
+        ):
+            self._set_theme_stylesheet(root, qss)
+
+        for page_name, page in self.pages.by_name().items():
+            if page_name != PAGE_SCIENCE_LAB:
+                self._set_theme_stylesheet(page, qss)
+
+        science = self.pages.science_lab
+        workspace = science.workspace
+        self._set_theme_stylesheet(workspace._drawer, qss)
+        for object_name in (
+            "analyticsPageTitle",
+            "analyticsPageSubtitle",
+            "analyticsStatus",
+            "analyticsRefreshButton",
+            "analyticsEvidenceNote",
+        ):
+            for widget in science.findChildren(QWidget, object_name):
+                self._set_theme_stylesheet(widget, qss)
+        for index in workspace._chapter_index.values():
+            self._set_theme_stylesheet(workspace._stack.widget(index), qss)
+
+        app = QApplication.instance()
+        if app is not None:
+            for window in app.topLevelWidgets():
+                if window is not self:
+                    self._set_top_level_theme_stylesheet(window, qss)
 
     def _apply_native_titlebar(self, theme=None) -> None:
         tokens = theme or self.theme.current_theme
@@ -15114,6 +16343,28 @@ class ControlStationWindow(QMainWindow):
             QEvent.Type.WindowStateChange,
         }:
             self._apply_native_titlebar()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if (
+            event.type() == QEvent.Type.Show
+            and isinstance(watched, QWidget)
+            and watched.isWindow()
+            and watched is not self
+            and self._current_theme_stylesheet
+        ):
+            # A popup constructed after the last transition would otherwise
+            # inherit the one-time startup sheet. Catch it at presentation so
+            # its first visible frame uses the current atmosphere.
+            self._set_top_level_theme_stylesheet(
+                watched, self._current_theme_stylesheet
+            )
+        if (
+            event.type() == QEvent.Type.Paint
+            and self._cosine_popup_types
+            and type(watched) in self._cosine_popup_kind_by_type
+        ):
+            self._observe_cosine_popup_paint(watched)
+        return super().eventFilter(watched, event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         if event.key() == Qt.Key.Key_Escape and self.navigation.sidebar_is_open:
