@@ -536,7 +536,8 @@ class SecantAuthority:
                 "COMMITTED" if self._committed_break_id else "HELD" if self._break_id else "IDLE"),
             self._global_id, self._unresolved_display or self._popup_state == "CLOSE_REQUESTED",
             dwell_active=bool(self._qualifying and not self._episode and not self._terminal),
-            dwell_target_ns=DWELL_NS)
+            dwell_target_ns=DWELL_NS,
+            escalation_deadline_monotonic_ns=self._deadline if not self._holds else None)
 
     def _defer(self, kind, value, at_ns):
         self._deferred.append((kind, value))

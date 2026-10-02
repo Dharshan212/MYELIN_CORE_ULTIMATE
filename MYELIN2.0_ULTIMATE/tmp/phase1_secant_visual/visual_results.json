@@ -1,0 +1,46 @@
+{
+  "control_station": "PASS (real shell and ControlPage; inert engine)",
+  "secant": "PASS",
+  "themes": [
+    {
+      "theme": "NEON",
+      "result": "PASS"
+    },
+    {
+      "theme": "PURPLE",
+      "result": "PASS"
+    },
+    {
+      "theme": "BLACK",
+      "result": "PASS"
+    },
+    {
+      "theme": "WHITE",
+      "result": "PASS"
+    },
+    {
+      "theme": "AMBER_ALERT",
+      "result": "PASS"
+    },
+    {
+      "theme": "RED_ALERT",
+      "result": "PASS"
+    },
+    {
+      "theme": "GREEN_RETURN",
+      "result": "PASS"
+    }
+  ],
+  "metrics": [
+    "5",
+    "6",
+    "3",
+    "0"
+  ],
+  "refresh": "PASS",
+  "deep_analysis": "PASS",
+  "baseline_text_equal": true,
+  "database_hash_unchanged": true,
+  "database_connections": "read-only",
+  "qt_errors": []
+}

@@ -1,0 +1,117 @@
+MYELIN CORE — PHASE 1 SECANT VISUAL RECEIPT
+
+ROOT:
+C:\Users\Dharshan\Downloads\MYELIN_GENALOGY\MYELIN2.0_ULTIMATE_TRIAL
+
+ROOT CAUSE:
+Control Station already dispatches the active ThemeTokens through its existing
+_retheme hooks. SECANT's containing dashboard discarded the scoped application
+stylesheet and restored a fixed background; its landing page, cards, labels,
+controls, scrollbars and painted flow connectors also used fixed dark colors.
+Other integrated dashboard surfaces consume the supplied tokens in their hooks.
+
+FILES CHANGED:
+SECANT\dashboard_view.py (the only runtime source changed).
+Related backup, harnesses, diff, manifests, test outputs and rendered evidence
+are confined to tmp\phase1_secant_visual inside this same authorized root.
+
+VISUAL FIX:
+Consume the existing active theme in the containing dashboard and landing page.
+Reuse build_application_stylesheet, dashboard title/subtitle/Refresh selectors,
+ThemeTokens, shared radii and color mixing. Apply world background, surfaces,
+neutral text, borders, controls and scrollbar appearance. Retain the layout and
+spacing. Preserve distinct teal, green, purple and blue metric accents, with
+darker semantic text on White. Theme landing flow connectors and newly rebuilt
+flow widgets after Refresh. The Deep Analysis surface retains its existing
+presentation and behavior; its connectors retain their prior colors.
+
+DARK THEME:
+PASS — Neon, Purple and Black. Amber Alert, Red Alert and Green Return also PASS.
+
+LIGHT THEME:
+PASS — White, including populated synthetic flow nodes and readable elapsed labels.
+
+SECANT METRICS UNCHANGED:
+PASS — runtime read-only evidence remains 5 / 6 / 3, Study Resources 0.
+All displayed label text equals the original view for identical prepared data.
+The selected-session Study Resources tuple remains unchanged.
+
+REFRESH:
+PASS — actual button click, read-only evidence refresh, busy state restored,
+prepared model unchanged, and rebuilt flow widgets retain the active theme.
+
+DEEP ANALYSIS:
+PASS — actual Open Deep Analysis click through the existing protected-surface
+preparer, Overview opens, Episodes and COSECANT navigation work, and Close works.
+
+FUNCTIONAL LOGIC CHANGED:
+NO
+
+DATABASE CHANGED:
+NO — application database SHA-256 unchanged; all validation access is mode=ro.
+Existing regression tests use synthetic database fixtures under the audit folder.
+
+SCHEMA CHANGED:
+NO
+
+TIMERS CHANGED:
+NO
+
+UNRELATED FILES CHANGED:
+NO — integrity manifest confirms only dashboard_view.py changed outside the
+related audit folder. No packaging or version metadata was changed.
+
+TESTS:
+1. python -B tmp\phase1_secant_visual\validate_visual.py
+   PASS: real Control Station shell and ControlPage open in offscreen Windows Qt;
+   actual asynchronous SECANT navigation opens normally; production theme dispatch
+   follows all seven worlds; empty and populated landing render correctly;
+   metric and all-label baseline comparison, Refresh and Deep Analysis pass;
+   database hash unchanged and no Qt exceptions.
+   Validation uses an inert engine. A live monitoring session and the full
+   persistence/engine startup path were not launched.
+2. python -B tmp\phase1_secant_visual\run_regressions.py secant
+   Raw result: 116 passed in 10.17s
+   Existing SECANT/test_dashboard_corrections.py and SECANT/test_pdf_export.py.
+3. python -B tmp\phase1_secant_visual\run_regressions.py navigation
+   Raw result: 27 passed, 100 deselected in 26.40s
+   Existing SECANT cases from test_contextual_lock.py; SQLite access denied.
+4. python -B tmp\phase1_secant_visual\check_integrity.py
+   PASS: syntax; unchanged Deep Analysis class AST; unchanged containing
+   dashboard navigation/data APIs; unchanged landing Refresh and data logic
+   after excluding presentation-only calls; all other runtime source and
+   configuration hashes unchanged.
+5. Visual inspection: WHITE.png, PURPLE.png, WHITE_flow.png, PURPLE_flow.png.
+   PASS: integrated surfaces, theme hierarchy, semantic accents and flow contrast.
+
+FILES INSPECTED:
+SECANT/dashboard_view.py — main dashboard, landing, analysis, helpers and painters.
+SECANT/dashboard_integration.py — existing read-only integration and refresh API.
+UI_THEMES/theme.py — tokens, worlds, shared application QSS, radii and helpers.
+CONTROL_STATION/application.py — integrated dashboard styling, theme dispatch,
+scoped propagation, shell composition, SECANT navigation and analysis wiring.
+CONTROL_STATION/launcher.py — startup and shared application theme setup.
+CONTROL_STATION/navigation.py — asynchronous preparation registration and routing.
+PERSISTENCE/database.py — application database path authority (read-only).
+PERSISTENCE/storage.py and CONTROL_STATION/settings.py — path references (read-only).
+SECANT/test_dashboard_corrections.py — existing evidence/read-model regressions.
+Existing external Qt test harness and runners — read-only reuse for validation.
+Applicable Downloads/AGENTS.md and its seven historical reference reports were
+read; this user's current visual-only Phase 1 scope governs this patch.
+
+REGIONS CHANGED:
+_label: retain a presentation color role for landing theme application.
+FlowConnector.paintEvent: optional landing-only theme colors; caption and geometry unchanged.
+SecantLandingPage: theme styling, shared header selectors, removal of fixed QSS,
+semantic color metadata, and style application after rebuilt flow nodes.
+SecantCosecantDashboard._style / _retheme: consume the active shared stylesheet and background.
+
+RESULT:
+PASS — Phase 1 presentation correction and isolated Qt acceptance checks.
+
+FINAL ACTION:
+STOP. DO NOT START PHASE 2. WAIT FOR CHIEF / CHATGPT.
+
+PHASE 1 COMPLETE — STOPPED.
+NEXT PHASE NOT STARTED.
+WAITING FOR CHIEF REVIEW / TEST / GO.

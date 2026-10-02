@@ -1,0 +1,272 @@
+--- CONTROL_STATION/application.py (before Phase 2)
++++ CONTROL_STATION/application.py
+@@ -13136,6 +13136,11 @@
+         self._latest_sine_live_view = None
+         self._latest_mirl_live_view = None
+         self._mirl_display = EvidenceCountdown()
++        self._sine_ring_progress = 0.0
++        self._ring_organ_progress = {"mine": None, "cosine": None}
++        self._ring_organ_generations = {}
++        self._ring_session_id = None
++        self._ring_engine_status = "IDLE"
+         self._resource_sine_text = "—"
+         self._escalation_base_tokens = DEFAULT_THEME
+         self._active_normal_break_fact = None
+@@ -13838,6 +13843,12 @@
+         active = text == "ACTIVE"
+         paused = text == "PAUSED"
+         running = active or paused
++        self._ring_engine_status = text
++        if not running:
++            self._ring_organ_progress = {"mine": None, "cosine": None}
++            self._ring_organ_generations.clear()
++            self._ring_session_id = None
++            self._sine_ring_progress = 0.0
+ 
+         self._status.setText(f"ENGINE {text}")
+         self._status.setProperty(
+@@ -13874,6 +13885,7 @@
+                 self._session_elapsed.invalidate()
+                 self._ring.set_elapsed_seconds(0)
+                 self._ring.set_progress(0.0)
++        self._render_engine_organ_ring()
+ 
+     def _advance_session_clock(self) -> None:
+         if self._session_elapsed.isValid():
+@@ -14029,7 +14041,7 @@
+         self._resource_reason.setText("No managed resource is in the foreground.")
+         self._dwell_track.set_progress(0.0)
+         self._dwell_value.setText("\u2014 / \u2014")
+-        self._ring.set_progress(0.0)
++        self._set_sine_ring_progress(0.0)
+ 
+     def reset_runtime_presentation(self) -> None:
+         """Retire all session-owned Control-page facts at a terminal boundary.
+@@ -14039,6 +14051,9 @@
+         when session-loss, failure and stop signals describe the same exit.
+         """
+ 
++        self._ring_organ_progress = {"mine": None, "cosine": None}
++        self._sine_ring_progress = 0.0
++        self._ring.set_progress(0.0)
+         self._clear_current_resource_presentation()
+         self.render_sine(None)
+         self.render_mirl(None)
+@@ -14101,6 +14116,7 @@
+ 
+         self._cosine_live_card.render(snapshot)
+         self._render_cosine_escalation(snapshot)
++        self._receive_engine_ring_progress("cosine", snapshot)
+ 
+     def render_handover(self, payload: object) -> None:
+         """Render the prepared Mr Hand view without owning a clock or decision."""
+@@ -14159,6 +14175,58 @@
+ 
+         self._mine_live_card.render(snapshot)
+         self._render_mine_escalation(snapshot)
++        self._receive_engine_ring_progress("mine", snapshot)
++
++    def _receive_engine_ring_progress(self, organ: str, snapshot: object) -> None:
++        """Consume only the existing authority signal; no timer or callback."""
++        if snapshot is None:
++            self._ring_organ_progress[organ] = None
++        elif self._ring_engine_status in {"ACTIVE", "PAUSED"}:
++            session_provider = getattr(self._engine, "current_session_id", None)
++            session_id = session_provider() if callable(session_provider) else None
++            parent_id = self._value(snapshot, "parent_session_id" if organ == "mine" else "session_id")
++            generation = self._value(snapshot, "generation")
++            if session_id is None or parent_id != session_id or type(generation) is not int:
++                return
++            if session_id != self._ring_session_id:
++                self._ring_organ_progress = {"mine": None, "cosine": None}
++                self._ring_organ_generations.clear()
++                self._ring_session_id = session_id
++            if generation < self._ring_organ_generations.get(organ, -1):
++                return
++            self._ring_organ_generations[organ] = generation
++            progress = self._value(snapshot, "timer_progress_fraction")
++            self._ring_organ_progress[organ] = (
++                float(progress) if type(progress) in {int, float}
++                and math.isfinite(progress) and 0 <= progress < 1 else None
++            )
++        self._render_engine_organ_ring()
++
++    def _set_sine_ring_progress(self, fraction: float) -> None:
++        """Preserve the existing SINE arc projection as one visual input."""
++        self._sine_ring_progress = fraction
++        self._render_engine_organ_ring()
++
++    def retire_engine_ring(self) -> None:
++        """Fence the visual consumer when the application is shutting down."""
++        self._ring_engine_status = "SHUTDOWN"
++        self._ring_organ_progress = {"mine": None, "cosine": None}
++        self._sine_ring_progress = 0.0
++        self._render_engine_organ_ring()
++
++    def _render_engine_organ_ring(self) -> None:
++        if self._ring_engine_status == "PAUSED":
++            return  # Preserve the existing paused, stationary SINE arc.
++        if self._ring_engine_status != "ACTIVE":
++            self._ring.set_progress(0.0)
++            return
++        # Keep SINE's existing priority while its escalation clock runs.
++        if self._sine_actively_counting_deadline() is not None:
++            progress = self._sine_ring_progress
++        else:
++            progressing = [value for value in self._ring_organ_progress.values() if value is not None]
++            progress = max(progressing) if progressing else self._sine_ring_progress
++        self._ring.set_progress(progress)
+ 
+     def render_today_session_health(self, snapshot: object) -> None:
+         """Place three already-calculated Today Health integers into labels.
+@@ -14416,7 +14484,7 @@
+             if protected or phase == "PROTECTED RED":
+                 self._dwell_track.set_progress(1.0, "red")
+                 self._dwell_value.setText("RETURN REQUIRED")
+-                self._ring.set_progress(1.0)
++                self._set_sine_ring_progress(1.0)
+                 return
+ 
+             target_field = {
+@@ -14446,14 +14514,14 @@
+                     f"{self._format_seconds(elapsed)} / "
+                     f"{self._format_seconds(target)}"
+                 )
+-                self._ring.set_progress(fraction)
++                self._set_sine_ring_progress(fraction)
+                 return
+ 
+         blacklist = self._latest_blacklist_live_view
+         if blacklist is None:
+             self._dwell_track.set_progress(0.0)
+             self._dwell_value.setText("\u2014 / \u2014")
+-            self._ring.set_progress(0.0)
++            self._set_sine_ring_progress(0.0)
+             return
+ 
+         if bool(self._value(blacklist, "sine_watch_inhibited", False)):
+@@ -14461,7 +14529,7 @@
+             # Normal SINE authority during Study/COSECANT ownership.
+             self._dwell_track.set_progress(0.0)
+             self._dwell_value.setText("\u2014 / \u2014")
+-            self._ring.set_progress(0.0)
++            self._set_sine_ring_progress(0.0)
+             return
+         blacklist_state = self._enum_text(
+             self._value(blacklist, "state"), "INACTIVE"
+@@ -14474,7 +14542,7 @@
+             # that target is policy, not evidence that a dwell is underway.
+             self._dwell_track.set_progress(0.0)
+             self._dwell_value.setText("\u2014 / \u2014")
+-            self._ring.set_progress(0.0)
++            self._set_sine_ring_progress(0.0)
+             return
+ 
+         elapsed = self._value(blacklist, "dwell_elapsed_seconds", 0.0)
+@@ -14499,7 +14567,7 @@
+             if target_value > 0.0
+             else self._format_seconds(elapsed)
+         )
+-        self._ring.set_progress(fraction)
++        self._set_sine_ring_progress(fraction)
+ 
+     def _highlight_sine_stage(self, stage: object) -> None:
+         """Mark the chip SINE reports as current; never infer one locally."""
+@@ -17153,6 +17221,7 @@
+             return
+ 
+         self._shutdown_is_authorized = True
++        self.pages.control.retire_engine_ring()
+         self.lifecycle.shutdown()
+         self.navigation.shutdown()
+         try:
+--- MINE/mine.py (before Phase 2)
++++ MINE/mine.py
+@@ -264,6 +264,8 @@
+     durable_detail: str
+     data_quality: str
+     schema_version: str = MINE_SCHEMA_VERSION
++    # Read-only presentation: None means no authoritative timer progressing.
++    timer_progress_fraction: float | None = None
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -469,7 +471,36 @@
+                 durable_health=self._durable_health,
+                 durable_detail=self._durable_detail,
+                 data_quality="PAUSED" if self._paused else self._quality,
+-            )
++                timer_progress_fraction=self._timer_progress_fraction(effective),
++            )
++
++    def _timer_progress_fraction(self, effective: int) -> float | None:
++        """Project existing clocks only; never credit time or advance a phase."""
++        if self._paused or self._monitor_held or self._study_preempted:
++            return None
++        if self._phase is MinePhase.IMPORTANT_ALLOWANCE_ACTIVE:
++            elapsed = effective - self._important_start
++            total = self._important_deadline - self._important_start
++        elif self._last_obs_ns and self._last_kind is MineObservationKind.MESSAGING:
++            clock = {
++                MinePhase.OBSERVING_MESSAGING: (self._initial_ns, self._policy.initial_gate_seconds),
++                MinePhase.RETURN_INTENT_ACTIVE: (self._return_intent_ns, self._policy.return_intent_seconds),
++            }.get(self._phase)
++            if clock is None:
++                return None
++            elapsed, total = clock[0], _to_ns(clock[1])
++        elif self._last_obs_ns and self._last_kind is MineObservationKind.FOCUS and self._focus_active:
++            clock = {
++                MinePhase.RETURN_VISUAL_CONFIRMING: (self._visual_ns, self._policy.final_callback_hide_seconds),
++                MinePhase.RETURN_VERIFYING: (self._verify_ns, self._policy.return_verification_seconds),
++                MinePhase.CLOSURE_CONFIRMING: (self._closure_ns, self._policy.closure_confirmation_seconds),
++            }.get(self._phase)
++            if clock is None:
++                return None
++            elapsed, total = clock[0], _to_ns(clock[1])
++        else:
++            return None
++        return elapsed / total if total > 0 and 0 <= elapsed < total else None
+ 
+     def observe(self, observation: MineObservation) -> tuple[MineEffect, ...]:
+         with self._lock:
+--- COSINE/cosine.py (before Phase 2)
++++ COSINE/cosine.py
+@@ -166,6 +166,8 @@
+     return_verification_remaining_seconds:float; closure_confirmation_remaining_seconds:float
+     global_paused:bool; closure_outcome:str; data_quality:str
+     schema_version:str=COSINE_SCHEMA_VERSION
++    # Read-only presentation: None means no authoritative timer progressing.
++    timer_progress_fraction:float|None=None
+ 
+ @dataclass(frozen=True, slots=True)
+ class CosineMonitorStatus:
+@@ -238,7 +240,28 @@
+                 self._phase is not CosinePhase.SHUTDOWN,self._hopper_count,initial,intent,self._chosen_minutes,self._break_start,self._break_deadline,remain,
+                 self._final.request_id if self._final else "",bool(self._final and self._final.visible),
+                 "CLOSURE_CONFIRMING" if self._phase is CosinePhase.CLOSURE_CONFIRMING else "RETURN_VERIFYING" if self._candidate else "INACTIVE",
+-                verify,close,self._paused,self._closure_outcome,"PAUSED" if self._paused else self._quality)
++                verify,close,self._paused,self._closure_outcome,"PAUSED" if self._paused else self._quality,
++                timer_progress_fraction=self._timer_progress_fraction(effective))
++
++    def _timer_progress_fraction(self,effective:int)->float|None:
++        """Project existing clocks only; never credit time or advance a phase."""
++        if self._paused or self._monitor_held or self._study_suppressed:
++            return None
++        if self._phase is CosinePhase.BREAK_ACTIVE:
++            elapsed=effective-self._break_start; total=self._break_deadline-self._break_start
++        elif self._last_obs_ns and self._last_kind is _Kind.OTT:
++            clock={CosinePhase.OBSERVING_OTT:(self._initial_ns,self._policy.initial_gate_seconds),
++                   CosinePhase.RETURN_INTENT_OBSERVING:(self._intent_window_ns,self._policy.return_intent_window_seconds)}.get(self._phase)
++            if clock is None: return None
++            elapsed,total=clock[0],_to_ns(clock[1])
++        elif self._last_obs_ns and self._last_kind is _Kind.FOCUS and self._candidate:
++            if self._phase is CosinePhase.CLOSURE_CONFIRMING:
++                elapsed=self._closure_ns; total=_to_ns(self._policy.closure_confirmation_seconds)
++            elif self._phase in {CosinePhase.RETURN_VERIFYING,CosinePhase.FINAL_CALLBACK_HIDDEN_VERIFYING,CosinePhase.FINAL_CALLBACK_ACTIVE}:
++                elapsed=self._verify_ns; total=_to_ns(self._policy.return_verification_seconds)
++            else: return None
++        else: return None
++        return elapsed/total if total>0 and 0<=elapsed<total else None
+ 
+     def bind_parent_session(self,session_id:int)->bool:
+         """Bind the exact durable Monitor session before any COSINE event."""

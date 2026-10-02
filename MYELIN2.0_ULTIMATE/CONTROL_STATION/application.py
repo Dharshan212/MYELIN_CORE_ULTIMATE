@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
+from PyQt6 import sip
+from CONTROL_STATION.timer_display import EvidenceCountdown, SnapshotCountdown, countdown, start_frames
 
 from PyQt6.QtCore import (
     QAbstractAnimation,
@@ -47,6 +49,7 @@ from PyQt6.QtGui import (
     QPixmap,
     QRadialGradient,
     QResizeEvent,
+    QRegion,
     QShowEvent,
 )
 from PyQt6.QtWidgets import (
@@ -54,6 +57,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QComboBox,
+    QDialog,
     QFrame,
     QGraphicsBlurEffect,
     QGraphicsPixmapItem,
@@ -79,7 +83,10 @@ from PyQt6.QtWidgets import (
 from .analytics import AnalyticsController
 from .controller import ControlStationController, EngineStatus
 from .get_chart import GetChartController, NeonPosterWindow
-from .lifecycle import ActionKind, ActionOutcome, LifecycleController, LifecycleResult
+from .lifecycle import (
+    ActionKind, ActionOutcome, LifecycleConfirmSurface, LifecycleController,
+    LifecycleResult,
+)
 from .navigation import NavigationController
 from .settings import TIMEZONE_CHOICES, SettingsController, ThemePreferenceDialog
 from .tray import TrayController
@@ -128,6 +135,7 @@ from UI_THEMES.animation import (
 )
 from UI_THEMES.theme import (
     AMBER_ALERT_THEME,
+    ANALYSIS_PANEL_ALPHA,
     Atmosphere,
     BASE_THEMES,
     DEFAULT_THEME,
@@ -138,12 +146,14 @@ from UI_THEMES.theme import (
     RADIUS_SM,
     RED_ALERT_THEME,
     ThemeController,
+    analysis_ink,
     apply_native_titlebar,
     build_application_stylesheet,
     card_shadow,
     label,
     make_font,
     mix,
+    paint_analysis_backdrop,
     qalpha,
     restyle,
 )
@@ -1442,6 +1452,23 @@ def _white_alpha(a: float) -> str:
     return qalpha(QColor(255, 255, 255), a).name(QColor.NameFormat.HexArgb)
 
 
+def _glass_ink() -> str:
+    """``R,G,B`` of the live world's glass tint: white on dark, slate on light.
+
+    The analysis overlays (MIRL / MINE / COSINE) separate their cards and rules
+    with a faint tint of this colour.  White on a White world is invisible, so
+    the tint follows the active world instead.
+    """
+
+    return "%d,%d,%d" % analysis_ink(live_tokens())
+
+
+def _glass_alpha(a: float) -> str:
+    """``_white_alpha`` for analysis surfaces: the same overlay in the live world's ink."""
+
+    return qalpha(QColor(*analysis_ink(live_tokens())), a).name(QColor.NameFormat.HexArgb)
+
+
 class _GlassPanel(QFrame):
     """``.glass-panel`` -- rounded, translucent surface, mockup CSS ported 1:1.
 
@@ -1464,6 +1491,7 @@ class _GlassPanel(QFrame):
 
     def apply_tint(self, tokens) -> None:
         self._tint = QColor(tokens.surface)
+        self._border = QColor(*analysis_ink(tokens), round(0.14 * 255))
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802
@@ -1475,7 +1503,7 @@ class _GlassPanel(QFrame):
         path.addRoundedRect(rect, RADIUS_LG, RADIUS_LG)
 
         tint = QColor(self._tint)
-        tint.setAlphaF(0.55)
+        tint.setAlphaF(ANALYSIS_PANEL_ALPHA)
         painter.fillPath(path, tint)
 
         pen = QPen(self._border)
@@ -1492,8 +1520,8 @@ def _glass_gstat(caption: str, value: str, value_size: float = 22.0) -> QFrame:
     box = QFrame()
     box.setObjectName("glassGstat")
     box.setStyleSheet(
-        f"QFrame#glassGstat {{ background: {_white_alpha(0.03)};"
-        f" border: 1px solid {_white_alpha(0.09)}; border-radius: {RADIUS_MD}px; }}"
+        f"QFrame#glassGstat {{ background: {_glass_alpha(0.03)};"
+        f" border: 1px solid {_glass_alpha(0.09)}; border-radius: {RADIUS_MD}px; }}"
     )
     lay = QVBoxLayout(box)
     lay.setContentsMargins(16, 16, 16, 16)
@@ -1511,8 +1539,8 @@ def _glass_gcard(padding: int = 20) -> tuple[QFrame, QVBoxLayout]:
     card = QFrame()
     card.setObjectName("glassGcard")
     card.setStyleSheet(
-        f"QFrame#glassGcard {{ background: {_white_alpha(0.03)};"
-        f" border: 1px solid {_white_alpha(0.09)}; border-radius: {RADIUS_LG}px; }}"
+        f"QFrame#glassGcard {{ background: {_glass_alpha(0.03)};"
+        f" border: 1px solid {_glass_alpha(0.09)}; border-radius: {RADIUS_LG}px; }}"
     )
     lay = QVBoxLayout(card)
     lay.setContentsMargins(padding, padding, padding, padding)
@@ -4385,6 +4413,7 @@ class MineDashboardShowcasePage(QWidget):
 
     def set_refreshing(self, refreshing: bool) -> None:
         self._refreshing = bool(refreshing)
+        self._refresh_button.setEnabled(not self._refreshing)
 
     def show_refresh_failure(self) -> None:
         # Durable cards withhold stale evidence; live/default cards are
@@ -4515,6 +4544,11 @@ class MineDashboardShowcasePage(QWidget):
         row.addLayout(text)
         row.addStretch(1)
 
+        self._refresh_button = showcase_outline_button("REFRESH")
+        self._refresh_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._refresh_button.clicked.connect(self.refresh_requested.emit)
+        row.addWidget(self._refresh_button, 0, Qt.AlignmentFlag.AlignVCenter)
+
         self._view_analysis_button = showcase_cta("VIEW ANALYSIS")
         self._view_analysis_button.setEnabled(True)
         self._view_analysis_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -4531,7 +4565,24 @@ class MineDashboardShowcasePage(QWidget):
         reads the projection this page already received from shared refresh.
         """
 
-        self._analysis_overlay.open_overlay()
+        overlay = self._analysis_overlay
+        if overlay.isVisible():
+            overlay.raise_()
+            overlay.setFocus()
+            return
+        preparer = getattr(self, "_surface_preparer", None)
+        if callable(preparer):
+            preparer(
+                owner=self,
+                key="mine-analysis",
+                title="Preparing MINE Analysis",
+                subtitle="Loading messaging intervention evidence...",
+                prepare=overlay.prepare_overlay,
+                reveal=overlay.reveal_overlay,
+                cleanup=overlay.close_overlay,
+            )
+        else:
+            overlay.open_overlay()
 
     def _build_episode_bar(self) -> QVBoxLayout:
         self._episode_bar_slot = QVBoxLayout()
@@ -5215,13 +5266,6 @@ class MineDeepAnalysisDialog(QWidget):
         panel.setObjectName("mineGlassPanel")
         panel.setFrameShape(QFrame.Shape.NoFrame)
         panel.setMaximumHeight(900)
-        surface = QColor(DEFAULT_THEME.surface)
-        panel.setStyleSheet(
-            f"QFrame#mineGlassPanel {{ background: rgba({surface.red()},"
-            f"{surface.green()},{surface.blue()},0.55);"
-            f" border: 1px solid {mix(MINE_PURPLE, 26, DEFAULT_THEME.border)};"
-            f" border-radius: {RADIUS_LG}px; }}"
-        )
         card_shadow(panel, blur=80, dy=30, strength=0.7)
         self._panel = panel
         root.addWidget(panel)
@@ -5241,15 +5285,70 @@ class MineDeepAnalysisDialog(QWidget):
         )
         lay.addWidget(self._body, 1)
         lay.addWidget(self._build_footer())
+        self._style_chrome(live_tokens())
+
+    # ---------------------------------------------------------------- theme
+    def _style_chrome(self, tokens) -> None:
+        """Paint the fixed panel/header/tabbar/footer from one world's tokens.
+
+        Built once and reused on every open, so this is also the retheme path.
+        """
+
+        ink = "%d,%d,%d" % analysis_ink(tokens)
+        surface = QColor(tokens.surface)
+        self._panel.setStyleSheet(
+            f"QFrame#mineGlassPanel {{ background: rgba({surface.red()},"
+            f"{surface.green()},{surface.blue()},{ANALYSIS_PANEL_ALPHA});"
+            f" border: 1px solid {mix(MINE_PURPLE, 26, tokens.border)};"
+            f" border-radius: {RADIUS_LG}px; }}"
+        )
+        self._header_host.setStyleSheet(
+            f"QWidget {{ background: rgba({ink},0.02);"
+            f" border-bottom: 1px solid rgba({ink},0.10); }}"
+        )
+        self._title_label.setStyleSheet(
+            f"color: {tokens.text_primary}; background: transparent;"
+        )
+        for caption in (self._subtitle, self._centre_label,
+                        self._footer_left, self._footer_right):
+            caption.setStyleSheet(f"color: {tokens.muted}; background: transparent;")
+        self._close_button.setStyleSheet(
+            f"QPushButton {{ color: {tokens.muted};"
+            f" background: rgba({ink},0.03);"
+            f" border: 1px solid rgba({ink},0.18); border-radius: 16px; }}"
+            f"QPushButton:hover {{ color: {tokens.text_primary};"
+            f" border-color: {mix(MINE_PURPLE, 45, tokens.border)}; }}"
+        )
+        self._tabbar_host.setStyleSheet(
+            f"QWidget {{ background: rgba({ink},0.015);"
+            f" border-bottom: 1px solid rgba({ink},0.08); }}"
+        )
+        self._footer_host.setStyleSheet(
+            f"QWidget {{ background: rgba({ink},0.015);"
+            f" border-top: 1px solid rgba({ink},0.08); }}"
+        )
+
+    def _retheme(self, tokens) -> None:
+        """Follow the active world.
+
+        Chrome restyles now.  A visible body is rebuilt on the next event-loop
+        turn (never mid-sweep: the host's theme sweep still holds the old body's
+        widgets); a hidden one is rebuilt by ``prepare_overlay`` on every open.
+        """
+
+        self._style_chrome(tokens)
+        if self.isVisible():
+            QTimer.singleShot(0, self._refresh_if_alive)
+
+    def _refresh_if_alive(self) -> None:
+        if not sip.isdeleted(self) and self.isVisible():
+            self.refresh_body()
 
     # ---------------------------------------------------------------- chrome
     def _build_header(self) -> QWidget:
         host = QWidget()
         host.setFixedHeight(74)
-        host.setStyleSheet(
-            "QWidget { background: rgba(255,255,255,0.02);"
-            " border-bottom: 1px solid rgba(255,255,255,0.10); }"
-        )
+        self._header_host = host
         lay = QHBoxLayout(host)
         lay.setContentsMargins(26, 14, 26, 14)
         lay.setSpacing(14)
@@ -5262,22 +5361,17 @@ class MineDeepAnalysisDialog(QWidget):
         titles.setSpacing(2)
         title = QLabel("MINE — DEEP ANALYSIS")
         title.setFont(make_font(13, 700, mono=True, spacing=2.0))
-        title.setStyleSheet(
-            f"color: {DEFAULT_THEME.text_primary}; background: transparent;"
-        )
+        self._title_label = title
         titles.addWidget(title)
         self._subtitle = QLabel("Evidence not loaded")
         self._subtitle.setFont(make_font(11, 400))
-        self._subtitle.setStyleSheet(
-            f"color: {DEFAULT_THEME.muted}; background: transparent;"
-        )
         titles.addWidget(self._subtitle)
         lay.addLayout(titles)
 
         centre = QLabel("Messaging Intervention Nudge Escalation")
         centre.setFont(make_font(12, 400))
-        centre.setStyleSheet(f"color: {DEFAULT_THEME.muted}; background: transparent;")
         centre.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._centre_label = centre
         lay.addWidget(centre, 1)
 
         refresh = showcase_outline_button("Refresh", small=True)
@@ -5293,26 +5387,18 @@ class MineDeepAnalysisDialog(QWidget):
         lay.addWidget(export)
 
         close = QPushButton("✕")
+        close.setObjectName("mineAnalysisClose")
         close.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         close.setFixedSize(32, 32)
         close.setFont(make_font(13, 400))
-        close.setStyleSheet(
-            f"QPushButton {{ color: {DEFAULT_THEME.muted};"
-            " background: rgba(255,255,255,0.03);"
-            " border: 1px solid rgba(255,255,255,0.18); border-radius: 16px; }"
-            f"QPushButton:hover {{ color: {DEFAULT_THEME.text_primary};"
-            f" border-color: {mix(MINE_PURPLE, 45, DEFAULT_THEME.border)}; }}"
-        )
+        self._close_button = close
         close.clicked.connect(self.close_overlay)
         lay.addWidget(close)
         return host
 
     def _build_tabbar(self) -> QWidget:
         host = QWidget()
-        host.setStyleSheet(
-            "QWidget { background: rgba(255,255,255,0.015);"
-            " border-bottom: 1px solid rgba(255,255,255,0.08); }"
-        )
+        self._tabbar_host = host
         lay = QHBoxLayout(host)
         lay.setContentsMargins(20, 10, 20, 10)
         lay.setSpacing(6)
@@ -5331,24 +5417,15 @@ class MineDeepAnalysisDialog(QWidget):
     def _build_footer(self) -> QWidget:
         host = QWidget()
         host.setFixedHeight(44)
-        host.setStyleSheet(
-            "QWidget { background: rgba(255,255,255,0.015);"
-            " border-top: 1px solid rgba(255,255,255,0.08); }"
-        )
+        self._footer_host = host
         lay = QHBoxLayout(host)
         lay.setContentsMargins(26, 10, 26, 10)
         self._footer_left = QLabel("MINE · Durable episode analysis")
         self._footer_left.setFont(make_font(11, 400))
-        self._footer_left.setStyleSheet(
-            f"color: {DEFAULT_THEME.muted}; background: transparent;"
-        )
         lay.addWidget(self._footer_left)
         lay.addStretch(1)
         self._footer_right = QLabel("Evidence unavailable")
         self._footer_right.setFont(make_font(10, 400, mono=True, spacing=0.6))
-        self._footer_right.setStyleSheet(
-            f"color: {DEFAULT_THEME.muted}; background: transparent;"
-        )
         lay.addWidget(self._footer_right)
         return host
 
@@ -5442,21 +5519,23 @@ class MineDeepAnalysisDialog(QWidget):
             return
 
     def _style_tabs(self) -> None:
+        tokens = live_tokens()
+        ink = "%d,%d,%d" % analysis_ink(tokens)
         for key, button in self._tabs.items():
             if key == self._active:
                 button.setStyleSheet(
-                    f"QPushButton {{ color: {DEFAULT_THEME.cyan};"
-                    f" background: {mix(DEFAULT_THEME.cyan, 13, DEFAULT_THEME.surface)};"
-                    f" border: 1px solid {mix(DEFAULT_THEME.cyan, 40, DEFAULT_THEME.surface)};"
+                    f"QPushButton {{ color: {tokens.cyan};"
+                    f" background: {mix(tokens.cyan, 13, tokens.surface)};"
+                    f" border: 1px solid {mix(tokens.cyan, 40, tokens.surface)};"
                     f" border-radius: {RADIUS_SM}px; padding: 9px 15px; }}"
                 )
             else:
                 button.setStyleSheet(
-                    f"QPushButton {{ color: {DEFAULT_THEME.muted}; background: transparent;"
+                    f"QPushButton {{ color: {tokens.muted}; background: transparent;"
                     " border: 1px solid transparent;"
                     f" border-radius: {RADIUS_SM}px; padding: 9px 15px; }}"
-                    f"QPushButton:hover {{ color: {DEFAULT_THEME.text_primary};"
-                    " background: rgba(255,255,255,0.05); }"
+                    f"QPushButton:hover {{ color: {tokens.text_primary};"
+                    f" background: rgba({ink},0.05); }}"
                 )
 
     # -------------------------------------------------------------- helpers
@@ -5470,7 +5549,7 @@ class MineDeepAnalysisDialog(QWidget):
         lay.addSpacing(12)
 
     def _note(self, lay: QVBoxLayout, text: str, tone: str = "muted") -> None:
-        colour = DEFAULT_THEME.muted if tone == "muted" else _showcase_colour(tone).name()
+        colour = live_tokens().muted if tone == "muted" else _showcase_colour(tone, live_tokens()).name()
         host = QFrame()
         host.setFrameShape(QFrame.Shape.NoFrame)
         host.setStyleSheet(
@@ -5534,8 +5613,8 @@ class MineDeepAnalysisDialog(QWidget):
         box.setObjectName("mineAboutFlowNode")
         box.setFrameShape(QFrame.Shape.NoFrame)
         box.setStyleSheet(
-            f"QFrame#mineAboutFlowNode {{ background: {DEFAULT_THEME.surface_soft};"
-            f" border: 1px solid {DEFAULT_THEME.border}; border-radius: {RADIUS_SM}px; }}"
+            f"QFrame#mineAboutFlowNode {{ background: {live_tokens().surface_soft};"
+            f" border: 1px solid {live_tokens().border}; border-radius: {RADIUS_SM}px; }}"
         )
         lay = QHBoxLayout(box)
         lay.setContentsMargins(12, 8, 12, 8)
@@ -5633,6 +5712,7 @@ class MineDeepAnalysisDialog(QWidget):
             "about": self._tab_about,
         }[self._active](lay)
         lay.addStretch(1)
+        _retheme_subtree(host)
         self._body.setWidget(host)
 
     def _tab_overview(self, lay: QVBoxLayout) -> None:
@@ -5663,7 +5743,7 @@ class MineDeepAnalysisDialog(QWidget):
             if index:
                 rule = QFrame()
                 rule.setFixedHeight(1)
-                rule.setStyleSheet(f"background: {DEFAULT_THEME.border};")
+                rule.setStyleSheet(f"background: {live_tokens().border};")
                 trace_row.addWidget(rule, 1)
             node = QVBoxLayout()
             node.setSpacing(4)
@@ -5723,7 +5803,8 @@ class MineDeepAnalysisDialog(QWidget):
         control_row = QHBoxLayout()
         control_row.setSpacing(10)
         control_row.addWidget(label("Selected Episode", 11, 400, "muted"))
-        combo = QComboBox()
+        combo = _glass_episode_picker()
+        combo.setAccessibleName("Choose which MINE episode to analyse")
         combo.setMinimumWidth(220)
         for episode in self._episodes():
             key = _mine_episode_key(episode)
@@ -6015,7 +6096,8 @@ class MineDeepAnalysisDialog(QWidget):
         filtered_body.addSpacing(4)
         filtered_body.addWidget(label("Dwell entries for the selected band.", 10.5, 400, "muted", wrap=True))
         filtered_body.addSpacing(10)
-        combo = QComboBox()
+        combo = _glass_episode_picker()
+        combo.setAccessibleName("Choose a dwell band")
         for band_label in band_names:
             combo.addItem(band_label)
         combo.setCurrentText("10 MIN OR LESS")
@@ -6206,7 +6288,7 @@ class MineDeepAnalysisDialog(QWidget):
             if index:
                 rule = QFrame()
                 rule.setFixedHeight(1)
-                rule.setStyleSheet(f"background: {DEFAULT_THEME.border};")
+                rule.setStyleSheet(f"background: {live_tokens().border};")
                 trace_row.addWidget(rule, 1)
             node = QVBoxLayout()
             node.setSpacing(4)
@@ -6429,9 +6511,21 @@ class MineDeepAnalysisDialog(QWidget):
 
     # ------------------------------------------------------------- lifecycle
     def open_overlay(self) -> None:
+        if self.isVisible():
+            self.raise_()
+            self.setFocus()
+            return
+        self.prepare_overlay()
+        self.reveal_overlay()
+
+    def prepare_overlay(self) -> None:
+        """Prepare held evidence while the shared loader owns presentation."""
+        self.hide()
         self.setGeometry(self._page.rect())
         self._backdrop = self._grab_blurred()
         self.refresh_body()
+
+    def reveal_overlay(self) -> None:
         self.show()
         self.raise_()
         self.setFocus()
@@ -6446,7 +6540,8 @@ class MineDeepAnalysisDialog(QWidget):
         uses; this is a one-time screenshot, never persisted."""
 
         try:
-            source = self._page.grab()
+            from .navigation import grab_preparation_background
+            source = grab_preparation_background(self._page)
             if source.isNull():
                 return None
             scene = QGraphicsScene()
@@ -6467,9 +6562,7 @@ class MineDeepAnalysisDialog(QWidget):
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
-        if self._backdrop is not None:
-            painter.drawPixmap(self.rect(), self._backdrop)
-        painter.fillRect(self.rect(), QColor(4, 8, 16, 140))
+        paint_analysis_backdrop(painter, self.rect(), self._backdrop, live_tokens())
         painter.end()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
@@ -7991,17 +8084,47 @@ class LiveMirlShowcasePage(QWidget):
         it is parented to ``self.window()`` rather than to this page.
         """
 
-        host = self.window()
-        if self._dashboard_dialog is None:
-            self._dashboard_dialog = LiveMirlDashboardDialog(host)
-            self._dashboard_dialog.apply_live_view(
-                self._live_view, self._live_view_last_seen, self._constructed_at
+        if self._dashboard_dialog is not None and self._dashboard_dialog.isVisible():
+            self._dashboard_dialog.raise_()
+            return
+
+        def held_dialog() -> "LiveMirlDashboardDialog":
+            host = self.window()
+            if self._dashboard_dialog is None:
+                self._dashboard_dialog = LiveMirlDashboardDialog(host)
+                self._dashboard_dialog.apply_live_view(
+                    self._live_view, self._live_view_last_seen, self._constructed_at
+                )
+                self._dashboard_dialog.apply_sine_view(
+                    self._sine_view, self._sine_view_last_seen, self._constructed_at
+                )
+            self._dashboard_dialog.render_projection(self._projection)
+            return self._dashboard_dialog
+
+        def prepare() -> None:
+            held_dialog().prepare_over(self.window())
+
+        def reveal() -> None:
+            self._dashboard_dialog.reveal_overlay()
+
+        def cleanup() -> None:
+            if self._dashboard_dialog is not None:
+                self._dashboard_dialog.hide()
+                self._dashboard_dialog._backdrop = None
+
+        preparer = getattr(self, "_surface_preparer", None)
+        if callable(preparer):
+            preparer(
+                owner=self,
+                key="mirl-dashboard",
+                title="Preparing MIRL Dashboard",
+                subtitle="Loading recovery evidence and episode history...",
+                prepare=prepare,
+                reveal=reveal,
+                cleanup=cleanup,
             )
-            self._dashboard_dialog.apply_sine_view(
-                self._sine_view, self._sine_view_last_seen, self._constructed_at
-            )
-        self._dashboard_dialog.render_projection(self._projection)
-        self._dashboard_dialog.open_over(host)
+        else:
+            held_dialog().open_over(self.window())
 
 
 class LiveMirlDashboardDialog(QWidget):
@@ -8119,10 +8242,16 @@ class LiveMirlDashboardDialog(QWidget):
         panel_root.addWidget(self._build_footer())
 
         def _retheme(tokens) -> None:
+            self.setStyleSheet(build_application_stylesheet(tokens))
             self._panel.apply_tint(tokens)
+            self._style_chrome(tokens)
+            if self.isVisible() and self._projection is not None:
+                QTimer.singleShot(0, self._rerender_if_alive)
 
-        _retheme(DEFAULT_THEME)
+        _retheme(live_tokens())
         _remember_retheme(self, _retheme)
+        # Built lazily, possibly after the user already chose another world.
+        _retheme_subtree(self)
 
         # One timer, and it no longer invents a "refreshed" time: the footer
         # now shows the projection's own generated_at.  All this tick does is
@@ -8133,6 +8262,39 @@ class LiveMirlDashboardDialog(QWidget):
         self._clock.timeout.connect(self._resync_if_stale)
         self._clock.start()
 
+    def _style_chrome(self, tokens) -> None:
+        """Paint the fixed header/subline/tabbar/footer rules from one world."""
+
+        ink = QColor(*analysis_ink(tokens))
+
+        def rule(alpha: float) -> str:
+            return qalpha(ink, alpha).name(QColor.NameFormat.HexArgb)
+
+        self._header_frame.setStyleSheet(
+            f"QFrame#mirlDashboardHeader {{ background: {rule(0.02)};"
+            f" border-bottom: 1px solid {rule(0.1)}; }}"
+        )
+        self._subline_frame.setStyleSheet(
+            f"QFrame#mirlDashboardSubline {{ background: transparent;"
+            f" border-bottom: 1px solid {rule(0.07)}; }}"
+        )
+        self._tabbar_frame.setStyleSheet(
+            f"QFrame#mirlDashboardTabbar {{ background: transparent;"
+            f" border-right: 1px solid {rule(0.08)}; }}"
+        )
+        self._footer_frame.setStyleSheet(
+            f"QFrame#mirlDashboardFooter {{ background: transparent;"
+            f" border-top: 1px solid {rule(0.08)}; }}"
+        )
+
+    def _rerender_if_alive(self) -> None:
+        """Rebuild the visible tab after a world change (glass tiles bake their tint)."""
+
+        if sip.isdeleted(self) or not self.isVisible() or self._projection is None:
+            return
+        self._dirty_tabs = set(range(len(self.TAB_TITLES)))
+        self._render_visible_tab()
+
     # -- open/close -----------------------------------------------------------
 
     def open_over(self, host: QWidget) -> None:
@@ -8141,6 +8303,15 @@ class LiveMirlDashboardDialog(QWidget):
         ``host`` is normally the top-level Control Station window.
         """
 
+        if self.isVisible():
+            self.raise_()
+            return
+        self.prepare_over(host)
+        self.reveal_overlay()
+
+    def prepare_over(self, host: QWidget) -> None:
+        """Prepare geometry and backdrop without exposing a partial surface."""
+        self.hide()
         if self.parent() is not host:
             self.setParent(host)
             self._host = None
@@ -8154,6 +8325,8 @@ class LiveMirlDashboardDialog(QWidget):
         # Captured while still hidden, so the grab is only ever the host
         # underneath -- never this overlay photographing itself.
         self._backdrop = self._grab_blurred(host)
+
+    def reveal_overlay(self) -> None:
         self.show()
         self.raise_()
 
@@ -8192,7 +8365,8 @@ class LiveMirlDashboardDialog(QWidget):
         backdrop rather than blocking the overlay."""
 
         try:
-            source = host.grab()
+            from .navigation import grab_preparation_background
+            source = grab_preparation_background(host)
             if source.isNull():
                 return None
             scene = QGraphicsScene()
@@ -8214,9 +8388,7 @@ class LiveMirlDashboardDialog(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802
         del event
         painter = QPainter(self)
-        if self._backdrop is not None:
-            painter.drawPixmap(self.rect(), self._backdrop)
-        painter.fillRect(self.rect(), QColor(4, 8, 16, round(0.55 * 255)))
+        paint_analysis_backdrop(painter, self.rect(), self._backdrop, live_tokens())
         painter.end()
 
     # -- chrome -----------------------------------------------------------
@@ -8267,10 +8439,7 @@ class LiveMirlDashboardDialog(QWidget):
         right.addWidget(self._build_close_button())
         row.addLayout(right)
 
-        header.setStyleSheet(
-            f"QFrame#mirlDashboardHeader {{ background: {_white_alpha(0.02)};"
-            f" border-bottom: 1px solid {_white_alpha(0.1)}; }}"
-        )
+        self._header_frame = header
         return header
 
     def _build_close_button(self) -> QPushButton:
@@ -8311,10 +8480,7 @@ class LiveMirlDashboardDialog(QWidget):
         self._export_button.clicked.connect(self._export_report)
         row.addWidget(self._export_button)
 
-        sub.setStyleSheet(
-            f"QFrame#mirlDashboardSubline {{ background: transparent;"
-            f" border-bottom: 1px solid {_white_alpha(0.07)}; }}"
-        )
+        self._subline_frame = sub
         return sub
 
     #: How long the export button reports its outcome before returning to its
@@ -8415,10 +8581,7 @@ class LiveMirlDashboardDialog(QWidget):
         self._tab_group.idClicked.connect(self._set_current_tab)
         self._tab_group.buttons()[0].setChecked(True)
 
-        bar.setStyleSheet(
-            f"QFrame#mirlDashboardTabbar {{ background: transparent;"
-            f" border-right: 1px solid {_white_alpha(0.08)}; }}"
-        )
+        self._tabbar_frame = bar
         return bar
 
     def _build_tab_button(self, text: str) -> QPushButton:
@@ -8433,7 +8596,7 @@ class LiveMirlDashboardDialog(QWidget):
             # ``.glass-tab`` carries no border in any state; the active tab is
             # a 14% cyan wash alone.
             active_bg = qalpha(QColor(tokens.cyan), 0.14).name(QColor.NameFormat.HexArgb)
-            hover_bg = _white_alpha(0.05)
+            hover_bg = _glass_alpha(0.05)
             button.setStyleSheet(
                 f"QPushButton#mirlDashboardTab {{ text-align: left; background: transparent;"
                 f" color: {tokens.muted}; border: none;"
@@ -8480,10 +8643,7 @@ class LiveMirlDashboardDialog(QWidget):
         row.addStretch(1)
         row.addWidget(self._footer_time)
 
-        footer.setStyleSheet(
-            f"QFrame#mirlDashboardFooter {{ background: transparent;"
-            f" border-top: 1px solid {_white_alpha(0.08)}; }}"
-        )
+        self._footer_frame = footer
         return footer
 
     # -- tab content ----------------------------------------------------------
@@ -8553,11 +8713,11 @@ class LiveMirlDashboardDialog(QWidget):
         def _retheme(tokens) -> None:
             table.setStyleSheet(
                 f"QTableWidget#mirlDashboardEvidenceTable {{ background: transparent;"
-                f" color: {tokens.text_primary}; border: 1px solid {_white_alpha(0.08)};"
-                f" border-radius: {RADIUS_SM}px; gridline-color: {_white_alpha(0.06)}; }}"
+                f" color: {tokens.text_primary}; border: 1px solid {_glass_alpha(0.08)};"
+                f" border-radius: {RADIUS_SM}px; gridline-color: {_glass_alpha(0.06)}; }}"
                 f"QTableWidget#mirlDashboardEvidenceTable QHeaderView::section {{"
                 f" background: transparent; color: {tokens.muted};"
-                f" border: none; border-bottom: 1px solid {_white_alpha(0.1)};"
+                f" border: none; border-bottom: 1px solid {_glass_alpha(0.1)};"
                 f" padding: 8px 10px; font-weight: 700; }}"
             )
 
@@ -9477,9 +9637,9 @@ def _cosine_words(value: object) -> str:
 class CosineLiveCard(QWidget):
     """One dashboard card presenting the newest ``CosineSnapshot``.
 
-    Presentation only.  It holds no ``QTimer``/``QElapsedTimer``, calls no
-    ``time.monotonic``, performs no deadline arithmetic and reaches no runtime:
-    ``render`` writes exactly the fields the backend already decided.  The same
+    Presentation only. A 200 ms clock projects published deadlines or already
+    confirmed progress; it never reaches a runtime or decides a transition.
+    ``render`` accepts the fields the backend already decided. The same
     class serves the Control page and the COSINE page, so two subscribers of the
     one live signal never imply two authorities.
     """
@@ -9545,7 +9705,12 @@ class CosineLiveCard(QWidget):
     def render(self, snapshot: object) -> None:
         """Show exactly one backend snapshot, or the factual inactive state."""
 
+        if not hasattr(self, "_countdown_display"):
+            self._countdown_display = SnapshotCountdown()
+            self._countdown_frame = start_frames(self, self._refresh_countdown_text)
+        self._countdown_snapshot = snapshot
         if snapshot is None:
+            self._countdown_display.update(None, None)
             self._render_inactive()
             return
 
@@ -9573,8 +9738,11 @@ class CosineLiveCard(QWidget):
             self._timer_caption.setText(
                 f"{caption} · paused".upper() if paused else caption.upper()
             )
-            self._timer_value.setText(_cosine_clock(_cosine_field(snapshot, field)))
+            self._countdown_display.update(snapshot, field,
+                deadline_name="break_deadline_effective_ns" if phase == "BREAK_ACTIVE" else None)
+            self._refresh_countdown_text()
         else:
+            self._countdown_display.update(None, None)
             self._timer_caption.setText("NO SCIENTIFIC COUNTDOWN")
             self._timer_value.setText("—")
 
@@ -9592,6 +9760,9 @@ class CosineLiveCard(QWidget):
         self._quality.setText(
             "Data: " + _cosine_words(_cosine_field(snapshot, "data_quality"))
         )
+
+    def _refresh_countdown_text(self) -> None:
+        self._timer_value.setText(self._countdown_display.text())
 
     def _render_inactive(self) -> None:
         """No live COSINE: say so, rather than leaving a stale reading up."""
@@ -9709,11 +9880,10 @@ def _mine_branch_words(value: object) -> str:
 class MineLiveCard(QWidget):
     """One dashboard card presenting the newest ``MineSnapshot``.
 
-    Presentation only, structurally mirroring ``CosineLiveCard`` (Phase 4
-    Case B): it holds no ``QTimer``/``QElapsedTimer``, calls no
-    ``time.monotonic``, performs no deadline arithmetic and reaches no
-    runtime -- ``render`` writes exactly the fields the backend already
-    decided.  MESSAGING (foreground identity) and MINE (organ state) remain
+    Presentation only, structurally mirroring ``CosineLiveCard``: its 200 ms
+    clock projects published deadlines or already confirmed progress, without
+    reaching a runtime or deciding a transition. MESSAGING (foreground
+    identity) and MINE (organ state) remain
     two separate presentations; this card never substitutes for the
     Live Telemetry MESSAGING row.
     """
@@ -9779,7 +9949,12 @@ class MineLiveCard(QWidget):
     def render(self, snapshot: object) -> None:
         """Show exactly one backend ``MineSnapshot``, or the inactive state."""
 
+        if not hasattr(self, "_countdown_display"):
+            self._countdown_display = SnapshotCountdown()
+            self._countdown_frame = start_frames(self, self._refresh_countdown_text)
+        self._countdown_snapshot = snapshot
         if snapshot is None:
+            self._countdown_display.update(None, None)
             self._render_inactive()
             return
 
@@ -9804,8 +9979,11 @@ class MineLiveCard(QWidget):
             self._timer_caption.setText(
                 f"{caption} · paused".upper() if paused else caption.upper()
             )
-            self._timer_value.setText(_cosine_clock(_cosine_field(snapshot, field)))
+            self._countdown_display.update(snapshot, field,
+                deadline_name="important_deadline_effective_ns" if phase == "IMPORTANT_ALLOWANCE_ACTIVE" else None)
+            self._refresh_countdown_text()
         else:
+            self._countdown_display.update(None, None)
             self._timer_caption.setText(caption.upper())
             self._timer_value.setText("—")
 
@@ -9823,6 +10001,9 @@ class MineLiveCard(QWidget):
         self._quality.setText(
             "Data: " + _cosine_words(_cosine_field(snapshot, "data_quality"))
         )
+
+    def _refresh_countdown_text(self) -> None:
+        self._timer_value.setText(self._countdown_display.text())
 
     def _render_inactive(self) -> None:
         """No live MINE: say so, rather than leaving a stale reading up."""
@@ -10693,7 +10874,7 @@ class CosineDeepAnalysisDialog(QWidget):
         surface = QColor(tokens.surface)
         panel.setStyleSheet(
             f"QFrame#cosineGlassPanel{{background:rgba({surface.red()},{surface.green()},"
-            f"{surface.blue()},0.55);border:1px solid rgba(255,255,255,0.14);"
+            f"{surface.blue()},{ANALYSIS_PANEL_ALPHA});border:1px solid rgba({_glass_ink()},0.14);"
             f"border-radius:{RADIUS_LG}px;}}"
         )
         card_shadow(panel, blur=80, dy=30, strength=0.7)
@@ -10712,8 +10893,8 @@ class CosineDeepAnalysisDialog(QWidget):
         self._body.setStyleSheet(
             "QScrollArea{background:transparent;border:none;}"
             "QScrollArea > QWidget > QWidget{background:transparent;}"
-            "QScrollBar:vertical{background:rgba(255,255,255,0.03);width:10px;margin:0;}"
-            "QScrollBar::handle:vertical{background:rgba(255,255,255,0.16);"
+            f"QScrollBar:vertical{{background:rgba({_glass_ink()},0.03);width:10px;margin:0;}}"
+            f"QScrollBar::handle:vertical{{background:rgba({_glass_ink()},0.16);"
             "border-radius:5px;min-height:40px;}"
             f"QScrollBar::handle:vertical:hover{{background:{COSINE_TEAL_DIM};}}"
             "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
@@ -10729,8 +10910,8 @@ class CosineDeepAnalysisDialog(QWidget):
         host = QWidget()
         host.setFixedHeight(74)
         host.setStyleSheet(
-            "QWidget{background:rgba(255,255,255,0.02);"
-            "border-bottom:1px solid rgba(255,255,255,0.10);}"
+            f"QWidget{{background:rgba({_glass_ink()},0.02);"
+            f"border-bottom:1px solid rgba({_glass_ink()},0.10);}}"
         )
         lay = QHBoxLayout(host)
         lay.setContentsMargins(26, 14, 26, 14)
@@ -10775,12 +10956,13 @@ class CosineDeepAnalysisDialog(QWidget):
         lay.addWidget(export)
 
         close = QPushButton("✕")
+        close.setObjectName("cosineAnalysisClose")
         close.setCursor(Qt.CursorShape.PointingHandCursor)
         close.setFixedSize(32, 32)
         close.setFont(make_font(13, 400))
         close.setStyleSheet(
-            f"QPushButton{{color:{tokens.muted};background:rgba(255,255,255,0.03);"
-            "border:1px solid rgba(255,255,255,0.18);border-radius:16px;}"
+            f"QPushButton{{color:{tokens.muted};background:rgba({_glass_ink()},0.03);"
+            f"border:1px solid rgba({_glass_ink()},0.18);border-radius:16px;}}"
             f"QPushButton:hover{{color:{tokens.text_primary};"
             f"border-color:{COSINE_TEAL_DIM};}}"
         )
@@ -10791,8 +10973,8 @@ class CosineDeepAnalysisDialog(QWidget):
     def _build_tabbar(self) -> QWidget:
         host = QWidget()
         host.setStyleSheet(
-            "QWidget{background:rgba(255,255,255,0.015);"
-            "border-bottom:1px solid rgba(255,255,255,0.08);}"
+            f"QWidget{{background:rgba({_glass_ink()},0.015);"
+            f"border-bottom:1px solid rgba({_glass_ink()},0.08);}}"
         )
         lay = QHBoxLayout(host)
         lay.setContentsMargins(20, 10, 20, 10)
@@ -10812,8 +10994,8 @@ class CosineDeepAnalysisDialog(QWidget):
         host = QWidget()
         host.setFixedHeight(44)
         host.setStyleSheet(
-            "QWidget{background:rgba(255,255,255,0.015);"
-            "border-top:1px solid rgba(255,255,255,0.08);}"
+            f"QWidget{{background:rgba({_glass_ink()},0.015);"
+            f"border-top:1px solid rgba({_glass_ink()},0.08);}}"
         )
         lay = QHBoxLayout(host)
         lay.setContentsMargins(26, 10, 26, 10)
@@ -10898,7 +11080,7 @@ class CosineDeepAnalysisDialog(QWidget):
                     f"border:1px solid transparent;border-radius:{RADIUS_SM}px;"
                     "padding:9px 15px;}"
                     f"QPushButton:hover{{color:{tokens.text_primary};"
-                    "background:rgba(255,255,255,0.05);}"
+                    f"background:rgba({_glass_ink()},0.05);}}"
                 )
 
     # ------------------------------------------------------------- body core
@@ -10988,8 +11170,8 @@ class CosineDeepAnalysisDialog(QWidget):
             tile = QFrame()
             tile.setFrameShape(QFrame.Shape.NoFrame)
             tile.setStyleSheet(
-                "QFrame{background:rgba(255,255,255,0.025);"
-                f"border:1px solid rgba(255,255,255,0.10);border-radius:{RADIUS_MD}px;}}"
+                f"QFrame{{background:rgba({_glass_ink()},0.025);"
+                f"border:1px solid rgba({_glass_ink()},0.10);border-radius:{RADIUS_MD}px;}}"
             )
             inner = QVBoxLayout(tile)
             inner.setContentsMargins(15, 13, 15, 13)
@@ -11030,8 +11212,8 @@ class CosineDeepAnalysisDialog(QWidget):
             colour = tokens.amber
         else:
             host.setStyleSheet(
-                "QFrame{background:rgba(255,255,255,0.025);"
-                f"border:1px dashed rgba(255,255,255,0.13);border-radius:{RADIUS_SM}px;}}"
+                f"QFrame{{background:rgba({_glass_ink()},0.025);"
+                f"border:1px dashed rgba({_glass_ink()},0.13);border-radius:{RADIUS_SM}px;}}"
             )
             colour = tokens.muted
         inner = QVBoxLayout(host)
@@ -11059,8 +11241,8 @@ class CosineDeepAnalysisDialog(QWidget):
         host = QFrame()
         host.setFrameShape(QFrame.Shape.NoFrame)
         host.setStyleSheet(
-            "QFrame{background:rgba(255,255,255,0.015);"
-            f"border:1px solid rgba(255,255,255,0.12);border-radius:{RADIUS_MD}px;}}"
+            f"QFrame{{background:rgba({_glass_ink()},0.015);"
+            f"border:1px solid rgba({_glass_ink()},0.12);border-radius:{RADIUS_MD}px;}}"
         )
         grid = QGridLayout(host)
         grid.setContentsMargins(12, 0, 12, 0)
@@ -11076,7 +11258,7 @@ class CosineDeepAnalysisDialog(QWidget):
             cell.setFont(make_font(9.5, 700, spacing=1.0))
             cell.setStyleSheet(
                 f"QLabel{{color:{tokens.muted};background:{header_bg};border:none;"
-                "border-bottom:1px solid rgba(255,255,255,0.12);padding:10px 0;}"
+                f"border-bottom:1px solid rgba({_glass_ink()},0.12);padding:10px 0;}}"
             )
             grid.addWidget(cell, 0, column)
 
@@ -11086,7 +11268,7 @@ class CosineDeepAnalysisDialog(QWidget):
                 "sel": mix(COSINE_TEAL, 12, tokens.surface),
                 "hold": mix(tokens.amber, 9, tokens.surface),
             }.get(tint, "transparent")
-            border = "border-bottom:1px solid rgba(255,255,255,0.07);"
+            border = f"border-bottom:1px solid rgba({_glass_ink()},0.07);"
             for column, value in enumerate(row):
                 if isinstance(value, QWidget):
                     holder = QWidget()
@@ -11407,8 +11589,8 @@ class CosineDeepAnalysisDialog(QWidget):
                 item = QFrame()
                 item.setFrameShape(QFrame.Shape.NoFrame)
                 item.setStyleSheet(
-                    "QFrame{background:rgba(255,255,255,0.025);"
-                    f"border:1px solid rgba(255,255,255,0.10);border-radius:{RADIUS_SM}px;}}"
+                    f"QFrame{{background:rgba({_glass_ink()},0.025);"
+                    f"border:1px solid rgba({_glass_ink()},0.10);border-radius:{RADIUS_SM}px;}}"
                 )
                 row = QHBoxLayout(item)
                 row.setContentsMargins(12, 9, 12, 9)
@@ -11471,9 +11653,9 @@ class CosineDeepAnalysisDialog(QWidget):
             )
             block = QFrame()
             block.setFrameShape(QFrame.Shape.NoFrame)
-            edge = COSINE_TEAL if is_selected else "rgba(255,255,255,0.10)"
+            edge = COSINE_TEAL if is_selected else f"rgba({_glass_ink()},0.10)"
             block.setStyleSheet(
-                "QFrame{background:rgba(255,255,255,0.025);"
+                f"QFrame{{background:rgba({_glass_ink()},0.025);"
                 f"border:1px solid {edge};border-radius:{RADIUS_MD}px;}}"
             )
             inner = QVBoxLayout(block)
@@ -11659,9 +11841,21 @@ class CosineDeepAnalysisDialog(QWidget):
 
     # ------------------------------------------------------------- lifecycle
     def open_overlay(self) -> None:
+        if self.isVisible():
+            self.raise_()
+            self.setFocus()
+            return
+        self.prepare_overlay()
+        self.reveal_overlay()
+
+    def prepare_overlay(self) -> None:
+        """Prepare the selected held episode before analysis is revealed."""
+        self.hide()
         self.setGeometry(self._page.rect())
         self._backdrop = self._grab_blurred()
         self.refresh_body()
+
+    def reveal_overlay(self) -> None:
         self.show()
         self.raise_()
         self.setFocus()
@@ -11675,7 +11869,8 @@ class CosineDeepAnalysisDialog(QWidget):
         CSS ``backdrop-filter`` the HTML original used."""
 
         try:
-            source = self._page.grab()
+            from .navigation import grab_preparation_background
+            source = grab_preparation_background(self._page)
             if source.isNull():
                 return None
             scene = QGraphicsScene()
@@ -11696,9 +11891,7 @@ class CosineDeepAnalysisDialog(QWidget):
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
-        if self._backdrop is not None:
-            painter.drawPixmap(self.rect(), self._backdrop)
-        painter.fillRect(self.rect(), QColor(4, 8, 16, 140))
+        paint_analysis_backdrop(painter, self.rect(), self._backdrop, live_tokens())
         painter.end()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
@@ -11827,27 +12020,40 @@ class CosineLivePage(QWidget):
         lay.addLayout(text)
         lay.addStretch(1)
 
+        self._refresh_button = showcase_outline_button("REFRESH")
+        self._refresh_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._refresh_button.clicked.connect(self.refresh_requested.emit)
+        lay.addWidget(self._refresh_button, 0, Qt.AlignmentFlag.AlignVCenter)
+
         open_analysis = _cosine_button("Open Analysis")
         open_analysis.clicked.connect(self._open_analysis)
         lay.addWidget(open_analysis, 0, Qt.AlignmentFlag.AlignVCenter)
         return host
 
     def _open_analysis(self) -> None:
-        self._overlay.open_overlay()
+        overlay = self._overlay
+        if overlay.isVisible():
+            overlay.raise_()
+            overlay.setFocus()
+            return
+        preparer = getattr(self, "_surface_preparer", None)
+        if callable(preparer):
+            preparer(
+                owner=self,
+                key="cosine-analysis",
+                title="Preparing COSINE Analysis",
+                subtitle="Loading streaming regulation evidence...",
+                prepare=overlay.prepare_overlay,
+                reveal=overlay.reveal_overlay,
+                cleanup=overlay.close_overlay,
+            )
+        else:
+            overlay.open_overlay()
 
     # ------------------------------------------------------------- rendering
     @staticmethod
     def _clear(layout: QVBoxLayout) -> None:
-        while layout.count():
-            item = layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
-            else:
-                child = item.layout()
-                if child is not None:
-                    CosineLivePage._clear(child)
+        _clear_layout(layout)
 
 
 
@@ -12478,6 +12684,7 @@ class CosineLivePage(QWidget):
 
     def set_refreshing(self, refreshing: bool) -> None:
         self._refreshing = refreshing
+        self._refresh_button.setEnabled(not refreshing)
         self._overlay._refresh_button.setEnabled(not refreshing)
 
     def _render_episode_strip(self) -> None:
@@ -12928,6 +13135,12 @@ class ControlPage(QWidget):
         self._latest_blacklist_live_view = None
         self._latest_sine_live_view = None
         self._latest_mirl_live_view = None
+        self._mirl_display = EvidenceCountdown()
+        self._sine_ring_progress = 0.0
+        self._ring_organ_progress = {"mine": None, "cosine": None}
+        self._ring_organ_generations = {}
+        self._ring_session_id = None
+        self._ring_engine_status = "IDLE"
         self._resource_sine_text = "—"
         self._escalation_base_tokens = DEFAULT_THEME
         self._active_normal_break_fact = None
@@ -13491,7 +13704,7 @@ class ControlPage(QWidget):
         caption, field = _COSINE_TIMER_SOURCES.get(phase, ("", ""))
         rows["timer_source"].setText(caption or "\u2014")
         rows["timer"].setText(
-            _cosine_clock(_cosine_field(snapshot, field)) if field else "\u2014"
+            self._cosine_live_card._countdown_display.text() if field else "\u2014"
         )
         rows["intent_gate"].setText(
             self._request_state(
@@ -13548,7 +13761,7 @@ class ControlPage(QWidget):
         caption, field = _MINE_TIMER_SOURCES.get(phase, ("", None))
         rows["timer_source"].setText(caption or "\u2014")
         rows["timer"].setText(
-            _cosine_clock(_cosine_field(snapshot, field)) if field else "\u2014"
+            self._mine_live_card._countdown_display.text() if field else "\u2014"
         )
         rows["mine1"].setText(
             self._request_state(
@@ -13630,6 +13843,12 @@ class ControlPage(QWidget):
         active = text == "ACTIVE"
         paused = text == "PAUSED"
         running = active or paused
+        self._ring_engine_status = text
+        if not running:
+            self._ring_organ_progress = {"mine": None, "cosine": None}
+            self._ring_organ_generations.clear()
+            self._ring_session_id = None
+            self._sine_ring_progress = 0.0
 
         self._status.setText(f"ENGINE {text}")
         self._status.setProperty(
@@ -13666,6 +13885,7 @@ class ControlPage(QWidget):
                 self._session_elapsed.invalidate()
                 self._ring.set_elapsed_seconds(0)
                 self._ring.set_progress(0.0)
+        self._render_engine_organ_ring()
 
     def _advance_session_clock(self) -> None:
         if self._session_elapsed.isValid():
@@ -13770,6 +13990,18 @@ class ControlPage(QWidget):
                 self._normal_break_stop_in_flight = False
                 self._normal_break_stop.setEnabled(True)
 
+    def normal_break_command_completed(self, result: object) -> None:
+        if not isinstance(result, dict) or result.get("action") != "stop" or result.get("accepted"):
+            return
+        fact = self._active_normal_break_fact
+        payload = result.get("payload", {})
+        if fact is None or any(self._value(fact, key) != payload.get(key)
+                               for key in ("break_id", "generation", "episode_uid", "candidate_uid")):
+            return
+        self._normal_break_stop_in_flight = False
+        self.refresh_normal_break()
+        self._normal_break_hint.setText(str(result.get("message") or "Stop not accepted"))
+
     def _normal_break_matches(self, fact: object) -> bool:
         current = self._active_normal_break_fact
         if current is None:
@@ -13809,7 +14041,7 @@ class ControlPage(QWidget):
         self._resource_reason.setText("No managed resource is in the foreground.")
         self._dwell_track.set_progress(0.0)
         self._dwell_value.setText("\u2014 / \u2014")
-        self._ring.set_progress(0.0)
+        self._set_sine_ring_progress(0.0)
 
     def reset_runtime_presentation(self) -> None:
         """Retire all session-owned Control-page facts at a terminal boundary.
@@ -13819,6 +14051,9 @@ class ControlPage(QWidget):
         when session-loss, failure and stop signals describe the same exit.
         """
 
+        self._ring_organ_progress = {"mine": None, "cosine": None}
+        self._sine_ring_progress = 0.0
+        self._ring.set_progress(0.0)
         self._clear_current_resource_presentation()
         self.render_sine(None)
         self.render_mirl(None)
@@ -13874,13 +14109,14 @@ class ControlPage(QWidget):
     def render_cosine(self, snapshot: object) -> None:
         """Render the newest ``CosineSnapshot`` into the COSINE LIVE card.
 
-        Transport only: the card formats backend truth and owns no clock.  A
+        Transport only: the card's clock projects backend timing anchors. A
         ``None`` snapshot (session stop/reset) returns it to inactive so no
         stale COSINE reading can outlive the episode that produced it.
         """
 
         self._cosine_live_card.render(snapshot)
         self._render_cosine_escalation(snapshot)
+        self._receive_engine_ring_progress("cosine", snapshot)
 
     def render_handover(self, payload: object) -> None:
         """Render the prepared Mr Hand view without owning a clock or decision."""
@@ -13939,6 +14175,58 @@ class ControlPage(QWidget):
 
         self._mine_live_card.render(snapshot)
         self._render_mine_escalation(snapshot)
+        self._receive_engine_ring_progress("mine", snapshot)
+
+    def _receive_engine_ring_progress(self, organ: str, snapshot: object) -> None:
+        """Consume only the existing authority signal; no timer or callback."""
+        if snapshot is None:
+            self._ring_organ_progress[organ] = None
+        elif self._ring_engine_status in {"ACTIVE", "PAUSED"}:
+            session_provider = getattr(self._engine, "current_session_id", None)
+            session_id = session_provider() if callable(session_provider) else None
+            parent_id = self._value(snapshot, "parent_session_id" if organ == "mine" else "session_id")
+            generation = self._value(snapshot, "generation")
+            if session_id is None or parent_id != session_id or type(generation) is not int:
+                return
+            if session_id != self._ring_session_id:
+                self._ring_organ_progress = {"mine": None, "cosine": None}
+                self._ring_organ_generations.clear()
+                self._ring_session_id = session_id
+            if generation < self._ring_organ_generations.get(organ, -1):
+                return
+            self._ring_organ_generations[organ] = generation
+            progress = self._value(snapshot, "timer_progress_fraction")
+            self._ring_organ_progress[organ] = (
+                float(progress) if type(progress) in {int, float}
+                and math.isfinite(progress) and 0 <= progress < 1 else None
+            )
+        self._render_engine_organ_ring()
+
+    def _set_sine_ring_progress(self, fraction: float) -> None:
+        """Preserve the existing SINE arc projection as one visual input."""
+        self._sine_ring_progress = fraction
+        self._render_engine_organ_ring()
+
+    def retire_engine_ring(self) -> None:
+        """Fence the visual consumer when the application is shutting down."""
+        self._ring_engine_status = "SHUTDOWN"
+        self._ring_organ_progress = {"mine": None, "cosine": None}
+        self._sine_ring_progress = 0.0
+        self._render_engine_organ_ring()
+
+    def _render_engine_organ_ring(self) -> None:
+        if self._ring_engine_status == "PAUSED":
+            return  # Preserve the existing paused, stationary SINE arc.
+        if self._ring_engine_status != "ACTIVE":
+            self._ring.set_progress(0.0)
+            return
+        # Keep SINE's existing priority while its escalation clock runs.
+        if self._sine_actively_counting_deadline() is not None:
+            progress = self._sine_ring_progress
+        else:
+            progressing = [value for value in self._ring_organ_progress.values() if value is not None]
+            progress = max(progressing) if progressing else self._sine_ring_progress
+        self._ring.set_progress(progress)
 
     def render_today_session_health(self, snapshot: object) -> None:
         """Place three already-calculated Today Health integers into labels.
@@ -14011,7 +14299,7 @@ class ControlPage(QWidget):
         phase = self._enum_text(self._value(payload, "phase"), "IDLE")
         timing_source = str(self._value(payload, "stage_2_timing_source", "") or "—")
         remaining_raw = self._value(payload, "next_deadline_seconds")
-        timer_text = self._format_seconds(remaining_raw)
+        timer_text = countdown(remaining_raw) if remaining_raw is not None else "--:--"
         lambda_value = self._value(payload, "ebbinghaus_lambda_per_minute")
         t_star = self._value(payload, "ebbinghaus_t_star_minutes")
         popup = self._enum_text(self._value(payload, "popup_state"), "NONE")
@@ -14033,8 +14321,12 @@ class ControlPage(QWidget):
         self._escalation_pager.updateGeometry()
         self._render_current_authority_interval()
 
-        # A one-second console cadence makes VS Code's terminal useful without
-        # flooding it at the controller's 250 ms telemetry polling rate.
+        # Publish the current clock immediately, rather than briefly painting
+        # the older remaining value carried by a delayed Monitor snapshot.
+        self._project_sine_countdown()
+
+        # These are Monitor snapshots, not display frames; they may omit
+        # integers. The 200 ms display heartbeat deliberately does not log.
         try:
             remaining_second = (
                 None if remaining_raw is None else max(0, int(float(remaining_raw)))
@@ -14054,7 +14346,7 @@ class ControlPage(QWidget):
         if signature != self._last_sine_console_signature:
             self._last_sine_console_signature = signature
             print(
-                "[MYELIN][SINE TIMER] "
+                "[MYELIN][MONITOR SNAPSHOT][SINE TIMER] "
                 f"stage={stage} | phase={phase} | next={timer_text} | "
                 f"timing={timing_source} | lambda={self._sine_lambda.text()} | "
                 f"t*={self._sine_t_star.text()} | popup={popup}",
@@ -14069,6 +14361,14 @@ class ControlPage(QWidget):
         """
 
         self._latest_mirl_live_view = view
+        phase = self._value(view, "phase")
+        phase = str(getattr(phase, "value", phase) or "")
+        prefix = {"RETURN_VERIFICATION": "return_verification", "CLOSURE_CONFIRMATION": "closure_confirmation"}.get(phase)
+        value = None
+        if prefix:
+            value = max(0.0, float(self._value(view, prefix + "_target_seconds", 0))
+                        - float(self._value(view, prefix + "_elapsed_seconds", 0)))
+        self._mirl_display.update((self._value(view, "episode_id"), self._value(view, "attempt_id"), phase), value)
         self._sync_resource_timer()
 
     def _set_resource_sine_text(self, text: str) -> None:
@@ -14097,7 +14397,7 @@ class ControlPage(QWidget):
             return None
         if target <= 0.0:
             return None
-        return caption, self._format_seconds(max(0.0, target - elapsed))
+        return caption, countdown(self._mirl_display.value())
 
     def _sync_resource_timer(self) -> None:
         """One readout: MIRL return/closure countdown, else the SINE timer."""
@@ -14118,7 +14418,7 @@ class ControlPage(QWidget):
         """
 
         sine = self._latest_sine_live_view
-        if sine is None:
+        if sine is None or self._engine_paused:
             return None
         # A resolved / cancelled / stopped episode keeps its old stage and
         # deadline fields; the backend reports no next deadline for it, so the
@@ -14153,11 +14453,21 @@ class ControlPage(QWidget):
         SINE, never invents a stage, never writes back to the engine.
         """
 
+        self._refresh_organ_countdown_copies()
+        self._sync_resource_timer()
         deadline_ns = self._sine_actively_counting_deadline()
         if deadline_ns is None:
             return
         remaining = max(0.0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)
-        self._set_resource_sine_text(self._format_seconds(remaining))
+        self._set_resource_sine_text(countdown(remaining))
+
+    def _refresh_organ_countdown_copies(self) -> None:
+        """The escalation pages share the live cards' read-only clock faces."""
+        for card, rows in ((self._cosine_live_card, self._esc_cosine),
+                           (self._mine_live_card, self._esc_mine)):
+            snapshot = card._countdown_snapshot
+            if snapshot is not None and bool(_cosine_field(snapshot, "available", False)):
+                rows["timer"].setText(card._countdown_display.text())
 
     def _render_current_authority_interval(self) -> None:
         """Project the current owner without inventing any timing value."""
@@ -14174,7 +14484,7 @@ class ControlPage(QWidget):
             if protected or phase == "PROTECTED RED":
                 self._dwell_track.set_progress(1.0, "red")
                 self._dwell_value.setText("RETURN REQUIRED")
-                self._ring.set_progress(1.0)
+                self._set_sine_ring_progress(1.0)
                 return
 
             target_field = {
@@ -14204,14 +14514,14 @@ class ControlPage(QWidget):
                     f"{self._format_seconds(elapsed)} / "
                     f"{self._format_seconds(target)}"
                 )
-                self._ring.set_progress(fraction)
+                self._set_sine_ring_progress(fraction)
                 return
 
         blacklist = self._latest_blacklist_live_view
         if blacklist is None:
             self._dwell_track.set_progress(0.0)
             self._dwell_value.setText("\u2014 / \u2014")
-            self._ring.set_progress(0.0)
+            self._set_sine_ring_progress(0.0)
             return
 
         if bool(self._value(blacklist, "sine_watch_inhibited", False)):
@@ -14219,7 +14529,7 @@ class ControlPage(QWidget):
             # Normal SINE authority during Study/COSECANT ownership.
             self._dwell_track.set_progress(0.0)
             self._dwell_value.setText("\u2014 / \u2014")
-            self._ring.set_progress(0.0)
+            self._set_sine_ring_progress(0.0)
             return
         blacklist_state = self._enum_text(
             self._value(blacklist, "state"), "INACTIVE"
@@ -14232,7 +14542,7 @@ class ControlPage(QWidget):
             # that target is policy, not evidence that a dwell is underway.
             self._dwell_track.set_progress(0.0)
             self._dwell_value.setText("\u2014 / \u2014")
-            self._ring.set_progress(0.0)
+            self._set_sine_ring_progress(0.0)
             return
 
         elapsed = self._value(blacklist, "dwell_elapsed_seconds", 0.0)
@@ -14257,7 +14567,7 @@ class ControlPage(QWidget):
             if target_value > 0.0
             else self._format_seconds(elapsed)
         )
-        self._ring.set_progress(fraction)
+        self._set_sine_ring_progress(fraction)
 
     def _highlight_sine_stage(self, stage: object) -> None:
         """Mark the chip SINE reports as current; never infer one locally."""
@@ -14848,6 +15158,114 @@ class _NormalSinePresentationCoordinator:
         self._mine_atmosphere = None
 
 
+class _RunningStateLockSurface(QWidget):
+    """One analysis-local scrim; its existing Close control stays accessible."""
+
+    def __init__(self, host: QWidget, close_button: QPushButton) -> None:
+        super().__init__(host)
+        self.close_button = close_button
+        self._close_region = QRegion()
+        self.setObjectName("myelinRunningStateLock")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("MYELIN LOCKED")
+        self.card = QFrame(self)
+        self.card.setObjectName("runningStateLockCard")
+        self.card.setMinimumWidth(460)
+        self.card.setMaximumWidth(560)
+        self.card.setStyleSheet(
+            "QFrame#runningStateLockCard { background: #101821;"
+            " border: 1px solid #29404f; border-radius: 14px; }"
+            "QLabel { color: #edf7fb; border: 0; background: transparent; }"
+            "QPushButton { color: #edf7fb; background: #111824;"
+            " border: 1px solid #35495d; border-radius: 8px; padding: 11px 20px; }"
+            "QPushButton:hover, QPushButton:focus { border-color: #51bfd3; }"
+            "QPushButton:disabled { color: #81929c; border-color: #29404f; }"
+        )
+        card_shadow(self.card)
+        layout = QVBoxLayout(self.card)
+        layout.setContentsMargins(32, 30, 32, 26)
+        layout.setSpacing(14)
+        self.title_label = QLabel("MYELIN LOCKED", self.card)
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.title_label.setWordWrap(True)
+        self.title_label.setStyleSheet("font-size: 20px; font-weight: 700; letter-spacing: 1px;")
+        self.body_label = QLabel(self.card)
+        self.body_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.body_label.setWordWrap(True)
+        self.body_label.setStyleSheet("font-size: 14px; color: #b8cad4;")
+        self.stop_button = QPushButton("STOP MYELIN", self.card)
+        self.stop_button.setAccessibleName("STOP MYELIN")
+        self.stop_button.setAccessibleDescription("Stop the engine and keep Control Station open")
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.body_label)
+        layout.addSpacing(8)
+        layout.addWidget(self.stop_button, alignment=Qt.AlignmentFlag.AlignHCenter)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(20, 20, 20, 20)
+        outer.addStretch(1)
+        outer.addWidget(self.card, alignment=Qt.AlignmentFlag.AlignHCenter)
+        outer.addStretch(1)
+        # The Close button keeps its original parent, slot and keyboard action.
+        # Observe its layout ancestors because moving a panel does not emit a
+        # Move event on the button itself.
+        ancestor = close_button
+        while ancestor is not None:
+            ancestor.installEventFilter(self)
+            if ancestor is host:
+                break
+            ancestor = ancestor.parentWidget()
+        self.hide()
+
+    def set_status(self, status: EngineStatus) -> None:
+        body = {
+            EngineStatus.ACTIVE: "MYELIN is currently running.\nMonitoring remains active.",
+            EngineStatus.PAUSED: "MYELIN is currently paused.\nThe session remains active.",
+            EngineStatus.STOPPING: "MYELIN is stopping.\nPlease wait.",
+        }.get(status, "The session remains active.")
+        self.body_label.setText(body)
+        self.setAccessibleDescription(body)
+        self.stop_button.setEnabled(status in LifecycleController.STOPPABLE)
+
+    def present(self) -> None:
+        self.setGeometry(self.parentWidget().rect())
+        self._update_close_mask()
+        self.show()
+        self.raise_()
+
+    def _update_close_mask(self) -> None:
+        if sip.isdeleted(self.close_button):
+            return
+        hole = self.close_button.rect().translated(
+            self.close_button.mapTo(self.parentWidget(), QPoint(0, 0)) - self.pos()
+        ).intersected(self.rect())
+        region = QRegion(self.rect()).subtracted(QRegion(hole))
+        if region != self._close_region:
+            self._close_region = region
+            self.setMask(region)
+
+    def dismiss(self) -> None:
+        self.hide()
+
+    def focus_stop(self) -> None:
+        target = self.stop_button if self.stop_button.isEnabled() else self
+        target.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if watched is self.parentWidget() and event.type() == QEvent.Type.Resize:
+            self.setGeometry(watched.rect())
+        if event.type() in (QEvent.Type.Move, QEvent.Type.Resize,
+                            QEvent.Type.LayoutRequest, QEvent.Type.Show):
+            self._update_close_mask()
+        return False
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        self._update_close_mask()
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(4, 9, 13, 218))
+        painter.end()
+        super().paintEvent(event)
+
+
 class ControlStationWindow(QMainWindow):
     """The main MYELIN window and composition root.
 
@@ -14858,6 +15276,9 @@ class ControlStationWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self._shutdown_is_authorized = False
+        self._session_lock_eligible = False
+        self._analysis_locks: dict[int, _RunningStateLockSurface] = {}
+        self._context_lock_filter_installed = False
         self._escalation_seen_events: set[tuple] = set()
         self._escalation_parent_session_id = None
         self._escalation_pending_page: int | None = None
@@ -14896,6 +15317,7 @@ class ControlStationWindow(QMainWindow):
         self._create_pages()
         self._create_shell()
         self._connect_components()
+        self._install_context_lock_filter()
         self._install_cosine_popup_receipt_filter()
         self._restore_preferences()
 
@@ -15050,6 +15472,246 @@ class ControlStationWindow(QMainWindow):
         self.setCentralWidget(self.shell)
         self.get_chart.register_button(self.shell.get_chart_button)
         self.get_chart.register_poster(NeonPosterWindow(parent=self))
+
+    def _install_context_lock_filter(self) -> None:
+        """Observe only protected analysis input/show paths, independently of COSINE."""
+        app = QApplication.instance()
+        if app is not None and not self._context_lock_filter_installed:
+            app.installEventFilter(self)
+            self._context_lock_filter_installed = True
+
+    def _protected_analysis_surfaces(self) -> tuple[QWidget, ...]:
+        candidates = (
+            getattr(self.pages.live_mirl, "_dashboard_dialog", None),
+            getattr(self.pages.mine, "_analysis_overlay", None),
+            getattr(self.pages.cosine, "_overlay", None),
+            getattr(self.pages.secant_dashboard, "analysis", None),
+        )
+        return tuple(surface for surface in candidates
+                     if isinstance(surface, QWidget) and not sip.isdeleted(surface))
+
+    def _analysis_for_owner(self, owner: QWidget):
+        for page, attribute in (
+            (self.pages.live_mirl, "_dashboard_dialog"),
+            (self.pages.mine, "_analysis_overlay"),
+            (self.pages.cosine, "_overlay"),
+            (self.pages.secant_dashboard, "analysis"),
+        ):
+            if owner is page:
+                return getattr(page, attribute, None)
+        return None
+
+    def _ensure_analysis_lock(self, surface: QWidget) -> _RunningStateLockSurface:
+        key = id(surface)
+        existing = self._analysis_locks.get(key)
+        if existing is not None and not sip.isdeleted(existing):
+            return existing
+        names = ("mirlDashboardClose", "mineAnalysisClose",
+                 "cosineAnalysisClose", "dashboardClose")
+        close = next((button for name in names
+                      if (button := surface.findChild(QPushButton, name)) is not None), None)
+        if close is None:
+            raise RuntimeError("Protected analysis has no established Close control")
+        lock = _RunningStateLockSurface(surface, close)
+        lock.stop_button.clicked.connect(self.lifecycle.request_stop)
+        self._analysis_locks[key] = lock
+        surface.destroyed.connect(lambda _object=None, identity=key:
+                                  self._analysis_locks.pop(identity, None))
+        return lock
+
+    def _reconcile_context_locks(self, *_args) -> None:
+        """Session readiness is eligibility, never permission to block the shell."""
+        status = self.engine.status
+        if (status in (EngineStatus.IDLE, EngineStatus.STARTING, EngineStatus.STOPPED)
+                or not self.engine.is_session_active()):
+            self._session_lock_eligible = False
+        elif status is EngineStatus.ACTIVE:
+            self._session_lock_eligible = True
+        surfaces = self._protected_analysis_surfaces()
+        current = {id(surface) for surface in surfaces}
+        for key, lock in tuple(self._analysis_locks.items()):
+            if sip.isdeleted(lock):
+                self._analysis_locks.pop(key, None)
+            elif key not in current:
+                # COSINE theme reconstruction retires its old instance.
+                lock.dismiss()
+                lock.deleteLater()
+                self._analysis_locks.pop(key, None)
+        for surface in surfaces:
+            self._sync_analysis_lock(surface)
+
+    def _sync_analysis_lock(self, surface: QWidget, *, before_reveal: bool = False) -> None:
+        if surface is None or sip.isdeleted(surface):
+            return
+        lock = self._analysis_locks.get(id(surface))
+        if not self._session_lock_eligible or not (surface.isVisible() or before_reveal):
+            if lock is not None and not sip.isdeleted(lock):
+                focused = QApplication.focusWidget()
+                had_focus = focused is lock or (focused is not None and lock.isAncestorOf(focused))
+                lock.dismiss()
+                if had_focus and surface.isVisible() and QApplication.activeWindow() is self:
+                    surface.setFocus(Qt.FocusReason.OtherFocusReason)
+            return
+        lock = self._ensure_analysis_lock(surface)
+        first = lock.isHidden()
+        lock.set_status(self.engine.status)
+        if first:
+            # Only auxiliaries belonging to this analysis may be dismissed.
+            # Ordinary shell/settings/runtime windows are never enumerated.
+            for menu in surface.findChildren(QMenu):
+                if menu.isVisible():
+                    menu.close()
+            for combo in surface.findChildren(QComboBox):
+                combo.hidePopup()
+            for dialog in surface.findChildren(QDialog):
+                if dialog.isVisible():
+                    dialog.reject()
+        lock.present()
+        if first and surface.isVisible():
+            self._focus_analysis_lock(surface)
+
+    def _prepare_protected_surface(self, *, owner: QWidget, key: str, title: str,
+                                   subtitle: str, prepare: Callable[[], None],
+                                   reveal: Callable[[], None], cleanup: Callable[[], None]) -> bool:
+        """Add local presentation to Phase 4 without changing its readiness owner."""
+        def reconcile_before_reveal() -> None:
+            self._reconcile_context_locks()
+            surface = self._analysis_for_owner(owner)
+            if surface is not None:
+                self._sync_analysis_lock(surface, before_reveal=True)
+
+        def prepare_locked() -> None:
+            prepare()
+            reconcile_before_reveal()
+
+        def reveal_locked() -> None:
+            reconcile_before_reveal()
+            reveal()
+            surface = self._analysis_for_owner(owner)
+            if surface is not None:
+                self._sync_analysis_lock(surface)
+                self._focus_analysis_lock(surface)
+
+        return self.navigation.prepare_surface(
+            owner=owner, key=key, title=title, subtitle=subtitle,
+            prepare=prepare_locked, reveal=reveal_locked, cleanup=cleanup,
+        )
+
+    def _context_confirmation(self):
+        return next((surface for surface in self.findChildren(LifecycleConfirmSurface)
+                     if surface.is_presented and surface.isVisible()), None)
+
+    def _focus_analysis_lock(self, surface: QWidget) -> None:
+        lock = self._analysis_locks.get(id(surface))
+        if lock is None or not lock.isVisible():
+            return
+        active = QApplication.activeWindow()
+        if active is not None and active is not self:
+            return  # Runtime dialogs keep their focus; never activate the host.
+        if self._context_confirmation() is not None:
+            return
+        focus = QApplication.focusWidget()
+        if focus is lock.close_button:
+            return
+        lock.focus_stop()
+
+    def _protected_surface_for_widget(self, widget: QWidget):
+        return next((surface for surface in self._protected_analysis_surfaces()
+                     if surface is widget or surface.isAncestorOf(widget)), None)
+
+    def _context_lock_input_filter(self, watched, event) -> bool:
+        kind = event.type()
+        # Show catches lazy MIRL and direct COSINE theme replacement before
+        # their first paint; ordinary Control Station Show is never a trigger.
+        if isinstance(watched, QWidget) and kind in (QEvent.Type.Show, QEvent.Type.Hide):
+            if watched in self._protected_analysis_surfaces():
+                self._reconcile_context_locks()
+                self._sync_analysis_lock(watched, before_reveal=kind == QEvent.Type.Show)
+        if not self._session_lock_eligible:
+            return False
+        inputs = {
+            QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
+            QEvent.Type.MouseButtonDblClick, QEvent.Type.MouseMove,
+            QEvent.Type.Wheel, QEvent.Type.ContextMenu, QEvent.Type.KeyPress,
+            QEvent.Type.KeyRelease, QEvent.Type.Shortcut, QEvent.Type.ShortcutOverride,
+            QEvent.Type.FocusIn, QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate,
+            QEvent.Type.TouchEnd, QEvent.Type.TabletPress, QEvent.Type.TabletMove,
+            QEvent.Type.TabletRelease, QEvent.Type.DragEnter, QEvent.Type.DragMove,
+            QEvent.Type.Drop, QEvent.Type.InputMethod,
+        }
+        if kind not in inputs and kind != QEvent.Type.Show:
+            return False
+        widget = watched
+        while widget is not None and not isinstance(widget, QWidget):
+            widget = widget.parent()
+        if widget is None:
+            return False
+        surface = self._protected_surface_for_widget(widget)
+        if surface is None or not surface.isVisible():
+            return False
+        lock = self._analysis_locks.get(id(surface))
+        if lock is None or not lock.isVisible():
+            return False
+        if kind == QEvent.Type.Show:
+            if isinstance(watched, QDialog):
+                watched.reject()
+            elif isinstance(watched, QMenu):
+                watched.close()
+            elif isinstance(watched, QWidget) and watched.windowType() == Qt.WindowType.Popup:
+                parent = watched.parentWidget()
+                if isinstance(parent, QComboBox):
+                    parent.hidePopup()
+                else:
+                    watched.hide()
+            return False
+        if isinstance(event, QKeyEvent) and event.modifiers() & Qt.KeyboardModifier.AltModifier:
+            if event.key() in (Qt.Key.Key_F4, Qt.Key.Key_Space):
+                return False
+        confirmation = self._context_confirmation()
+        if confirmation is not None:
+            if kind == QEvent.Type.FocusIn and QApplication.activeWindow() is self:
+                confirmation.cancel_button.setFocus(Qt.FocusReason.OtherFocusReason)
+            event.accept()
+            return True
+        close = widget is lock.close_button or lock.close_button.isAncestorOf(widget)
+        inside = widget is lock or lock.isAncestorOf(widget)
+        if isinstance(event, QKeyEvent):
+            key = event.key()
+            if key == Qt.Key.Key_Escape:
+                return False  # Propagate to the analysis's EXISTING dismissal.
+            if kind == QEvent.Type.ShortcutOverride:
+                event.accept()
+                return True
+            if kind == QEvent.Type.KeyPress and key in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+                if QApplication.focusWidget() is lock.close_button:
+                    lock.focus_stop()
+                else:
+                    lock.close_button.setFocus(Qt.FocusReason.TabFocusReason)
+                event.accept()
+                return True
+            if close:
+                return False
+            if inside and key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                if kind == QEvent.Type.KeyPress and not event.isAutoRepeat():
+                    lock.stop_button.click()
+                event.accept()
+                return True
+            if inside and key == Qt.Key.Key_Space:
+                return False
+            event.accept()
+            return True
+        if inside or close:
+            return False
+        # Keep existing outside-panel dismissal for MINE/COSINE/SECANT.
+        if widget is surface and kind == QEvent.Type.MouseButtonPress:
+            panel = getattr(surface, "_panel", getattr(surface, "_surface", None))
+            if (surface is not getattr(self.pages.live_mirl, "_dashboard_dialog", None)
+                    and panel is not None and not panel.geometry().contains(event.position().toPoint())):
+                return False
+        if kind == QEvent.Type.FocusIn:
+            self._focus_analysis_lock(surface)
+        event.accept()
+        return True
 
     def _current_parent_session_id(self):
         getter = getattr(self.engine, "current_session_id", None)
@@ -15312,12 +15974,28 @@ class ControlStationWindow(QMainWindow):
         # COSINE.report.CosineReadAuthority).  Opening the NEW live page must
         # not silently execute that old route.
         self.navigation.page_opened.connect(self._analytics_page_opened)
+        self.navigation.preparation_failed.connect(self._show_preparation_failure)
+        self.navigation.transition_started.connect(self._clear_preparation_feedback)
         self._dashboard_integration = DashboardIntegration(
             self.pages.secant_dashboard,
             dashboard_database_path(create_parent=False),
             self._current_parent_session_id,
             lambda: self.settings.snapshot().clock_timezone,
         )
+        for destination in (PAGE_METRIC_HUB, PAGE_MINE):
+            self.navigation.register_preparation(
+                destination,
+                lambda done, name=destination: self.analytics.prepare_page(name, done),
+            )
+        self.navigation.register_preparation(
+            PAGE_SECANT_DASHBOARD, self._dashboard_integration.prepare_for_navigation
+        )
+        self.navigation.preparations_closed.connect(
+            lambda: self._dashboard_integration.shutdown(timeout=0)
+        )
+        for page in (self.pages.live_mirl, self.pages.mine, self.pages.cosine,
+                     self.pages.secant_dashboard):
+            page._surface_preparer = self._prepare_protected_surface
         self.pages.secant_dashboard.close_requested.connect(
             lambda: self.navigation.open_page(PAGE_CONTROL)
         )
@@ -15328,6 +16006,8 @@ class ControlStationWindow(QMainWindow):
         )
         self.lifecycle.navigation_enabled.connect(self.navigation.set_enabled)
         self.lifecycle.exit_authorized.connect(self._finish_shutdown)
+        self.engine.engine_stopped.connect(self._reconcile_context_locks)
+        self.engine.engine_failed.connect(self._reconcile_context_locks)
 
         self.analytics.today_session_health_ready.connect(
             self.pages.control.render_today_session_health
@@ -15487,6 +16167,7 @@ class ControlStationWindow(QMainWindow):
         self.engine.normal_break_fact_changed.connect(
             self.pages.control.render_normal_break_fact
         )
+        self.engine.normal_break_command_result.connect(self.pages.control.normal_break_command_completed)
         self.engine.session_time_changed.connect(
             self.pages.control.refresh_normal_break
         )
@@ -16108,8 +16789,43 @@ class ControlStationWindow(QMainWindow):
                 flush=True,
             )
 
+    def _show_preparation_failure(self, destination: str, _reason: str) -> None:
+        """Explain a failed opening without exposing a partial destination."""
+        if self._shutdown_is_authorized:
+            return
+        names = {
+            PAGE_METRIC_HUB: "Metric Hub",
+            PAGE_MINE: "MINE",
+            PAGE_SECANT_DASHBOARD: "SECANT",
+            PAGE_STUDY: "Study Mode",
+            PAGE_SCIENCE_LAB: "Science Lab",
+            "mirl-dashboard": "MIRL Dashboard",
+            "mine-analysis": "MINE Analysis",
+            "cosine-analysis": "COSINE Analysis",
+            "secant-analysis": "SECANT Analysis",
+        }
+        name = names.get(destination, "the requested view")
+        bar = getattr(self, "_preparation_status_bar", None)
+        if bar is None:
+            bar = self.statusBar()
+            self._preparation_status_bar = bar
+            bar.messageChanged.connect(lambda text: bar.setVisible(bool(text)))
+        bar.showMessage(
+            f"Could not prepare {name}. Your current view is still available. Please try again.",
+            8_000,
+        )
+        bar.show()
+
+    def _clear_preparation_feedback(self, *_args) -> None:
+        bar = getattr(self, "_preparation_status_bar", None)
+        if bar is not None:
+            bar.clearMessage()
+            bar.hide()
+
     def _analytics_page_opened(self, page_name: str) -> None:
         """All analytics destinations use the existing coalesced reader lane."""
+        if self.navigation.prepared_destination == page_name:
+            return  # Its accepted result was applied before navigation activation.
         if page_name == PAGE_SECANT_DASHBOARD:
             self._dashboard_integration.refresh()
         self.analytics.page_opened(page_name)
@@ -16152,6 +16868,7 @@ class ControlStationWindow(QMainWindow):
         dialog.exec()
 
     def _engine_status_changed(self, status: EngineStatus) -> None:
+        self._reconcile_context_locks()
         self.pages.study.set_monitoring_active(status is EngineStatus.ACTIVE)
         self._sine_presentation.handle_engine_status(status)
         self._sync_mine_escalation_claim(None)
@@ -16345,6 +17062,12 @@ class ControlStationWindow(QMainWindow):
             if callable(retheme):
                 retheme(theme)
 
+        # Live MIRL's dashboard is parented to the window, not the shell, so the
+        # sweep above never reaches it.
+        for surface in self._protected_analysis_surfaces():
+            if not self.shell.isAncestorOf(surface):
+                _retheme_subtree(surface)
+
         self.shell.alert_border.set_alert(
             theme.cyan if theme in (AMBER_ALERT_THEME, RED_ALERT_THEME) else None
         )
@@ -16449,6 +17172,8 @@ class ControlStationWindow(QMainWindow):
             self._apply_native_titlebar()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if self._context_lock_input_filter(watched, event):
+            return True
         if (
             event.type() == QEvent.Type.Show
             and isinstance(watched, QWidget)
@@ -16496,6 +17221,7 @@ class ControlStationWindow(QMainWindow):
             return
 
         self._shutdown_is_authorized = True
+        self.pages.control.retire_engine_ring()
         self.lifecycle.shutdown()
         self.navigation.shutdown()
         try:

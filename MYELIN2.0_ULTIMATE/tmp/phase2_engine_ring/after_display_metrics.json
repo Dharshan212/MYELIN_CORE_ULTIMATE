@@ -1,0 +1,45 @@
+{
+  "SECANT": {
+    "skipped_integer_jumps": 0,
+    "first_values": [
+      600,
+      599,
+      598,
+      597,
+      596,
+      595,
+      594,
+      593
+    ],
+    "last_value": 540
+  },
+  "COSECANT": {
+    "skipped_integer_jumps": 0,
+    "first_values": [
+      600,
+      599,
+      598,
+      597,
+      596,
+      595,
+      594,
+      593
+    ],
+    "last_value": 540
+  },
+  "MIRL": {
+    "skipped_integer_jumps": 0,
+    "first_values": [
+      600,
+      599,
+      598,
+      597,
+      596,
+      595,
+      594,
+      593
+    ],
+    "last_value": 542,
+    "explanation": "Bounded display of already-confirmed evidence; up to one sample of visual lag, never inferred return"
+  }
+}

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import weakref
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
@@ -300,6 +301,9 @@ class SharedDashboardRefresh(QObject):
     bundle_ready = pyqtSignal(object)
     refresh_failed = pyqtSignal(str)
     refreshing_changed = pyqtSignal(bool)
+    # Delivery slots run on the GUI thread. Completion is separate from the
+    # busy flag and follows those slots, including their full UI application.
+    accepted_completed = pyqtSignal(int, object)
 
     def __init__(
         self,
@@ -312,6 +316,7 @@ class SharedDashboardRefresh(QObject):
         self._generation = 0
         self._in_flight = False
         self._pending = False
+        self._pending_provider: Callable[[], object] | None = None
         self._closed = False
         self._worker: threading.Thread | None = None
 
@@ -323,7 +328,13 @@ class SharedDashboardRefresh(QObject):
     def is_refreshing(self) -> bool:
         return self._in_flight
 
-    def request_refresh(self) -> bool:
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    def request_refresh(
+        self, *, provider: Callable[[], object] | None = None
+    ) -> bool:
         """Start one worker or coalesce into one later refresh."""
 
         if self._closed:
@@ -335,16 +346,18 @@ class SharedDashboardRefresh(QObject):
             # replacement starts.
             self._generation += 1
             self._pending = True
+            self._pending_provider = provider
             return True
 
         self._generation += 1
         generation = self._generation
+        read_provider = self._provider if provider is None else provider
         self._in_flight = True
         self.refreshing_changed.emit(True)
 
         def read() -> None:
             try:
-                bundle = self._provider()
+                bundle = read_provider()
                 if bundle is None:
                     raise RuntimeError("analytics read model returned no bundle")
             except Exception as error:  # worker failure must not touch Qt
@@ -365,6 +378,17 @@ class SharedDashboardRefresh(QObject):
             self._poll.start()
         return True
 
+    def invalidate(self) -> None:
+        """Discard accepted delivery/pending work without blocking a reader.
+
+        An isolated owner can cancel preparation this way. Shared analytics
+        navigation only removes its waiter so other consumers keep their read.
+        """
+
+        self._generation += 1
+        self._pending = False
+        self._pending_provider = None
+
     def shutdown(
         self,
         *,
@@ -377,9 +401,14 @@ class SharedDashboardRefresh(QObject):
         caller is told the truth rather than being blocked indefinitely.
         """
 
+        from PyQt6 import sip
+
         self._closed = True
         self._pending = False
-        self._poll.stop()
+        self._pending_provider = None
+        # Qt teardown can re-enter after the timer's C++ object is gone.
+        if not sip.isdeleted(self._poll):
+            self._poll.stop()
         worker = self._worker
         if worker is None or not worker.is_alive():
             self._worker = None
@@ -402,15 +431,21 @@ class SharedDashboardRefresh(QObject):
         self._poll.stop()
         self._in_flight = False
         self.refreshing_changed.emit(False)
-        if generation == self._generation:
+        if generation == self._generation and not self._closed:
             if error is None:
                 self.bundle_ready.emit(bundle)
             else:
                 self.refresh_failed.emit(error)
+            # A render/delivery handler can request a newer generation. Its
+            # predecessor must not release that replacement's preparation.
+            if generation == self._generation and not self._closed:
+                self.accepted_completed.emit(generation, error)
 
         if self._pending and not self._closed:
+            provider = self._pending_provider
             self._pending = False
-            self.request_refresh()
+            self._pending_provider = None
+            self.request_refresh(provider=provider)
 
 
 def _clear_layout(layout) -> None:
@@ -1169,6 +1204,8 @@ class AnalyticsController(QObject):
         self._closed = False
         self._bundle = None
         self._pages: dict[str, DashboardPage] = {}
+        self._preparations: dict[str, tuple[object, int, Callable]] = {}
+        self._delivery_errors: dict[str, str] = {}
         self._composer: AnalyticsSheetDialog | None = None
         self._timezone_key_provider = timezone_key_provider or (lambda: "local")
 
@@ -1184,6 +1221,7 @@ class AnalyticsController(QObject):
         self._refresh.bundle_ready.connect(self._deliver_bundle)
         self._refresh.refresh_failed.connect(self._refresh_failed)
         self._refresh.refreshing_changed.connect(self._refreshing_changed)
+        self._refresh.accepted_completed.connect(self._complete_preparations)
 
         # A second, independent read lane. Today Health is not part of the
         # frozen ControlStationAnalyticsSnapshot bundle and must not share
@@ -1239,6 +1277,34 @@ class AnalyticsController(QObject):
             self._refresh.request_refresh()
         if page_name == PAGE_CONTROL:
             self.request_today_session_health_refresh()
+
+    def prepare_page(
+        self, page_name: str, done: Callable[[bool, str], None]
+    ) -> Callable[[], None]:
+        """Read fresh facts and acknowledge their full GUI application.
+
+        Navigation owns cancellation and suppresses its matching page-open
+        reread. Newer accepted shared reads may satisfy this request; stale
+        workers and the refresh busy flag cannot satisfy it.
+        """
+
+        if self._closed or page_name not in self._pages:
+            done(False, "Analytics destination is unavailable.")
+            return lambda: None
+        token = object()
+        self._preparations[page_name] = (
+            token, self._refresh.generation + 1, done
+        )
+
+        def cancel() -> None:
+            current = self._preparations.get(page_name)
+            if current is not None and current[0] is token:
+                self._preparations.pop(page_name, None)
+
+        if not self._refresh.request_refresh():
+            cancel()
+            done(False, "Analytics refresh is unavailable.")
+        return cancel
 
     def request_today_session_health_refresh(self) -> None:
         """Ask for one fresh Today Health read; overlaps coalesce."""
@@ -1326,6 +1392,7 @@ class AnalyticsController(QObject):
         """
 
         self._closed = True
+        self._preparations.clear()
         budget = max(0.0, float(timeout))
         drained = self._refresh.shutdown(timeout=budget)
         drained = self._today_health_refresh.shutdown(timeout=budget) and drained
@@ -1343,21 +1410,68 @@ class AnalyticsController(QObject):
         page = page_type()
         page.refresh_requested.connect(self._refresh.request_refresh)
         self._pages[name] = page
+        owner_ref, page_ref = weakref.ref(self), weakref.ref(page)
+
+        def forget_page() -> None:
+            owner = owner_ref()
+            if owner is not None:
+                owner._page_destroyed(name, page_ref())
+
+        page.destroyed.connect(forget_page)
         return page
 
+    def _page_destroyed(self, name: str, page: object) -> None:
+        if self._pages.get(name) is page:
+            self._pages.pop(name, None)
+            self._preparations.pop(name, None)
+            self._delivery_errors.pop(name, None)
+
     def _deliver_bundle(self, bundle: object) -> None:
+        if self._closed:
+            return
         self._bundle = bundle
         self._export.set_snapshot(bundle)
-        for page_name, page in self._pages.items():
+        self._delivery_errors = {}
+        for page_name, page in tuple(self._pages.items()):
             projection = _projection(bundle, PROJECTION_NAMES[page_name])
             if projection is not None:
-                page.render_projection(projection)
+                try:
+                    page.render_projection(projection)
+                except Exception as error:
+                    self._page_failure(page_name, page, _bounded_error(error))
             else:
-                page.show_refresh_failure()
+                self._page_failure(
+                    page_name, page, "Analytics projection is unavailable."
+                )
 
-    def _refresh_failed(self, _message: str) -> None:
-        for page in self._pages.values():
+    def _page_failure(self, page_name: str, page: object, message: str) -> None:
+        self._delivery_errors[page_name] = message
+        try:
             page.show_refresh_failure()
+        except Exception as error:
+            self._delivery_errors[page_name] = _bounded_error(error)
+
+    def _refresh_failed(self, message: str) -> None:
+        if self._closed:
+            return
+        self._delivery_errors = {}
+        for page_name, page in tuple(self._pages.items()):
+            self._page_failure(page_name, page, message)
+
+    def _complete_preparations(self, generation: int, error: object) -> None:
+        if self._closed or generation != self._refresh.generation:
+            return
+        for page_name, preparation in tuple(self._preparations.items()):
+            if self._closed or generation != self._refresh.generation:
+                return
+            _token, requested_generation, done = preparation
+            if generation < requested_generation:
+                continue
+            if self._preparations.get(page_name) is not preparation:
+                continue
+            self._preparations.pop(page_name, None)
+            message = self._delivery_errors.get(page_name, str(error or ""))
+            done(not bool(message), message)
 
     def _refreshing_changed(self, refreshing: bool) -> None:
         for page in self._pages.values():

@@ -186,10 +186,11 @@ class PopupPresenter:
 def create_qt_presenter(emit, parent=None, *, clock_ns=time.monotonic_ns):
     """Create an inert-until-delivered SECANT GUI host on the Qt GUI thread.
 
-    Only show/close events acknowledge presentation. No countdown, escalation,
-    recovery or sibling authority belongs here.
+    Only show/close events acknowledge presentation. Clock faces may project
+    published deadlines; escalation and recovery authority never belong here.
     """
     from PyQt6.QtCore import Qt, QThread
+    from CONTROL_STATION.timer_display import countdown, secant_remaining, start_frames
     from PyQt6.QtGui import QCursor
     from PyQt6.QtWidgets import QApplication, QDialog, QLabel, QPushButton, QVBoxLayout
     app = QApplication.instance()
@@ -301,6 +302,7 @@ def create_qt_presenter(emit, parent=None, *, clock_ns=time.monotonic_ns):
         def project(self, value):
             from .read_model import SecantProjection, RecoveryPhase
             if value is None:
+                self._timer_projection = None
                 self.resource.setText("REGISTERED RESOURCE · Awaiting projection")
                 self.status.setText("Awaiting SECANT projection")
                 self.timing.setText("SECANT TIMING · —")
@@ -311,7 +313,10 @@ def create_qt_presenter(emit, parent=None, *, clock_ns=time.monotonic_ns):
                     or value.popup_request_id != self.request.request_id
                     or (self.request.episode_id and value.episode_id != self.request.episode_id)):
                 return
-            # Format immutable values only; no clock, elapsed-time inference, or stage decision.
+            self._timer_projection = value
+            if not hasattr(self, "_timer_frame"):
+                self._timer_frame = start_frames(self, self._refresh_clock)
+            # State and recovery remain factual. Only the escalation clock projects.
             def duration(ns):
                 if ns is None:
                     return "—"
@@ -323,7 +328,7 @@ def create_qt_presenter(emit, parent=None, *, clock_ns=time.monotonic_ns):
             self.resource.setText("REGISTERED RESOURCE · " + resource)
             self.resource.setToolTip(resource)
             self.status.setText("SECANT · " + value.popup_state.replace("_", " "))
-            remaining = duration(value.escalation_remaining_ns)
+            remaining = countdown(secant_remaining(value))
             self.progress.setRange(0, 1)
             self.progress.setValue(0)
             r = value.recovery
@@ -342,6 +347,16 @@ def create_qt_presenter(emit, parent=None, *, clock_ns=time.monotonic_ns):
             else:
                 timing = "ESCALATION REMAINING · " + remaining
             self.timing.setText(timing)
+
+        def _refresh_clock(self):
+            from .read_model import RecoveryPhase
+            value = getattr(self, "_timer_projection", None)
+            if (value is None or self.authorized_close or value.terminal_reason
+                    or value.frozen_reasons or value.cleanup_pending
+                    or value.recovery.phase in (RecoveryPhase.VERIFYING, RecoveryPhase.CONFIRMING)
+                    or int(value.stage) not in (1, 2)):
+                return
+            self.timing.setText("ESCALATION REMAINING · " + countdown(secant_remaining(value)))
 
         def act(self, action):
             if adapter.action(self.request.request_id, action, clock_ns()):

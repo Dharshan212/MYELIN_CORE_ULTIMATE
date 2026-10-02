@@ -19,6 +19,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Final
 
+from PyQt6 import sip
 from PyQt6.QtCore import (
     QElapsedTimer,
     QObject,
@@ -87,8 +88,7 @@ DESTINATIONS: Final = {
     PAGE_METRIC_HUB: Destination(
         "Metric Hub",
         "Preparing Metric Hub",
-        "Refreshing authoritative operational metrics…",
-        show_loader=False,
+        "Loading lifetime metrics and evidence…",
     ),
     PAGE_SCIENCE_LAB: Destination(
         "Science Lab",
@@ -103,10 +103,7 @@ DESTINATIONS: Final = {
     PAGE_MINE: Destination(
         "MINE",
         "Preparing MINE",
-        "",
-        # No loader: a Coming Soon placeholder must not perform the act of
-        # loading an operational MINE subsystem that does not exist yet.
-        show_loader=False,
+        "Loading messaging intervention evidence…",
     ),
     PAGE_COSINE: Destination(
         "COSINE",
@@ -115,9 +112,8 @@ DESTINATIONS: Final = {
     ),
     PAGE_SECANT_DASHBOARD: Destination(
         "SECANT Dashboard",
-        "Opening SECANT Dashboard",
-        "Showing static demonstration content…",
-        show_loader=False,
+        "Preparing SECANT",
+        "Loading study-recovery evidence…",
     ),
 }
 
@@ -257,12 +253,15 @@ class MyelinLoadingSymbol(QWidget):
 class MyelinLoadingOverlay(QWidget):
     """One glass loading surface for every Control Station workspace."""
 
+    painted = pyqtSignal()
+
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
         self.setObjectName("myelinLoadingOverlay")
         self.setAccessibleName("MYELIN workspace loading")
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._base = QColor("#0B0F19")
+        self._visible_requested = False
 
         self.panel = QWidget(self)
         self.panel.setObjectName("myelinLoadingPanel")
@@ -327,6 +326,7 @@ class MyelinLoadingOverlay(QWidget):
         self.symbol.set_reduced_motion(enabled)
 
     def show_overlay(self) -> None:
+        self._visible_requested = True
         parent = self.parentWidget()
         if parent is not None:
             self.setGeometry(parent.rect())
@@ -335,6 +335,7 @@ class MyelinLoadingOverlay(QWidget):
         self.raise_()
 
     def hide_overlay(self) -> None:
+        self._visible_requested = False
         self.symbol.stop()
         self.hide()
 
@@ -355,6 +356,26 @@ class MyelinLoadingOverlay(QWidget):
         dim.setAlphaF(0.58)
         painter.fillRect(self.rect(), dim)
         painter.end()
+        self.painted.emit()
+
+
+def grab_preparation_background(host: QWidget):
+    """Capture only the underlying UI, excluding the transient loader.
+
+    Suppression covers the synchronous grab only; no event loop is pumped.
+    A cancelled/destroyed overlay is never restored by the finally block.
+    """
+    hidden = [overlay for overlay in host.window().findChildren(MyelinLoadingOverlay)
+              if overlay.isVisible() and overlay._visible_requested]
+    for overlay in hidden:
+        overlay.hide()
+    try:
+        return host.grab()
+    finally:
+        for overlay in hidden:
+            if not sip.isdeleted(overlay) and overlay._visible_requested:
+                overlay.show()
+                overlay.raise_()
 
 
 @dataclass
@@ -370,6 +391,14 @@ class _ActiveTransition:
     ready: bool = False
     minimum_elapsed: bool = False
     activated: bool = False
+    external_preparation: bool = False
+    surface: bool = False
+    source_page: QWidget | None = None
+    cancel_preparation: Callable[[], None] | None = None
+    cleanup: Callable[[], None] | None = None
+    paint_slot: Callable[[], None] | None = None
+    destroyed_slot: Callable[..., None] | None = None
+    activating: bool = False
 
 
 class NavigationController(QObject):
@@ -379,6 +408,8 @@ class NavigationController(QObject):
     transition_started = pyqtSignal(str)
     transition_finished = pyqtSignal(str)
     transition_rejected = pyqtSignal(str, str)
+    preparation_failed = pyqtSignal(str, str)
+    preparations_closed = pyqtSignal()
 
     MINIMUM_DISPLAY_MS: Final = 180
     REDUCED_MOTION_DISPLAY_MS: Final = 80
@@ -403,6 +434,8 @@ class NavigationController(QObject):
         self._reduced_motion = False
         self._generation = 0
         self._active: _ActiveTransition | None = None
+        self._closed = False
+        self._preparers: dict[str, Callable] = {}
 
         if set(self._pages) != set(PAGE_ORDER):
             raise ValueError("Navigation requires exactly the approved pages")
@@ -420,6 +453,106 @@ class NavigationController(QObject):
         self._readiness_timer.timeout.connect(self._readiness_timed_out)
 
         red_guard.state_changed.connect(self._red_state_changed)
+        page_stack.currentChanged.connect(self._stack_changed)
+
+    def register_preparation(self, destination: str, prepare: Callable) -> None:
+        """Register a real destination's post-application completion contract."""
+        if destination not in self._pages:
+            raise ValueError("Unknown preparation destination")
+        self._preparers[destination] = prepare
+
+    @property
+    def prepared_destination(self) -> str | None:
+        active = self._active
+        if active is not None and active.external_preparation and active.ready:
+            return active.destination
+        return None
+
+    def prepare_surface(self, *, owner: QWidget, key: str, title: str,
+                        subtitle: str, prepare: Callable[[], None],
+                        reveal: Callable[[], None], cleanup: Callable[[], None]) -> bool:
+        """Prepare one held child surface with the existing transition owner.
+
+        This is not page navigation and never emits page_opened or reads data.
+        Hidden preparation starts after a real loader paint; reveal additionally
+        waits for the established visual minimum, with generation/host checks.
+        """
+        if self._active is not None:
+            return self._reject(key, "transition_in_progress")
+        if (not self._navigation_is_allowed() or sip.isdeleted(owner)
+                or self._page_stack.currentWidget() is not owner):
+            return self._reject(key, "surface_not_available")
+        self._generation += 1
+        active = _ActiveTransition(key, self._generation, reveal, True,
+                                   surface=True, source_page=owner, cleanup=cleanup)
+        self._active = active
+        self._watch_source(active)
+        self._apply_enabled_state()
+        self.close_sidebar()
+        self.loading_overlay.set_copy(title, subtitle)
+        self.loading_overlay.show_overlay()
+        self.transition_started.emit(key)
+        if self._active is not active:
+            return False
+        self._start_preparation_timers()
+
+        def prepared() -> None:
+            if not self._preparation_is_current(active):
+                return
+            try:
+                prepare()
+            except Exception:
+                if self._active is active:
+                    self._reject_active("surface_preparation_failed")
+                return
+            if self._preparation_is_current(active):
+                self._page_became_ready(active.generation)
+
+        self._after_loader_paint(active, prepared)
+        return True
+
+    def _start_preparation_timers(self) -> None:
+        minimum = (self.REDUCED_MOTION_DISPLAY_MS if self._reduced_motion
+                   else self.MINIMUM_DISPLAY_MS)
+        self._minimum_timer.start(minimum)
+        self._readiness_timer.start(self.READINESS_TIMEOUT_MS)
+
+    def _after_loader_paint(self, active: _ActiveTransition, prepare: Callable) -> None:
+        def painted() -> None:
+            if self._active is not active:
+                return
+            self._disconnect_paint(active)
+            QTimer.singleShot(0, lambda: prepare() if self._preparation_is_current(active) else None)
+        active.paint_slot = painted
+        self.loading_overlay.painted.connect(painted)
+        self.loading_overlay.update()
+
+    def _watch_source(self, active: _ActiveTransition) -> None:
+        source = active.source_page
+        if source is not None:
+            def destroyed(*_args) -> None:
+                if self._active is active:
+                    self.abort()
+            active.destroyed_slot = destroyed
+            source.destroyed.connect(destroyed)
+
+    def _preparation_is_current(self, active: _ActiveTransition) -> bool:
+        if self._active is not active:
+            return False
+        source = active.source_page
+        if (self._closed or not self._navigation_is_allowed()
+                or source is None or sip.isdeleted(source)
+                or self._page_stack.currentWidget() is not source):
+            self.abort()
+            return False
+        return True
+
+    def _stack_changed(self, _index: int) -> None:
+        active = self._active
+        if (active is not None and not active.activating
+                and active.source_page is not None
+                and self._page_stack.currentWidget() is not active.source_page):
+            self.abort()
 
     @property
     def sidebar_is_open(self) -> bool:
@@ -498,9 +631,13 @@ class NavigationController(QObject):
             return self._reject(destination, "study_leave_contract_missing")
 
         outcome = {"settled": False, "accepted": False}
+        self._generation += 1
+        generation = self._generation
 
         def completed(success: bool) -> None:
-            if outcome["settled"]:
+            if (outcome["settled"] or generation != self._generation
+                    or not self._navigation_is_allowed()
+                    or self._page_stack.currentWidget() is not self._study_page):
                 return
             outcome["settled"] = True
             if success:
@@ -517,6 +654,8 @@ class NavigationController(QObject):
         return admitted
 
     def _start_transition(self, destination: str) -> bool:
+        if self._active is not None or not self._navigation_is_allowed():
+            return self._reject(destination, "preparation_no_longer_allowed")
         copy = DESTINATIONS[destination]
         page = self._pages[destination]
         self._generation += 1
@@ -526,8 +665,10 @@ class NavigationController(QObject):
             activate=lambda: self._activate_page(destination),
             show_loader=copy.show_loader,
             minimum_elapsed=not copy.show_loader,
+            source_page=self._page_stack.currentWidget(),
         )
         self._active = active
+        self._watch_source(active)
         self._apply_enabled_state()
         self.close_sidebar()
 
@@ -539,6 +680,15 @@ class NavigationController(QObject):
             self.loading_overlay.show_overlay()
 
         self.transition_started.emit(destination)
+        if self._active is not active:
+            return False
+
+        registered = self._preparers.get(destination)
+        if registered is not None:
+            active.external_preparation = True
+            self._start_preparation_timers()
+            self._after_loader_paint(active, lambda: self._prepare_registered(active, registered))
+            return True
 
         # Instruction: prepare exactly once. Activation below only switches
         # the QStackedWidget, fixing the old duplicate Study refresh.
@@ -583,6 +733,30 @@ class NavigationController(QObject):
             self._minimum_timer.start(minimum)
         return True
 
+    def _prepare_registered(self, active: _ActiveTransition, prepare: Callable) -> None:
+        if not self._preparation_is_current(active):
+            return
+
+        def completed(success: bool, error: str = "") -> None:
+            if not self._preparation_is_current(active):
+                return
+            if not success:
+                self._reject_active(error or "page_preparation_failed")
+                return
+            self._page_became_ready(active.generation)
+
+        try:
+            cancel = prepare(completed)
+        except Exception:
+            if self._active is active:
+                self._reject_active("page_preparation_failed")
+            return
+        if callable(cancel):
+            if self._active is active:
+                active.cancel_preparation = cancel
+            else:
+                cancel()
+
     def _page_preparation(
         self,
         page: QWidget,
@@ -611,15 +785,23 @@ class NavigationController(QObject):
     def _activate_when_safe(self, active: _ActiveTransition) -> None:
         if self._active is not active or not active.ready or active.activated:
             return
+        if active.surface:
+            if not active.minimum_elapsed or not self._preparation_is_current(active):
+                return
         if not self._navigation_is_allowed():
             self._red_guard.restore_authoritative_surface()
             self._reject_active("protected_red_intervention")
             return
 
         try:
+            active.activating = True
             active.activate()
         except Exception:
             self._reject_active("page_activation_failed")
+            return
+        finally:
+            active.activating = False
+        if self._active is not active:
             return
         active.activated = True
         self._finish_when_ready(active)
@@ -629,6 +811,7 @@ class NavigationController(QObject):
         if active is None:
             return
         active.minimum_elapsed = True
+        self._activate_when_safe(active)
         self._finish_when_ready(active)
 
     def _finish_when_ready(self, active: _ActiveTransition) -> None:
@@ -658,9 +841,9 @@ class NavigationController(QObject):
     def abort(self) -> None:
         """Cancel one transition and disconnect every owned callback."""
 
+        self._generation += 1
         if self._active is None:
             return
-        self._generation += 1
         self._finish_active()
 
     def _reject_active(self, reason: str) -> None:
@@ -670,6 +853,8 @@ class NavigationController(QObject):
         destination = active.destination
         self._finish_active()
         self.transition_rejected.emit(destination, reason)
+        if self._navigation_is_allowed():
+            self.preparation_failed.emit(destination, reason)
 
     def _finish_active(self) -> None:
         active = self._active
@@ -678,8 +863,34 @@ class NavigationController(QObject):
         self._readiness_timer.stop()
         if active is not None:
             self._disconnect_readiness(active)
-        self.loading_overlay.hide_overlay()
+            self._disconnect_paint(active)
+            if (active.source_page is not None and not sip.isdeleted(active.source_page)
+                    and active.destroyed_slot is not None):
+                try:
+                    active.source_page.destroyed.disconnect(active.destroyed_slot)
+                except (TypeError, RuntimeError):
+                    pass
+            if active.cancel_preparation is not None:
+                try:
+                    active.cancel_preparation()
+                except Exception:
+                    pass
+            if not active.activated and active.cleanup is not None:
+                try:
+                    active.cleanup()
+                except Exception:
+                    pass
+        if not sip.isdeleted(self.loading_overlay):
+            self.loading_overlay.hide_overlay()
         self._apply_enabled_state()
+
+    def _disconnect_paint(self, active: _ActiveTransition) -> None:
+        if active.paint_slot is not None and not sip.isdeleted(self.loading_overlay):
+            try:
+                self.loading_overlay.painted.disconnect(active.paint_slot)
+            except (TypeError, RuntimeError):
+                pass
+        active.paint_slot = None
 
     @staticmethod
     def _disconnect_readiness(active: _ActiveTransition) -> None:
@@ -694,7 +905,7 @@ class NavigationController(QObject):
             active.readiness_slot = None
 
     def _navigation_is_allowed(self) -> bool:
-        if not self._enabled_by_lifecycle:
+        if self._closed or not self._enabled_by_lifecycle:
             return False
         try:
             return not self._red_guard.is_red_protected()
@@ -707,7 +918,10 @@ class NavigationController(QObject):
             and self._active is None
             and self._navigation_is_allowed()
         )
-        self.sidebar.set_navigation_enabled(enabled)
+        try:
+            self.sidebar.set_navigation_enabled(enabled)
+        except RuntimeError:
+            pass  # The host may already be destroying its child widgets.
 
     def _red_state_changed(self, active: bool) -> None:
         if active:
@@ -723,6 +937,10 @@ class NavigationController(QObject):
     def shutdown(self) -> None:
         """Stop visual timers and invalidate any unfinished transition."""
 
+        if self._closed:
+            return
+        self._closed = True
         self.abort()
+        self.preparations_closed.emit()
         self.close_sidebar()
         self.loading_overlay.hide_overlay()

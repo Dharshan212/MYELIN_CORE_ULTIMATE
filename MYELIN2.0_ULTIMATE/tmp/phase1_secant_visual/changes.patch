@@ -1,0 +1,247 @@
+--- SECANT/dashboard_view.py (before)
++++ SECANT/dashboard_view.py (after)
+@@ -19,6 +19,7 @@
+ )
+ 
+ from SECANT import dashboard_demo as demo
++from UI_THEMES.theme import DEFAULT_THEME, RADIUS_LG, RADIUS_MD, RADIUS_SM, build_application_stylesheet, mix
+ 
+ 
+ CONTEXT_CAPTION_KEYS = frozenset(('about_architecture', 'about_dashboard_time', 'about_foundation_title', 'about_input_category', 'about_input_time', 'about_source', 'about_stage', 'about_stage_label', 'cosecant_events', 'cosecant_returns', 'distraction_attributes', 'episodes_flow', 'episodes_summary', 'evidence_attributes', 'evidence_summary', 'landing_events', 'landing_flow', 'overview_events', 'overview_flow', 'overview_insights', 'secant_archive_events', 'secant_archive_list', 'secant_archive_summary', 'source_banner', 'study_archive_events', 'study_archive_list', 'study_archive_summary'))
+@@ -93,11 +94,12 @@
+         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+         mid = self.height() / 2 + 7
+         right = self.width() - 7
+-        painter.setPen(QPen(QColor("#5da7eb"), 1.3))
++        theme = getattr(self, "_landing_theme", None)
++        painter.setPen(QPen(QColor(theme.cyan_dim if theme else "#5da7eb"), 1.3))
+         painter.drawLine(QPointF(5, mid), QPointF(right, mid))
+         painter.drawLine(QPointF(right - 6, mid - 4), QPointF(right, mid))
+         painter.drawLine(QPointF(right - 6, mid + 4), QPointF(right, mid))
+-        painter.setPen(QColor(MUTED))
++        painter.setPen(QColor(theme.muted if theme else MUTED))
+         painter.setFont(_font(8, 400, mono=True))
+         painter.drawText(QRectF(0, 15, self.width(), 30),
+                          int(Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap), self.caption)
+@@ -113,6 +115,7 @@
+            color: str = TEXT, wrap: bool = False, mono: bool = False) -> QLabel:
+     result = QLabel(text)
+     result.setFont(_font(size, weight, mono))
++    result.setProperty("secantColor", color)
+     result.setStyleSheet(f"color:{color};background:transparent;border:none;")
+     result.setWordWrap(wrap)
+     return result
+@@ -1671,22 +1674,16 @@
+         self._refreshing = False
+         self._init_context()
+         self.setObjectName("secantLandingPage")
+-        self.setStyleSheet("QWidget#secantLandingPage{background:#08111d;}")
+         root = QVBoxLayout(self)
+         root.setContentsMargins(0, 0, 0, 0)
+         scroll = QScrollArea()
+         scroll.setObjectName("secantLandingScroll")
+         scroll.setFrameShape(QFrame.Shape.NoFrame)
+         scroll.setWidgetResizable(True)
+-        scroll.setStyleSheet(
+-            "QScrollArea#secantLandingScroll{background:transparent;border:none;}"
+-            "QScrollBar:vertical{background:#102236;width:9px;}"
+-            "QScrollBar::handle:vertical{background:#345f79;border-radius:4px;min-height:32px;}"
+-        )
++        scroll.setStyleSheet("QScrollArea#secantLandingScroll{background:transparent;border:none;}")
+         root.addWidget(scroll)
+         body = QWidget()
+         body.setObjectName("secantLandingBody")
+-        body.setStyleSheet("QWidget#secantLandingBody{background:#08111d;}")
+         scroll.setWidget(body)
+         column = QVBoxLayout(body)
+         column.setContentsMargins(34, 22, 34, 42)
+@@ -1710,6 +1707,67 @@
+                               metrics=demo.OVERVIEW_METRICS[:4], behaviour=demo.LANDING_BEHAVIOUR,
+                               latest_events=tuple(reversed(demo.LATEST_SECANT_EVENTS)),
+                               journey=demo.SECANT_FLOW)
++        self._retheme(DEFAULT_THEME)
++
++    def _retheme(self, theme) -> None:
++        """Follow the host's active world without changing prepared evidence."""
++        self._theme = theme
++        self.setStyleSheet(
++            f"QWidget#secantLandingPage, QWidget#secantLandingBody{{background:{theme.window_background};}}"
++        )
++
++        def accent(color):
++            # Keep semantic hues, with readable contrast on the White world.
++            return color if theme.is_dark else mix(color, 45, theme.text_primary)
++
++        colors = {TEXT: theme.text_primary, MUTED: theme.muted,
++                  CYAN: theme.cyan, "#d2b5cf": theme.muted}
++        for label in self.findChildren(QLabel):
++            color = label.property("secantColor") or TEXT
++            label.setStyleSheet(
++                f"color:{colors.get(color, accent(color))};background:transparent;border:none;"
++            )
++        metric_accents = {
++            labels[1].parentWidget(): accent(TONE[tone])
++            for labels, tone in zip(self.metric_labels, ("teal", "green", "purple", "blue"))
++        }
++        panels = {"secantLandingStatus", "secantLandingRecent",
++                  "secantLandingMetric", "analysisPanel"}
++        for frame in self.findChildren(QFrame):
++            name = frame.objectName()
++            if name in panels:
++                border = metric_accents.get(frame, theme.border)
++                frame.setStyleSheet(
++                    f"QFrame#{name}{{background:{theme.surface};border:1px solid {border};"
++                    f"border-radius:{RADIUS_LG}px;}}"
++                )
++            elif name == "secantLandingPath":
++                frame.setStyleSheet(
++                    f"QFrame#{name}{{background:{theme.surface_soft};border:1px solid {theme.border};"
++                    f"border-radius:{RADIUS_MD}px;}}"
++                )
++            elif name == "secantLandingEvent":
++                frame.setStyleSheet(
++                    f"QFrame#{name}{{background:transparent;border:none;border-bottom:1px solid {theme.border};}}"
++                )
++            elif name == "flowNode":
++                color = accent(TONE[frame.property("tone")])
++                frame.setStyleSheet(
++                    f"QFrame#flowNode{{background:{mix(color, 10, theme.surface)};"
++                    f"border:1px solid {color};border-radius:{RADIUS_MD}px;}}"
++                )
++        self.recent_flow.scroll.setStyleSheet("QScrollArea#flowScroll{background:transparent;border:none;}")
++        for connector in self.recent_flow.findChildren(FlowConnector):
++            connector._landing_theme = theme
++            connector.update()
++        # Refresh uses the same shared dashboard control rules as other pages.
++        self._refresh_button.setStyleSheet("")
++        self._refresh_button.setObjectName("analyticsRefreshButton")
++        self.findChild(QPushButton, "openSecantDeepAnalysis").setStyleSheet(
++            f"QPushButton{{background:{theme.cyan};color:{theme.window_background};"
++            f"border:1px solid {theme.cyan};border-radius:{RADIUS_SM}px;padding:9px 18px;}}"
++            f"QPushButton:hover{{background:{mix(theme.cyan, 80, theme.text_primary)};}}"
++        )
+ 
+     def _heading(self) -> QWidget:
+         host = QWidget()
+@@ -1720,8 +1778,12 @@
+         row.addWidget(dot, 0, Qt.AlignmentFlag.AlignTop)
+         text = QVBoxLayout()
+         text.setSpacing(5)
+-        text.addWidget(_label("SECANT — STUDY RECOVERY REGULATION", size=19, weight=700))
+-        text.addWidget(_label("Study Escape and Cognitive Attention Navigation Tracker", size=11, color=MUTED))
++        title = _label("SECANT — STUDY RECOVERY REGULATION", size=19, weight=700, color=CYAN)
++        title.setObjectName("analyticsPageTitle")
++        subtitle = _label("Study Escape and Cognitive Attention Navigation Tracker", size=11, color=MUTED)
++        subtitle.setObjectName("analyticsPageSubtitle")
++        text.addWidget(title)
++        text.addWidget(subtitle)
+         row.addLayout(text)
+         row.addStretch(1)
+         self._refresh_button = SecantDeepAnalysis._button("REFRESH", "action")
+@@ -1732,12 +1794,6 @@
+         button.setFont(_font(10, 700))
+         button.setMinimumSize(188, 49)
+         button.setCursor(Qt.CursorShape.PointingHandCursor)
+-        button.setStyleSheet(
+-            "QPushButton#openSecantDeepAnalysis{background:rgba(4,217,236,0.04);"
+-            "color:#02e2e6;border:1px solid #078d99;border-radius:11px;padding:9px 18px;}"
+-            "QPushButton#openSecantDeepAnalysis:hover{background:rgba(4,217,236,0.14);"
+-            "border-color:#04d9ec;color:white;}"
+-        )
+         button.clicked.connect(self.open_analysis_requested.emit)
+         row.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
+         return host
+@@ -1757,10 +1813,6 @@
+         card = QFrame()
+         card.setObjectName("secantLandingStatus")
+         card.setMinimumHeight(98)
+-        card.setStyleSheet(
+-            "QFrame#secantLandingStatus{background:rgba(80,54,81,0.48);"
+-            "border:1px solid rgba(221,92,139,0.48);border-radius:23px;}"
+-        )
+         row = QHBoxLayout(card)
+         row.setContentsMargins(28, 18, 28, 18)
+         left = QVBoxLayout()
+@@ -1778,10 +1830,6 @@
+     def _recent(self) -> QWidget:
+         card = QFrame()
+         card.setObjectName("secantLandingRecent")
+-        card.setStyleSheet(
+-            "QFrame#secantLandingRecent{background:rgba(35,49,83,0.85);"
+-            "border:1px solid rgba(91,123,211,0.47);border-radius:23px;}"
+-        )
+         row = QHBoxLayout(card)
+         row.setContentsMargins(26, 21, 26, 21)
+         row.setSpacing(26)
+@@ -1823,10 +1871,6 @@
+         for tone in ("teal", "green", "purple", "blue"):
+             card = QFrame()
+             card.setObjectName("secantLandingMetric")
+-            card.setStyleSheet(
+-                "QFrame#secantLandingMetric{background:rgba(30,44,65,0.94);"
+-                f"border:1px solid {TONE[tone]};border-radius:23px;}}"
+-            )
+             box = QVBoxLayout(card)
+             box.setContentsMargins(20, 17, 20, 17)
+             box.setSpacing(5)
+@@ -1847,10 +1891,6 @@
+         left.addWidget(_label("PLATFORM PATH", size=9, color=MUTED, mono=True))
+         path = QFrame()
+         path.setObjectName("secantLandingPath")
+-        path.setStyleSheet(
+-            "QFrame#secantLandingPath{background:rgba(49,64,104,0.45);"
+-            "border:1px solid rgba(91,123,211,0.46);border-radius:15px;}"
+-        )
+         path_row = QHBoxLayout(path)
+         path_row.setContentsMargins(15, 10, 15, 10)
+         self.behaviour_source = _label("", size=13, weight=600)
+@@ -1871,10 +1911,6 @@
+         for _ in demo.LATEST_SECANT_EVENTS:
+             line = QFrame()
+             line.setObjectName("secantLandingEvent")
+-            line.setStyleSheet(
+-                "QFrame#secantLandingEvent{background:rgba(7,24,42,0.26);"
+-                "border:none;border-bottom:1px solid rgba(112,161,190,0.19);}"
+-            )
+             cells = QHBoxLayout(line)
+             cells.setContentsMargins(5, 6, 5, 6)
+             cells.setSpacing(9)
+@@ -1904,6 +1940,7 @@
+         caption, message, state, tone = status
+         self.status_caption.setText(caption)
+         self.status_message.setText(message)
++        self.status_message.setProperty("secantColor", TONE[tone])
+         self.status_message.setStyleSheet(f"color:{TONE[tone]};background:transparent;border:none;")
+         self.status_state.setText(state)
+         self.recent_source.setText(recent_episode[1][1])
+@@ -1928,10 +1965,13 @@
+             line.show()
+             dot.setStyleSheet(f"color:{TONE['teal'] if event_type == 'Derived' else TONE['purple']};"
+                               "background:transparent;border:none;")
++            dot.setProperty("secantColor", TONE['teal'] if event_type == 'Derived' else TONE['purple'])
+             event_label.setText(event)
+             source_label.setText(source)
+             stamp_label.setText(stamp)
+         self.recent_flow.set_nodes(journey)
++        if hasattr(self, "_theme"):
++            self._retheme(self._theme)
+ 
+ 
+ class SecantCosecantDashboard(QWidget):
+@@ -2040,11 +2080,11 @@
+                                                   preserve_state=preserve_state)
+ 
+     @staticmethod
+-    def _style() -> str:
+-        return "QWidget#secantDashboardPage{background:#08111d;}"
+-
+-    def _retheme(self, _theme) -> None:
+-        self.setStyleSheet(self._style())
++    def _style(theme=DEFAULT_THEME) -> str:
++        return f"QWidget#secantDashboardPage{{background:{theme.window_background};}}"
++
++    def _retheme(self, theme) -> None:
++        self.setStyleSheet(build_application_stylesheet(theme) + self._style(theme))
+ 
+     def show_landing(self) -> None:
+         self.analysis.close_overlay()

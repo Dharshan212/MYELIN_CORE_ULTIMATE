@@ -166,6 +166,8 @@ class CosineSnapshot:
     return_verification_remaining_seconds:float; closure_confirmation_remaining_seconds:float
     global_paused:bool; closure_outcome:str; data_quality:str
     schema_version:str=COSINE_SCHEMA_VERSION
+    # Read-only presentation: None means no authoritative timer progressing.
+    timer_progress_fraction:float|None=None
 
 @dataclass(frozen=True, slots=True)
 class CosineMonitorStatus:
@@ -238,7 +240,28 @@ class CosineRuntime:
                 self._phase is not CosinePhase.SHUTDOWN,self._hopper_count,initial,intent,self._chosen_minutes,self._break_start,self._break_deadline,remain,
                 self._final.request_id if self._final else "",bool(self._final and self._final.visible),
                 "CLOSURE_CONFIRMING" if self._phase is CosinePhase.CLOSURE_CONFIRMING else "RETURN_VERIFYING" if self._candidate else "INACTIVE",
-                verify,close,self._paused,self._closure_outcome,"PAUSED" if self._paused else self._quality)
+                verify,close,self._paused,self._closure_outcome,"PAUSED" if self._paused else self._quality,
+                timer_progress_fraction=self._timer_progress_fraction(effective))
+
+    def _timer_progress_fraction(self,effective:int)->float|None:
+        """Project existing clocks only; never credit time or advance a phase."""
+        if self._paused or self._monitor_held or self._study_suppressed:
+            return None
+        if self._phase is CosinePhase.BREAK_ACTIVE:
+            elapsed=effective-self._break_start; total=self._break_deadline-self._break_start
+        elif self._last_obs_ns and self._last_kind is _Kind.OTT:
+            clock={CosinePhase.OBSERVING_OTT:(self._initial_ns,self._policy.initial_gate_seconds),
+                   CosinePhase.RETURN_INTENT_OBSERVING:(self._intent_window_ns,self._policy.return_intent_window_seconds)}.get(self._phase)
+            if clock is None: return None
+            elapsed,total=clock[0],_to_ns(clock[1])
+        elif self._last_obs_ns and self._last_kind is _Kind.FOCUS and self._candidate:
+            if self._phase is CosinePhase.CLOSURE_CONFIRMING:
+                elapsed=self._closure_ns; total=_to_ns(self._policy.closure_confirmation_seconds)
+            elif self._phase in {CosinePhase.RETURN_VERIFYING,CosinePhase.FINAL_CALLBACK_HIDDEN_VERIFYING,CosinePhase.FINAL_CALLBACK_ACTIVE}:
+                elapsed=self._verify_ns; total=_to_ns(self._policy.return_verification_seconds)
+            else: return None
+        else: return None
+        return elapsed/total if total>0 and 0<=elapsed<total else None
 
     def bind_parent_session(self,session_id:int)->bool:
         """Bind the exact durable Monitor session before any COSINE event."""

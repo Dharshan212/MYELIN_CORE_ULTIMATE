@@ -1,0 +1,18 @@
+[
+  {
+    "organ": "mine",
+    "progress": 0.1
+  },
+  {
+    "organ": "mine",
+    "progress": 0.3
+  },
+  {
+    "organ": "cosine",
+    "progress": 0.05
+  },
+  {
+    "organ": "cosine",
+    "progress": 0.15
+  }
+]

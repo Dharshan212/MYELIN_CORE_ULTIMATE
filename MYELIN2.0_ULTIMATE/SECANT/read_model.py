@@ -115,6 +115,8 @@ class SecantProjection:
     cleanup_pending: bool = False
     dwell_active: bool = False
     dwell_target_ns: int | None = None
+    # Read-only clock-face anchor; never consumed by SECANT decisions/evidence.
+    escalation_deadline_monotonic_ns: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

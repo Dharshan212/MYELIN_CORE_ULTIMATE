@@ -354,6 +354,42 @@ def qalpha(value, a: float) -> QColor:
     return colour
 
 
+# ---------- analysis surfaces (MIRL / MINE / COSINE / SECANT deep analysis) ----------
+# Each analysis overlay floats a panel over ONE blurred grab of the page beneath
+# it.  The panel is near-opaque so that grab can never ghost through the
+# evidence as bands of the page below, and the dim layer / hairline tint follow
+# the active world instead of a fixed navy-on-white.  Presentation only.
+ANALYSIS_PANEL_ALPHA: Final = 0.97
+
+
+def analysis_scrim(tokens: ThemeTokens) -> QColor:
+    """Dim layer behind an analysis panel.
+
+    Dark worlds keep the established navy dim.  A light world gets a light veil
+    of its own window colour -- a navy dim over a light page turns it grey.
+    """
+
+    if tokens.is_dark:
+        return QColor(4, 8, 16, 140)
+    veil = QColor(tokens.window_background)
+    veil.setAlpha(150)
+    return veil
+
+
+def analysis_ink(tokens: ThemeTokens) -> tuple[int, int, int]:
+    """Neutral tint for hairlines and glass fills: white on dark, slate on light."""
+
+    return (255, 255, 255) if tokens.is_dark else (15, 23, 42)
+
+
+def paint_analysis_backdrop(painter, rect, backdrop, tokens: ThemeTokens) -> None:
+    """Paint an analysis overlay's blurred page grab plus its theme-aware scrim."""
+
+    if backdrop is not None:
+        painter.drawPixmap(rect, backdrop)
+    painter.fillRect(rect, analysis_scrim(tokens))
+
+
 def make_font(
     size_px: float,
     weight: int = 400,

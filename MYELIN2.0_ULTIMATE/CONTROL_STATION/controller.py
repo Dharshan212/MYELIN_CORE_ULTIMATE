@@ -33,6 +33,7 @@ from typing import Final
 from PyQt6.QtCore import QObject, QTimer, Qt, pyqtSignal
 from collections import deque
 from uuid import uuid4
+from CONTROL_STATION.command_delivery import PendingCommand
 
 
 LOGGER = logging.getLogger(__name__)
@@ -244,6 +245,7 @@ class ControlStationController(QObject):
     mine_watch_status_changed = pyqtSignal(object)
     mirl_health_status_changed = pyqtSignal(object)
     normal_break_fact_changed = pyqtSignal(object)
+    normal_break_command_result = pyqtSignal(object)
     # Raw SineFact transport for presentation coordinators (e.g. the common
     # theme's Normal-SINE atmosphere claims).  Transport only: this signal
     # carries whatever SINE already published and decides nothing itself.
@@ -263,6 +265,7 @@ class ControlStationController(QObject):
         super().__init__(parent)
 
         self._pending_study_prepare = None
+        self._pending_commands = {}
         self._secant_presenter = None
         self._secant_visual_projection = None
         self._pending_secant_presentation = deque()
@@ -532,32 +535,17 @@ class ControlStationController(QObject):
     ) -> bool:
         """Send one popup action and surface transport rejection to that popup."""
 
-        acknowledgement: queue.Queue = queue.Queue(maxsize=1)
         payload = {
             "request_id": str(request_id),
             "occurred_monotonic_ns": int(occurred_ns),
             "response": str(response),
         }
-        if not self._enqueue_command("sine_user_action", payload, acknowledgement):
-            self._show_sine_action_rejection(
-                request_id,
-                "ACTION NOT SENT · ENGINE BUSY · TRY AGAIN",
-            )
-            return False
-        try:
-            accepted = bool(acknowledgement.get(timeout=1.5))
-        except queue.Empty:
-            self._show_sine_action_rejection(
-                request_id,
-                "ACCEPTANCE NOT CONFIRMED · TRY AGAIN",
-            )
-            return False
-        if not accepted:
-            self._show_sine_action_rejection(
-                request_id,
-                "ACTION NOT ACCEPTED · TRY AGAIN",
-            )
-        return accepted
+        receipt = self._submit_async_command("sine_user_action", payload, (request_id,))
+        def completed(reply):
+            if reply.error or not reply.value:
+                self._show_sine_action_rejection(request_id, reply.error or "ACTION NOT ACCEPTED · TRY AGAIN")
+        receipt.add_done_callback(completed)
+        return not bool(receipt.error)
 
     def _show_sine_action_rejection(self, request_id: str, message: str) -> None:
         presenter = self._sine_presenter
@@ -565,7 +553,7 @@ class ControlStationController(QObject):
             presenter.show_action_rejection(str(request_id), str(message))
 
     def _submit_normal_break_command(self, action: str, payload: object) -> bool:
-        """Transport one exact Normal Break action and wait for backend admission."""
+        """Queue one exact Normal Break action; apply backend admission later."""
 
         presenter = self._normal_break_presenter
         if action not in {"start", "cancel", "stop"} or not isinstance(payload, dict):
@@ -578,28 +566,18 @@ class ControlStationController(QObject):
                 )
             return False
 
-        acknowledgement: queue.Queue = queue.Queue(maxsize=1)
-        accepted = self._enqueue_command(
-            f"normal_break_{action}",
-            dict(payload),
-            acknowledgement,
-        )
-        message = "NORMAL BREAK ACTION NOT SENT · ENGINE BUSY · TRY AGAIN"
-        if accepted:
-            try:
-                accepted = bool(acknowledgement.get(timeout=1.5))
-                message = "NORMAL BREAK ACTION NOT ACCEPTED · TRY AGAIN"
-            except queue.Empty:
-                accepted = False
-                message = "ACCEPTANCE NOT CONFIRMED · TRY AGAIN"
-        if presenter is not None:
-            presenter.show_command_result(
-                payload,
-                action=action,
-                accepted=bool(accepted),
-                message=message,
-            )
-        return bool(accepted)
+        identity = tuple(payload.get(name) for name in ("break_id", "generation", "episode_uid", "candidate_uid"))
+        receipt = self._submit_async_command(f"normal_break_{action}", dict(payload), identity)
+        def completed(reply):
+            accepted = not reply.error and bool(reply.value)
+            message = reply.error or "NORMAL BREAK ACTION NOT ACCEPTED · TRY AGAIN"
+            current = self._normal_break_presenter
+            if current is not None:
+                current.show_command_result(payload, action=action, accepted=accepted, message=message)
+            self.normal_break_command_result.emit({"payload": payload, "action": action,
+                                                   "accepted": accepted, "message": message})
+        receipt.add_done_callback(completed)
+        return not bool(receipt.error)
 
     def request_normal_break_stop(self, payload: object) -> bool:
         """Expose the existing exact STOP transport to the Control Station card."""
@@ -677,30 +655,42 @@ class ControlStationController(QObject):
                 )
 
     def submit_cosine_command(self, command):
-        """Synchronously obtain the exact backend CommandResult for a popup.
-
-        Queue rejection or timeout is surfaced as failure so the popup stays
-        open and retryable; no UI-side success is invented.
-        """
-
-        response: queue.Queue = queue.Queue(maxsize=1)
-        if not self._enqueue_command("cosine_command", command, response):
-            raise RuntimeError("COSINE command queue is full")
-        try:
-            return response.get(timeout=1.5)
-        except queue.Empty as exc:
-            raise RuntimeError("COSINE command acknowledgement timed out") from exc
+        """Queue once; the GUI receives the exact authoritative result later."""
+        return self._submit_async_command("cosine_command", command,
+            (command.generation, command.request_id, command.kind))
 
     def submit_mine_command(self, command):
-        """Synchronously return the exact backend MINE command result."""
+        """Queue once; no waiting or acceptance inference on the GUI thread."""
+        return self._submit_async_command("mine_command", command,
+            (command.generation, command.request_id, command.kind))
 
-        response: queue.Queue = queue.Queue(maxsize=1)
-        if not self._enqueue_command("mine_command", command, response):
-            raise RuntimeError("MINE command queue is full")
-        try:
-            return response.get(timeout=1.5)
-        except queue.Empty as exc:
-            raise RuntimeError("MINE command acknowledgement timed out") from exc
+    def _submit_async_command(self, kind, payload, identity):
+        key = (kind, *identity)
+        pending = self._pending_commands.get(key)
+        if pending is not None:
+            return pending[1]
+        response = queue.Queue(maxsize=1)
+        receipt = PendingCommand()
+        if self._enqueue_command(kind, payload, response):
+            self._pending_commands[key] = (response, receipt)
+        else:
+            receipt.finish(error="COMMAND NOT SENT · ENGINE BUSY OR STOPPED · TRY AGAIN")
+        return receipt
+
+    def _drain_command_replies(self):
+        for key, (response, receipt) in tuple(self._pending_commands.items()):
+            try:
+                result = response.get_nowait()
+            except queue.Empty:
+                continue
+            del self._pending_commands[key]
+            receipt.finish(result)
+
+    def _retire_command_replies(self):
+        self._drain_command_replies()
+        pending, self._pending_commands = self._pending_commands, {}
+        for response, receipt in pending.values():
+            receipt.finish(error="ENGINE STOPPED · ACCEPTANCE NOT CONFIRMED")
 
     # ------------------------------------------------------------------
     # Study / COSECANT requests
@@ -920,6 +910,7 @@ class ControlStationController(QObject):
             pass
 
     def _prepare_new_session(self) -> None:
+        self._retire_command_replies()
         self._pause_pending = self._pause_eligibility = None
         self._critical_commands.clear()
         self._pending_secant_presentation.clear()
@@ -1113,6 +1104,7 @@ class ControlStationController(QObject):
     def _drain_telemetry(self, *, drain_all: bool = False) -> int:
         """Deliver a bounded telemetry batch on the Qt GUI thread."""
 
+        self._drain_command_replies()
         self._drain_study_confirmation_acknowledgements()
         self._drain_study_prepare_result()
         processed = 0
@@ -1350,6 +1342,7 @@ class ControlStationController(QObject):
         """Publish STOPPED only when Core Engine cleanup is factual."""
 
         self._drain_telemetry(drain_all=True)
+        self._retire_command_replies()
         pending_confirmation_ids = tuple(self._pending_study_confirmation_actions)
         self._pending_study_confirmation_actions.clear()
         if self._study_confirmation_presenter is not None:

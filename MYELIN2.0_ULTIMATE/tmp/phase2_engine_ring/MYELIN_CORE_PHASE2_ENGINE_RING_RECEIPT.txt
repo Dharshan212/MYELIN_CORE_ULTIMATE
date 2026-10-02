@@ -1,0 +1,171 @@
+MYELIN CORE — PHASE 2 ENGINE RING RECEIPT
+
+ROOT:
+C:\Users\Dharshan\Downloads\MYELIN_GENALOGY\MYELIN2.0_ULTIMATE_TRIAL
+
+EXISTING SINE RING AUTHORITY:
+Renderer: UI_THEMES/animation.py, EngineRing (line 275), set_progress and paintEvent.
+The existing visual is an authoritative progress arc plus cyan glow. It has no
+independent animation timer. Successive SINE snapshots advance the arc.
+Path: SINE/sine.py SineRuntime.live_view -> CORE_ENGINE/monitor.py
+_publish_live_views (sine_watch_status) -> CONTROL_STATION/controller.py
+_route_prepared_view -> sine_watch_status_changed -> ControlPage.render_sine ->
+_render_current_authority_interval -> existing EngineRing.set_progress.
+Applied stage duration and next_deadline_seconds supply SINE progress. Existing
+blacklist dwell progress supplies the pre-escalation arc. Protected Red has an
+existing stationary full arc. No-owner/resource/reset clears SINE progress;
+engine terminal states clear the ring. Global pause leaves a stationary arc.
+EngineRing is central, but its previous progress input was SINE-specific.
+Smallest extension: consume MINE/COSINE snapshots at their existing ControlPage
+render slots and combine only these visual inputs in the existing ring.
+No SINE calculation, authority, signal or countdown behavior was rewritten.
+
+MINE AUTHORITATIVE TIMER SOURCE:
+MineRuntime.snapshot, under its existing lock: _initial_ns, _return_intent_ns,
+_important_start/_important_deadline on the existing effective clock, _visual_ns,
+_verify_ns and _closure_ns. The projection uses current authority phase,
+certified observation kind/focus continuity, existing policy durations, global
+pause, Monitor hold and Study preemption. It never credits time or advances state.
+The existing mine_watch_status_changed signal delivers the immutable snapshot.
+
+COSINE AUTHORITATIVE TIMER SOURCE:
+CosineRuntime.snapshot, under its existing lock: _initial_ns, _intent_window_ns,
+_break_start/_break_deadline on the existing effective clock, _verify_ns and
+_closure_ns. The projection uses current authority phase, certified OTT/focus
+continuity, existing policy durations, global pause, Monitor hold and Study
+suppression. Committed break timing does not depend on acknowledgement or popup
+visibility. The existing cosine_live_status_changed signal delivers the snapshot.
+
+IMPLEMENTATION:
+One optional, read-only timer_progress_fraction snapshot value per organ.
+None means no authoritative timer is progressing; a fraction supplies existing
+counter/deadline progress to the original EngineRing. No new signal or polling.
+The ControlPage visual consumer validates active engine state, exact parent
+session identity and organ generation. It preserves SINE's existing priority
+while SINE counts, otherwise combines progressing MINE/COSINE inputs using the
+largest progress fraction. One organ stopping leaves the other contribution.
+Paused arcs stay stationary. Completion, cancellation, Stop, emergency, error,
+session detachment (including while paused), and application shutdown clear the
+appropriate visual input. Old session/generation snapshots cannot reactivate it.
+
+FILES CHANGED:
+C:\Users\Dharshan\Downloads\MYELIN_GENALOGY\MYELIN2.0_ULTIMATE_TRIAL\MINE\mine.py
+  MineSnapshot, MineRuntime.snapshot, new pure _timer_progress_fraction projection.
+C:\Users\Dharshan\Downloads\MYELIN_GENALOGY\MYELIN2.0_ULTIMATE_TRIAL\COSINE\cosine.py
+  CosineSnapshot, CosineRuntime.snapshot, new pure _timer_progress_fraction projection.
+C:\Users\Dharshan\Downloads\MYELIN_GENALOGY\MYELIN2.0_ULTIMATE_TRIAL\CONTROL_STATION\application.py
+  ControlPage.__init__, _engine_status_changed, reset_runtime_presentation,
+  _clear_current_resource_presentation, render_mine, render_cosine,
+  _render_current_authority_interval, four visual consumer helpers;
+  ControlStationWindow._finish_shutdown calls ring retirement before shutdown.
+Related backups, tests, raw logs, images, integrity evidence, this receipt and
+changes.patch are inside ROOT/tmp/phase2_engine_ring. No files edited outside ROOT.
+
+SINE RUNNING -> RING:
+PASS
+MINE RUNNING -> RING:
+PASS
+COSINE RUNNING -> RING:
+PASS
+SECANT EXCLUDED:
+PASS
+COSECANT EXCLUDED:
+PASS
+STOP CLEANUP:
+PASS
+EMERGENCY/SHUTDOWN CLEANUP:
+PASS
+NEW TIMER CREATED:
+NO
+TIMER DURATIONS CHANGED:
+NO
+DATABASE CHANGED:
+NO
+SCHEMA CHANGED:
+NO
+ORGAN LOGIC CHANGED:
+NO — only additive, pure read-only snapshot projections.
+UNRELATED FILES CHANGED:
+NO
+
+TESTS:
+Final command, from ROOT:
+python -B tmp\phase2_engine_ring\run_tests.py tmp\phase2_engine_ring\test_engine_ring.py ..\TIMER_IMPLEMENTATION_20261001\test_all_countdown_surfaces.py ..\TIMER_IMPLEMENTATION_20261001\test_timer_fix.py -k "not test_protected_source_bytes_unchanged"
+Raw output: final_test_results.txt
+........................................................................ [ 92%]
+......                                                                   [100%]
+78 passed, 1 deselected in 7.84s
+
+31 targeted real-runtime/Qt tests plus 47 existing functional countdown tests.
+Authorities consumed synthetic certified facts through their real observation,
+command, pause/hold, completion and shutdown APIs, using in-memory event sinks.
+Actual ControlPage widgets, Qt signals and EngineRing painting were exercised.
+Every SQLite connection was prohibited by a Python audit hook. Test outputs and
+isolated APPDATA/LOCALAPPDATA paths stayed inside this audit directory.
+No production monitoring session or recorder was launched.
+
+Validation matrix:
+A. SINE running -> same blue arc advances: PASS
+B. SINE stops -> SINE input ends: PASS
+C. MINE running -> same blue arc advances: PASS
+D. MINE completion/cancellation -> contribution ends: PASS
+E. COSINE running -> same blue arc advances: PASS
+F. COSINE completion/cancellation -> contribution ends: PASS
+G. SECANT activity excluded: PASS
+H. COSECANT activity excluded: PASS
+I. Stop -> no stale ring: PASS
+J. Emergency/session/application shutdown -> no stale ring: PASS
+Additional checks: initial evidence clocks, return-intent timers, allowance and
+break deadlines, final-callback recovery, verification and closure, popup-only
+inactivity, unconfirmed evidence inactivity, global pause, Monitor hold/resume,
+paused session detach, concurrent organ contributions, old generations/sessions,
+pure snapshots/no new events, original Qt countdown continuity and UI stalls.
+
+Integrity command: python -B tmp\phase2_engine_ring\check_integrity.py
+Raw output: integrity_output.txt; structured evidence: integrity_results.json.
+PASS: 120 baseline files checked; exactly three runtime files changed.
+PASS: removal of only the new snapshot field/projection restores the exact AST
+of each original MINE/COSINE module, including all authority functions,
+constants, event types and schema definitions.
+PASS: original SINE progress calculations and interval presentation restore
+exactly after normalizing only the ring setter delegation.
+PASS: existing timer/animation construction, EngineRing renderer, other UI
+classes, Phase 1 SECANT source and persistence/schema sources are unchanged.
+
+The first older regression run passed 47 functional tests but its historical
+checksum test could not find that older run's before.json after output redirection
+(countdown_regression_results.txt). That checksum also requires MINE/COSINE bytes
+to remain identical, which is incompatible with this authorized snapshot addition.
+It was explicitly deselected in the final run and replaced by the current Phase 2
+AST/120-file hash comparison, rather than adapting or weakening the older test.
+
+Visual evidence: mine_30.png, mine_60.png, cosine_30.png, cosine_60.png;
+ring_visual_results.json records their authoritative fractions. The original
+cyan arc/glow was inspected and is unchanged; only the authoritative input advances.
+Windows acceptance: actual Windows Qt, offscreen. Automated runtime/UI acceptance
+passed. Interactive live-monitoring acceptance was not performed.
+
+FILES INSPECTED:
+UI_THEMES/animation.py; UI_THEMES/theme.py; SINE/sine.py; MINE/mine.py;
+COSINE/cosine.py; CORE_ENGINE/monitor.py; CONTROL_STATION/controller.py;
+CONTROL_STATION/application.py; CONTROL_STATION/lifecycle.py;
+CONTROL_STATION/timer_display.py; SECANT/dashboard_view.py;
+PERSISTENCE/database.py; existing isolated countdown/navigation test harnesses;
+Phase 1 receipt and validation artifacts; applicable Downloads/AGENTS.md and its
+historical references. The current explicit Phase 2 request governs this scope.
+
+NON-REGRESSION:
+No authority transitions, intervention/recovery rules, platform continuity,
+episode identities, MBI, Study/Normal Break/SECANT/COSECANT behavior, metrics,
+reports, recorder, persistence/schema, packaging or version metadata changed.
+Phase 1 SECANT visual integration remains intact.
+
+FINAL RESULT:
+PASS
+
+FINAL ACTION:
+STOP — WAIT FOR CHIEF / CHATGPT.
+
+PHASE 2 COMPLETE — STOPPED.
+NEXT PHASE NOT STARTED.
+WAITING FOR CHIEF REVIEW / TEST / GO.

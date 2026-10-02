@@ -264,6 +264,8 @@ class MineSnapshot:
     durable_detail: str
     data_quality: str
     schema_version: str = MINE_SCHEMA_VERSION
+    # Read-only presentation: None means no authoritative timer progressing.
+    timer_progress_fraction: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,7 +471,36 @@ class MineRuntime:
                 durable_health=self._durable_health,
                 durable_detail=self._durable_detail,
                 data_quality="PAUSED" if self._paused else self._quality,
+                timer_progress_fraction=self._timer_progress_fraction(effective),
             )
+
+    def _timer_progress_fraction(self, effective: int) -> float | None:
+        """Project existing clocks only; never credit time or advance a phase."""
+        if self._paused or self._monitor_held or self._study_preempted:
+            return None
+        if self._phase is MinePhase.IMPORTANT_ALLOWANCE_ACTIVE:
+            elapsed = effective - self._important_start
+            total = self._important_deadline - self._important_start
+        elif self._last_obs_ns and self._last_kind is MineObservationKind.MESSAGING:
+            clock = {
+                MinePhase.OBSERVING_MESSAGING: (self._initial_ns, self._policy.initial_gate_seconds),
+                MinePhase.RETURN_INTENT_ACTIVE: (self._return_intent_ns, self._policy.return_intent_seconds),
+            }.get(self._phase)
+            if clock is None:
+                return None
+            elapsed, total = clock[0], _to_ns(clock[1])
+        elif self._last_obs_ns and self._last_kind is MineObservationKind.FOCUS and self._focus_active:
+            clock = {
+                MinePhase.RETURN_VISUAL_CONFIRMING: (self._visual_ns, self._policy.final_callback_hide_seconds),
+                MinePhase.RETURN_VERIFYING: (self._verify_ns, self._policy.return_verification_seconds),
+                MinePhase.CLOSURE_CONFIRMING: (self._closure_ns, self._policy.closure_confirmation_seconds),
+            }.get(self._phase)
+            if clock is None:
+                return None
+            elapsed, total = clock[0], _to_ns(clock[1])
+        else:
+            return None
+        return elapsed / total if total > 0 and 0 <= elapsed < total else None
 
     def observe(self, observation: MineObservation) -> tuple[MineEffect, ...]:
         with self._lock:

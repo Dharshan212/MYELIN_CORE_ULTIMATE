@@ -601,21 +601,20 @@ class _BoundaryNote(QFrame):
 #:
 #: SINE (_whole_generic: terminal kind SINE_EPISODE_RESOLVED, keyed by
 #: episode_uid), MINE (_whole_mine: MineEpisodeProjection.is_closed, keyed by
-#: mine_episode_id) and COSINE (_whole_cosine: CosineEpisodeProjection.is_closed,
-#: keyed by cosine_session_id+generation) expose the SAME chartable unit: an
-#: organ-specific completed-episode count -- one distinct behavioral episode
-#: that reached a certified terminal/closed state in the selected experiment
-#: -- even though each organ's own evidence mechanism differs (a named
-#: terminal event for SINE, a derived is_closed flag for MINE/COSINE). The
-#: existing roster already labels all three identically ("Completed
-#: episodes"), confirming this is a defensible, pre-existing common basis --
-#: not a new inference invented here.
+#: mine_episode_id), COSINE (_whole_cosine: CosineEpisodeProjection.is_closed,
+#: keyed by cosine_session_id+generation), and SECANT (certified native
+#: founded-and-closed episodes) share the completed-organ-episode count unit.
+#: These existing Whole-MYELIN rows cover the full finalized parent MYELIN
+#: session, not just the selected experiment. A completed native episode does
+#: not necessarily mean successful recovery. Preserve each organ's existing
+#: certification; never substitute SECANT's lifetime landing count or its
+#: separate experiment-contained detail rows.
 #:
-#: This does NOT prove the three organs' episode identities form one
+#: This does NOT prove the four organs' episode identities form one
 #: mutually exclusive population of unique behavioral episodes -- one
 #: broader user journey could transition between organ domains. The donut
 #: therefore means exactly "share of the summed completed organ-episode
-#: counts among SINE, MINE and COSINE" -- never time share, dwell share,
+#: counts among SINE, MINE, COSINE and SECANT" -- never time share, dwell share,
 #: percentage of unique user episodes, distraction probability, or share of
 #: the whole session.
 #:
@@ -623,20 +622,20 @@ class _BoundaryNote(QFrame):
 #: COSECANT ("Completed returns" = distinct break_id with RETURN_CONFIRMED)
 #: both count "a return was confirmed", but via different event streams and
 #: different identity keys than an episode closing -- not the same unit as
-#: SINE/MINE/COSINE's episode count, and not proven identical to each other.
+#: SINE/MINE/COSINE/SECANT's episode count, and not proven identical to each other.
 #: STUDY ("Completed study blocks") counts distinct (block_id, generation)
 #: pairs -- a planned time-block unit, unrelated to episodes or returns.
 #: NORMAL_BREAK ("Completed break events") counts distinct break_id with
 #: EITHER a natural completion OR an early stop folded into one count -- a
 #: break-lane unit, and not even a single terminal-kind basis internally.
 #:
-#: Conclusion: only SINE/MINE/COSINE share a common, chartable basis. MIRL,
+#: Conclusion: SINE/MINE/COSINE/SECANT share this chartable count basis. MIRL,
 #: COSECANT, STUDY and NORMAL_BREAK are held out of the Phase 4 bar/donut --
 #: their certified values remain fully visible, unchanged, in Chapter 3's
 #: Whole-MYELIN Analysis panel.
-_EPISODE_CHART_ORGANS: Final = ("SINE", "MINE", "COSINE")
+_EPISODE_CHART_ORGANS: Final = ("SINE", "MINE", "COSINE", "SECANT")
 _EPISODE_CHART_HELD_NOTE: Final = (
-    "SECANT is shown separately in its Study journey and result tables. MIRL (verified recoveries), COSECANT (completed returns), STUDY (completed "
+    "MIRL (verified recoveries), COSECANT (completed returns), STUDY (completed "
     "study blocks) and NORMAL BREAK (completed break events) use a different "
     "certified unit than a completed episode and are not included in this "
     "comparison. Their certified values remain in Chapter 3's Whole-MYELIN "
@@ -646,6 +645,7 @@ _EPISODE_CHART_ACCENTS: Final = {
     "SINE": "#38BDF8",  # mirrors chapter3_view.py's local SINE-identity cyan
     "MINE": "#22C55E",  # mirrors chapter3_view.py's local MINE-identity green
     "COSINE": FEED_BADGE_COSINE,  # UI_THEMES.theme's existing COSINE badge color
+    "SECANT": "#8E5FC4",  # existing Science Lab report-chart purple
 }
 _MUTED_CHART_COLOR: Final = "#475569"
 
@@ -731,41 +731,16 @@ class _QuickSummaryStrip(QFrame):
         self._values["CERTIFIED PATTERNS"].setText(str(len(presentation.result_patterns)))
 
 
-#: Phase 5 history audit (SCIENCE_LAB/analysis.py, SCIENCE_LAB/handoff.py,
-#: SCIENCE_LAB/chapter5_view.py -- read-only; no file below was reopened):
-#:
-#: Outcome 1 -- real certified cross-experiment/cross-episode history:
-#: NOT AVAILABLE. ``Chapter3ResultPackage``/``Chapter3TransferReceipt``
-#: certify exactly one selected, already-completed experiment; neither
-#: carries a list of prior packages, prior experiments, or a session-wide
-#: episode index. ``Chapter5ResultsView`` itself only ever retains the one
-#: most recently transferred receipt (``self._current_receipt``) -- there is
-#: no accumulation of past transfers to plot. Even if a broader history
-#: existed elsewhere (PERSISTENCE, Chapter 3's own analysis-time inputs),
-#: Chapter 5's declared import boundary forbids reading it directly, and no
-#: approved second transfer channel for history exists -- inventing one is
-#: out of scope for a visualization phase.
-#:
-#: Outcome 2 -- a within-experiment series with a common organ measure:
-#: NOT AVAILABLE either. ``SCIENCE_LAB/analysis.py::_build_timeline`` (the
-#: source of the certified ``package.timeline``) builds timestamped
-#: EPISODE_CLOSURE events for SINE only; MINE and COSINE have no equivalent
-#: per-episode timestamped entries in the certified timeline -- only their
-#: final aggregate closed-count survives, in ``whole_myelin_summary``, with
-#: no occurred_monotonic_ns per episode. A trend needs the same measure
-#: through time for more than one organ; that comparable series does not
-#: exist in the certified package.
-#:
-#: Conclusion: Outcome 3. No trend line is drawn. The line-graph card shows
-#: an honest "NOT ENOUGH CERTIFIED HISTORY FOR TREND" state instead of a
-#: fabricated line -- this is a pass of the UI requirement, not a failure.
+#: The comparison uses parent-session totals from one certified package,
+#: not a comparable four-organ time series. SECANT has certified timeline
+#: events, including both recovery closure and native episode closure; those
+#: must not be counted as separate completed episodes. Historical previews
+#: remain separate packages, not an accumulated trend dataset. Keep the
+#: existing "NOT ENOUGH CERTIFIED HISTORY FOR TREND" placeholder.
 _LINE_GRAPH_REASON: Final = (
-    "Chapter 3 certifies one selected, already-completed experiment at a time "
-    "and carries no cross-experiment history. Within this one experiment, only "
-    "SINE has timestamped per-episode closure events in the certified timeline "
-    "-- MINE and COSINE expose only a final aggregate count, with no comparable "
-    "time series. No organ trend can be drawn truthfully from the certified "
-    "package today."
+    "The certified package does not provide a comparable completed-episode "
+    "time series for SINE, MINE, COSINE and SECANT. Existing SECANT timeline "
+    "events do not provide the missing comparable four-organ series."
 )
 
 
@@ -919,7 +894,7 @@ class _EpisodeBarCanvas(QFrame):
 
 
 class _EpisodeBarChartCard(QFrame):
-    """COMPLETED EPISODES BY ORGAN -- SINE/MINE/COSINE only (see the Phase 4
+    """COMPLETED EPISODES BY ORGAN -- SINE/MINE/COSINE/SECANT (see the
     semantic-audit note above ``_EPISODE_CHART_ORGANS``); a truthful bar per
     organ using exactly the certified count Chapter 3 already produced.
     """
@@ -948,8 +923,9 @@ class _EpisodeBarChartCard(QFrame):
 
         layout.addWidget(
             _paragraph(
-                "Certified completed-episode counts for SINE, MINE and COSINE -- "
-                "the three organs that expose this same chartable unit.",
+                "Certified completed-episode counts for SINE, MINE, COSINE and "
+                "SECANT in the finalized parent MYELIN session. Completed does "
+                "not necessarily mean recovered.",
                 role="muted", size=9.5,
             )
         )
@@ -1033,10 +1009,10 @@ class _EpisodeShareDonutCanvas(QFrame):
 
 class _EpisodeShareDonutCard(QFrame):
     """COMPLETED ORGAN-EPISODE SHARE -- share of the summed completed
-    organ-episode counts among SINE, MINE and COSINE for the selected
-    experiment.  Deliberately not named "dwell distribution", "time share",
+    organ-episode counts among SINE, MINE, COSINE and SECANT for the finalized
+    parent MYELIN session. Deliberately not named "dwell distribution", "time share",
     or "percentage of unique user episodes": no certified evidence for any
-    of those exists for this basis, and the three organs' episode identities
+    of those exists for this basis, and the four organs' episode identities
     are not proven to form one mutually exclusive population -- one broader
     user journey could transition between organ domains.
     """
@@ -1068,8 +1044,9 @@ class _EpisodeShareDonutCard(QFrame):
         layout.addWidget(
             _paragraph(
                 "Share of the summed completed organ-episode counts among SINE, "
-                "MINE and COSINE -- not a measure of time, dwell, unique user "
-                "episodes, distraction probability, or share of the whole session.",
+                "MINE, COSINE and SECANT in the finalized parent MYELIN session "
+                "-- not a measure of time, dwell, unique user episodes, "
+                "distraction probability, or session duration.",
                 role="muted", size=9.5,
             )
         )

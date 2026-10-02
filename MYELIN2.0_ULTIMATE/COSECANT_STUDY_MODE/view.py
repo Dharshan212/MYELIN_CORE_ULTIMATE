@@ -19,6 +19,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace as dataclasses_replace
 from typing import Final
+from CONTROL_STATION.timer_display import countdown, cosecant_remaining, secant_remaining, start_frames
 
 from PyQt6.QtCore import QPoint, QDate, QObject, Qt, QTime, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QCloseEvent, QKeyEvent
@@ -529,6 +530,9 @@ class StudyTimerCard(QFrame):
             self.subject_label.setText(study.subject or "No subject selected")
             self.task_label.setText(study.task or "No task selected")
             self.time_label.setText(_duration(study.remaining_seconds))
+            # Snapshot delivery may be late. Paint its current projection in
+            # this same turn instead of flashing the stale snapshot countdown.
+            self._project_study_countdown()
             self.state_label.setText(study.state.value)
             self.progress.setValue(
                 max(0, min(1000, int(round(study.progress_percent * 10))))
@@ -669,6 +673,9 @@ class StudyTelemetryPanel(QFrame):
         study: StudySnapshot | None,
         cosecant: CosecantSnapshot | None,
     ) -> None:
+        self._clock_cosecant = cosecant if study is not None else None
+        if not hasattr(self, "_clock_frame"):
+            self._clock_frame = start_frames(self, self._refresh_cosecant_clock)
         if study is None:
             for value in self._values.values():
                 value.setText("—")
@@ -696,11 +703,7 @@ class StudyTelemetryPanel(QFrame):
             self._values["final_lock"].setText("—")
         else:
             self._values["cosecant"].setText(cosecant.state.value)
-            self._values["next"].setText(
-                _duration(cosecant.seconds_to_next_stage)
-                if cosecant.seconds_to_next_stage is not None
-                else "—"
-            )
+            self._refresh_cosecant_clock()
             # Every row below reads a field COSECANT already published. None
             # of them computes a deadline, matches a resource or verifies a
             # return; the confirmation figure is the authority's own elapsed
@@ -714,6 +717,10 @@ class StudyTelemetryPanel(QFrame):
             self._values["final_lock"].setText(
                 "YES" if cosecant.final_locked else "NO"
             )
+
+
+    def _refresh_cosecant_clock(self) -> None:
+        self._values["next"].setText(countdown(cosecant_remaining(self._clock_cosecant)))
 
 
 def _resource_intent_classification_text(live: ResourceIntentLiveView) -> str:
@@ -883,16 +890,24 @@ class ResourceIntentTelemetryPanel(QFrame):
         from SECANT.read_model import SecantProjection, RecoveryPhase
         if projection is not None and not isinstance(projection, SecantProjection):
             return
+        self._secant_clock_projection = projection
+        if not hasattr(self, "_secant_clock_timer"):
+            self._secant_clock_timer = start_frames(self, self._refresh_secant_clock)
+        self._refresh_secant_clock()
+
+    def _refresh_secant_clock(self) -> None:
+        from SECANT.read_model import RecoveryPhase
+        projection = self._secant_clock_projection
         value = self._values["secant_timer"]
         text, color = "—", ""
         if projection is not None and not projection.terminal_reason:
             p = projection
             stage = int(p.stage)
             color = {1: "#3b82f6", 2: "#f59e0b", 3: "#ef4444"}.get(stage, "")
-            # Unit/label formatting only. Never extrapolate from wall time.
+            # Only the published escalation deadline is wall-clock projectable.
             def duration(ns):
                 return _duration(None if ns is None else ns // 1_000_000_000)
-            remaining = duration(p.escalation_remaining_ns)
+            remaining = countdown(secant_remaining(p))
             if p.break_pause and p.break_pause.pause_id:
                 text = f"BREAK HOLD · {remaining}"
             elif p.uncertainty_hold_id or "uncertainty" in p.frozen_reasons:
@@ -1591,6 +1606,22 @@ class ContinuityPopup(QDialog):
             int(snapshot.study_generation),
         )
 
+    def _refresh_countdown_text(self) -> None:
+        snapshot = self._snapshot
+        if snapshot is None:
+            return
+        if snapshot.seconds_to_next_stage is not None:
+            countdown_prefix = (
+                "RETURN VERIFICATION"
+                if snapshot.state is CosecantState.RETURN_CONFIRMING
+                else "NEXT AUTHORITY"
+            )
+            self.countdown_label.setText(
+                f"{countdown_prefix} · {countdown(cosecant_remaining(snapshot))}"
+            )
+        else:
+            self.countdown_label.setText("EXACT STUDY RETURN REQUIRED")
+
     def present_snapshot(self, snapshot: CosecantSnapshot) -> bool:
         """Render (or hide) the popup; return whether it is now factually visible.
 
@@ -1609,6 +1640,8 @@ class ContinuityPopup(QDialog):
         if not _cosecant_supersedes(snapshot, self._snapshot):
             return False
         self._snapshot = snapshot
+        if not hasattr(self, "_clock_frame"):
+            self._clock_frame = start_frames(self, self._refresh_countdown_text)
         if not snapshot.popup_required:
             self.hide()
             return False
@@ -1642,17 +1675,7 @@ class ContinuityPopup(QDialog):
                 "Your planned break has ended. Return to your registered Study task."
             )
             self.status_label.setText("APPROVED BREAK COMPLETE · RETURN INTENT AVAILABLE")
-        if snapshot.seconds_to_next_stage is not None:
-            countdown_prefix = (
-                "RETURN VERIFICATION"
-                if snapshot.state is CosecantState.RETURN_CONFIRMING
-                else "NEXT AUTHORITY"
-            )
-            self.countdown_label.setText(
-                f"{countdown_prefix} · {_duration(snapshot.seconds_to_next_stage)}"
-            )
-        else:
-            self.countdown_label.setText("EXACT STUDY RETURN REQUIRED")
+        self._refresh_countdown_text()
         action_allowed = (
             CosecantUiAction.RETURN_TO_STUDY in snapshot.allowed_actions
         )
@@ -3264,8 +3287,6 @@ class StudyView(QWidget):
         menu.addSeparator()
         for label, key in (
             ("Study Notes", "study_notes"),
-            ("Timer preferences", "timer_preferences"),
-            ("Study information", "study_information"),
         ):
             action = menu.addAction(label)
             action.triggered.connect(

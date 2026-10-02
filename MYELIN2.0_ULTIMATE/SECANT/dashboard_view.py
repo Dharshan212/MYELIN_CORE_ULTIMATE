@@ -8,6 +8,7 @@ It imports no read model, database, report engine, or physiology organ.
 from __future__ import annotations
 import weakref
 
+from PyQt6 import sip
 from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (
@@ -18,6 +19,10 @@ from PyQt6.QtWidgets import (
 )
 
 from SECANT import dashboard_demo as demo
+from UI_THEMES.theme import (
+    ANALYSIS_PANEL_ALPHA, DEFAULT_THEME, RADIUS_LG, RADIUS_MD, RADIUS_SM,
+    analysis_ink, build_application_stylesheet, mix, paint_analysis_backdrop,
+)
 
 
 CONTEXT_CAPTION_KEYS = frozenset(('about_architecture', 'about_dashboard_time', 'about_foundation_title', 'about_input_category', 'about_input_time', 'about_source', 'about_stage', 'about_stage_label', 'cosecant_events', 'cosecant_returns', 'distraction_attributes', 'episodes_flow', 'episodes_summary', 'evidence_attributes', 'evidence_summary', 'landing_events', 'landing_flow', 'overview_events', 'overview_flow', 'overview_insights', 'secant_archive_events', 'secant_archive_list', 'secant_archive_summary', 'source_banner', 'study_archive_events', 'study_archive_list', 'study_archive_summary'))
@@ -32,28 +37,224 @@ TONE = {
     "purple": "#ae80ff", "yellow": "#f4e36d", "neutral": "#d8e5f0",
 }
 
-PANEL_STYLE = (
-    "QFrame#analysisPanel{background:qlineargradient(x1:0,y1:0,x2:1,y2:1,"
-    "stop:0 rgba(21,48,73,230),stop:1 rgba(10,29,48,238));"
-    "border:1px solid rgba(77,139,176,115);border-radius:14px;}"
-)
-TABLE_STYLE = (
-    "QTableWidget{background:rgba(6,25,43,210);alternate-background-color:rgba(16,44,68,225);"
-    "color:#e6f2ff;border:1px solid rgba(73,130,165,135);border-radius:7px;"
-    "selection-background-color:#0b5269;selection-color:white;gridline-color:transparent;}"
-    "QTableWidget::item{padding:4px 6px;border-bottom:1px solid rgba(112,161,190,35);}"
-    "QHeaderView::section{background:#12374f;color:#adcae3;border:none;"
-    "border-right:1px solid #31536a;border-bottom:1px solid #31536a;padding:5px 7px;}"
-    "QScrollBar:vertical{background:#102d43;width:9px;}"
-    "QScrollBar::handle:vertical{background:#2c6883;border-radius:4px;min-height:28px;}"
-)
+# The world every SECANT analysis widget is styled for.  Deep Analysis follows the
+# host's active theme (``SecantDeepAnalysis._retheme`` records it); SECANT's own
+# semantic hues (TONE) are kept and only darkened where a light world needs it.
+_THEME = DEFAULT_THEME
+
+
+def _set_theme(theme) -> None:
+    global _THEME
+    _THEME = theme
+
+
+def _ink(theme=None) -> str:
+    """``R,G,B`` of the faint glass tint: white on dark worlds, slate on light."""
+    return "%d,%d,%d" % analysis_ink(theme or _THEME)
+
+
+def _rgba(color: str, alpha: float) -> str:
+    c = QColor(color)
+    return f"rgba({c.red()},{c.green()},{c.blue()},{alpha})"
+
+
+def _accent(color: str, theme=None) -> str:
+    """A SECANT semantic hue, kept readable on the active world."""
+    theme = theme or _THEME
+    return color if theme.is_dark else mix(color, 45, theme.text_primary)
+
+
+def _text(color: str, theme=None) -> str:
+    """Resolve a label colour role against the active world."""
+    theme = theme or _THEME
+    return {TEXT: theme.text_primary, MUTED: theme.muted, CYAN: theme.cyan}.get(color) or _accent(color, theme)
+
+
+_CHROME_FRAMES = ("dashboardSurface", "dashboardHeader", "dashboardNav", "dashboardSubnav",
+                  "dashboardFooter", "dashboardFaceSwitch")
+
+
+def _frame_qss(name: str, theme=None) -> str:
+    t = theme or _THEME
+    ink = _ink(t)
+    surface = QColor(t.surface)
+    return {
+        "dashboardSurface": (
+            f"QFrame#dashboardSurface{{background:rgba({surface.red()},{surface.green()},"
+            f"{surface.blue()},{ANALYSIS_PANEL_ALPHA});border:1px solid rgba({ink},0.14);border-radius:20px;}}"),
+        "dashboardHeader": (
+            f"QFrame#dashboardHeader{{background:rgba({ink},0.035);border:none;"
+            f"border-bottom:1px solid rgba({ink},0.14);"
+            "border-top-left-radius:18px;border-top-right-radius:18px;}"),
+        "dashboardNav": (
+            f"QFrame#dashboardNav{{background:rgba({ink},0.02);border:none;"
+            f"border-bottom:1px solid rgba({ink},0.12);}}"),
+        "dashboardSubnav": (
+            f"QFrame#dashboardSubnav{{background:rgba({ink},0.04);border:none;"
+            f"border-bottom:1px solid rgba({ink},0.10);}}"),
+        "dashboardFooter": (
+            f"QFrame#dashboardFooter{{background:rgba({ink},0.025);border:none;"
+            f"border-top:1px solid rgba({ink},0.12);"
+            "border-bottom-left-radius:18px;border-bottom-right-radius:18px;}"),
+        "dashboardFaceSwitch": (
+            f"QFrame#dashboardFaceSwitch{{background:{t.surface_soft};"
+            f"border:1px solid {t.border};border-radius:8px;}}"),
+    }[name]
+
+
+def _panel_qss(theme=None) -> str:
+    t = theme or _THEME
+    return f"QFrame#analysisPanel{{background:{t.surface_soft};border:1px solid {t.border};border-radius:14px;}}"
+
+
+def _metric_qss(accent: str, theme=None) -> str:
+    t = theme or _THEME
+    return f"QFrame#metricCard{{background:{t.surface_soft};border:1px solid {accent};border-radius:12px;}}"
+
+
+def _strip_qss(active: bool, theme=None) -> str:
+    t = theme or _THEME
+    if active:
+        tone = _accent(TONE["green"], t)
+        return (f"QFrame#activeBreakStrip{{background:{mix(tone, 12, t.surface)};"
+                f"border:1px solid {tone};border-radius:13px;}}")
+    tone = _accent(TONE["blue"], t)
+    return (f"QFrame#recentBreakStrip{{background:{mix(tone, 12, t.surface)};"
+            f"border:1px solid {tone};border-radius:13px;}}")
+
+
+def _flow_node_qss(tone: str, theme=None) -> str:
+    accent = _accent(TONE[tone], theme)
+    return f"QFrame#flowNode{{background:{_rgba(accent, 0.10)};border:1px solid {accent};border-radius:11px;}}"
+
+
+def _kv_cell_qss(is_key: bool, theme=None) -> str:
+    t = theme or _THEME
+    ink = _ink(t)
+    return (f"QLabel{{color:{t.muted if is_key else t.text_primary};"
+            f"background:rgba({ink},0.03);border:none;border-bottom:1px solid rgba({ink},0.10);}}")
+
+
+def _scrollbar_qss(theme=None, *, horizontal: bool = False) -> str:
+    t = theme or _THEME
+    handle = mix(t.muted, 45, t.surface_soft)
+    if horizontal:
+        return (f"QScrollBar:horizontal{{background:{t.surface_soft};height:8px;border-radius:4px;}}"
+                f"QScrollBar::handle:horizontal{{background:{handle};border-radius:4px;min-width:35px;}}")
+    return (f"QScrollBar:vertical{{background:{t.surface_soft};width:9px;}}"
+            f"QScrollBar::handle:vertical{{background:{handle};border-radius:4px;min-height:28px;}}")
+
+
+def _table_qss(theme=None) -> str:
+    t = theme or _THEME
+    ink = _ink(t)
+    return (f"QTableWidget{{background:{t.surface};alternate-background-color:{t.surface_soft};"
+            f"color:{t.text_primary};border:1px solid {t.border};border-radius:7px;"
+            f"selection-background-color:{mix(t.cyan, 24, t.surface)};"
+            f"selection-color:{t.text_primary};gridline-color:transparent;}}"
+            f"QTableWidget::item{{padding:4px 6px;border-bottom:1px solid rgba({ink},0.10);}}"
+            f"QHeaderView::section{{background:{t.surface_2};color:{t.text_primary};border:none;"
+            f"border-right:1px solid {t.border};border-bottom:1px solid {t.border};padding:5px 7px;}}"
+            + _scrollbar_qss(t))
+
+
+_HORIZONTAL_TABLE_BAR = "QScrollBar:horizontal{height:11px;}"
+_WIDE_TABLES = ("cosecantEventsTable", "cosecantReturnTable")
+
+
+def _body_scroll_qss(theme=None) -> str:
+    t = theme or _THEME
+    handle = mix(t.muted, 45, t.surface_soft)
+    return ("QScrollArea#dashboardBody{background:transparent;border:none;}"
+            "QScrollArea#dashboardBody > QWidget > QWidget{background:transparent;}"
+            f"QScrollBar:vertical{{background:rgba({_ink(t)},0.03);width:9px;}}"
+            f"QScrollBar::handle:vertical{{background:{handle};border-radius:4px;min-height:35px;}}")
+
+
+def _flow_scroll_qss(theme=None) -> str:
+    return "QScrollArea#flowScroll{background:transparent;border:none;}" + _scrollbar_qss(theme, horizontal=True)
+
+
+def _button_qss(role: str, theme=None) -> str:
+    t = theme or _THEME
+    ink = _ink(t)
+    if role in ("secant", "cosecant"):
+        return (f"QPushButton{{color:{t.muted};background:transparent;border:1px solid transparent;"
+                "border-radius:6px;padding:5px 15px;}"
+                f"QPushButton:checked{{color:{t.cyan};background:{_rgba(t.cyan, 0.15)};border-color:{t.cyan};}}"
+                f"QPushButton:hover{{color:{t.text_primary};background:{_rgba(t.cyan, 0.12)};}}")
+    if role in ("nav", "subnav"):
+        return (f"QPushButton{{color:{t.text_primary};background:transparent;border:1px solid transparent;"
+                "border-radius:7px;padding:7px 15px;}"
+                f"QPushButton:checked{{color:{t.cyan};background:{_rgba(t.cyan, 0.12)};"
+                f"border-color:{_rgba(t.cyan, 0.60)};}}"
+                f"QPushButton:hover{{color:{t.text_primary};background:rgba({ink},0.05);}}")
+    if role in ("history", "history_action"):
+        return (f"QPushButton{{color:{t.cyan};background:{_rgba(t.cyan, 0.04)};"
+                f"border:1px solid {_rgba(t.cyan, 0.56)};border-radius:8px;padding:6px 13px;}}"
+                f"QPushButton:checked{{color:{t.text_primary};background:{_rgba(t.cyan, 0.17)};"
+                f"border-color:{t.cyan};}}"
+                f"QPushButton:hover{{color:{t.text_primary};background:{_rgba(t.cyan, 0.12)};}}"
+                f"QPushButton:disabled{{color:{t.muted};border-color:{t.border};"
+                f"background:{_rgba(t.cyan, 0.01)};}}")
+    if role == "export":
+        amber = _accent(TONE["amber"], t)
+        return (f"QPushButton{{color:{amber};background:{_rgba(amber, 0.06)};"
+                f"border:1px solid {mix(amber, 70, t.surface)};border-radius:7px;padding:6px 13px;}}"
+                f"QPushButton:hover{{background:{_rgba(amber, 0.14)};border-color:{amber};}}")
+    return (f"QPushButton{{color:{t.text_primary};background:rgba({ink},0.025);"
+            f"border:1px solid {t.border};border-radius:7px;padding:6px 13px;}}"
+            f"QPushButton:hover{{color:{t.text_primary};border-color:{t.cyan};}}")
+
+
+def _close_qss(theme=None) -> str:
+    t = theme or _THEME
+    ink = _ink(t)
+    return (f"QPushButton#dashboardClose{{background:rgba({ink},0.03);"
+            f"border:1px solid rgba({ink},0.35);border-radius:16px;color:{t.text_primary};}}"
+            f"QPushButton#dashboardClose:hover{{border-color:{t.cyan};color:{t.cyan};}}")
+
+
+def _combo_qss(theme=None) -> str:
+    t = theme or _THEME
+    return (f"QComboBox{{color:{t.cyan};background:{t.surface_2};"
+            f"border:1px solid {_rgba(t.cyan, 0.56)};border-radius:8px;padding:4px 10px;}}"
+            f"QComboBox:hover{{border-color:{t.cyan};background:{mix(t.cyan, 10, t.surface_2)};}}"
+            "QComboBox::drop-down{border:none;width:19px;}"
+            f"QComboBox QAbstractItemView{{color:{t.text_primary};background:{t.surface};"
+            f"selection-background-color:{mix(t.cyan, 24, t.surface)};"
+            f"selection-color:{t.text_primary};border:1px solid {t.border};}}")
+
+
+def _history_icon(theme=None) -> QIcon:
+    icon = QPixmap(16, 16)
+    icon.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(icon)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(QColor((theme or _THEME).cyan), 1.5))
+    painter.drawEllipse(2, 2, 12, 12)
+    painter.drawLine(8, 8, 8, 4)
+    painter.drawLine(8, 8, 11, 9)
+    painter.end()
+    return QIcon(icon)
+
+
+def _result_tone(text: str, theme=None) -> str | None:
+    """Semantic outcome colour for one table cell, or None for plain text."""
+    if text in ("Verified", "Matched", "Yes", "Return verified", "Confirmed"):
+        return _accent(TONE["green"], theme)
+    if text in ("Uncertain", "Late", "Interrupted"):
+        return _accent(TONE["amber"], theme)
+    if text in ("No", "Missed", "Not matched", "Not returned"):
+        return _accent(TONE["red"], theme)
+    return None
 
 
 def _glass(frame: QFrame, object_name: str = "analysisPanel") -> None:
     """COSINE-style per-instance QSS survives the Control Station theme pass."""
     frame.setObjectName(object_name)
     frame.setFrameShape(QFrame.Shape.NoFrame)
-    frame.setStyleSheet(PANEL_STYLE)
+    frame.setStyleSheet(_panel_qss())
 
 
 class SecantGlyph(QWidget):
@@ -92,11 +293,12 @@ class FlowConnector(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         mid = self.height() / 2 + 7
         right = self.width() - 7
-        painter.setPen(QPen(QColor("#5da7eb"), 1.3))
+        theme = getattr(self, "_landing_theme", None) or _THEME
+        painter.setPen(QPen(QColor(theme.cyan_dim), 1.3))
         painter.drawLine(QPointF(5, mid), QPointF(right, mid))
         painter.drawLine(QPointF(right - 6, mid - 4), QPointF(right, mid))
         painter.drawLine(QPointF(right - 6, mid + 4), QPointF(right, mid))
-        painter.setPen(QColor(MUTED))
+        painter.setPen(QColor(theme.muted))
         painter.setFont(_font(8, 400, mono=True))
         painter.drawText(QRectF(0, 15, self.width(), 30),
                          int(Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap), self.caption)
@@ -112,7 +314,8 @@ def _label(text: str, *, size: int = 10, weight: int = 400,
            color: str = TEXT, wrap: bool = False, mono: bool = False) -> QLabel:
     result = QLabel(text)
     result.setFont(_font(size, weight, mono))
-    result.setStyleSheet(f"color:{color};background:transparent;border:none;")
+    result.setProperty("secantColor", color)
+    result.setStyleSheet(f"color:{_text(color)};background:transparent;border:none;")
     result.setWordWrap(wrap)
     return result
 
@@ -156,11 +359,7 @@ def _kv_panel(title: str, rows: tuple[tuple[str, str], ...], subtitle: str = "")
         for cell in (left, right):
             cell.setMinimumHeight(19)
             cell.setContentsMargins(7, 2, 7, 2)
-            cell.setStyleSheet(
-                f"QLabel{{color:{MUTED if cell is left else TEXT};"
-                "background:rgba(5,22,39,0.28);border:none;"
-                "border-bottom:1px solid rgba(94,142,170,0.18);}"
-            )
+            cell.setStyleSheet(_kv_cell_qss(cell is left))
         grid.addWidget(left, row, 0)
         grid.addWidget(right, row, 1)
         cells.append((left, right))
@@ -184,13 +383,7 @@ def _horizontal_strip(rows: tuple[tuple[str, str], ...], *, active: bool = False
     strip = QFrame()
     strip.setObjectName("activeBreakStrip" if active else "recentBreakStrip")
     strip.setFrameShape(QFrame.Shape.NoFrame)
-    strip.setStyleSheet(
-        "QFrame#activeBreakStrip{background:rgba(5,48,51,0.82);"
-        "border:1px solid #02af86;border-radius:13px;}"
-        if active else
-        "QFrame#recentBreakStrip{background:rgba(28,45,78,0.78);"
-        "border:1px solid #4267a6;border-radius:13px;}"
-    )
+    strip.setStyleSheet(_strip_qss(active))
     line = QHBoxLayout(strip)
     line.setContentsMargins(15, 10, 15, 10)
     line.setSpacing(10)
@@ -220,7 +413,8 @@ def _set_strip_items(strip: QFrame, rows: tuple[tuple[str, str], ...]) -> None:
         key_label.setText(key)
         value_label.setText(value)
         color = TONE["green"] if strip.presentation_active and key in ("BREAK ACTIVE", "STATE") else TEXT
-        value_label.setStyleSheet(f"color:{color};background:transparent;border:none;")
+        value_label.setProperty("secantColor", color)
+        value_label.setStyleSheet(f"color:{_text(color)};background:transparent;border:none;")
 
 
 class MetricCard(QFrame):
@@ -228,13 +422,8 @@ class MetricCard(QFrame):
         super().__init__()
         self.setObjectName("metricCard")
         self.setProperty("tone", tone)
-        accent = TONE[tone]
         self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setStyleSheet(
-            "QFrame#metricCard{background:qlineargradient(x1:0,y1:0,x2:1,y2:1,"
-            "stop:0 rgba(18,45,68,235),stop:1 rgba(9,32,53,235));"
-            f"border:1px solid {accent};border-radius:12px;}}"
-        )
+        self.setStyleSheet(_metric_qss(_accent(TONE[tone])))
         self.setMinimumWidth(155)
         self.setMinimumHeight(78)
         layout = QVBoxLayout(self)
@@ -293,7 +482,7 @@ class TablePanel(QFrame):
         layout.addWidget(self.subtitle_label)
         table = QTableWidget(0, len(columns), self)
         table.setObjectName(object_name)
-        table.setStyleSheet(TABLE_STYLE)
+        table.setStyleSheet(_table_qss())
         table.setFont(_font(9))
         table.setHorizontalHeaderLabels(columns)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -323,12 +512,9 @@ class TablePanel(QFrame):
                 item = QTableWidgetItem(str(value))
                 item.setToolTip(str(value))
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                if str(value) in ("Verified", "Matched", "Yes", "Return verified", "Confirmed"):
-                    item.setForeground(QColor(TONE["green"]))
-                elif str(value) in ("Uncertain", "Late", "Interrupted"):
-                    item.setForeground(QColor(TONE["amber"]))
-                elif str(value) in ("No", "Missed", "Not matched", "Not returned"):
-                    item.setForeground(QColor(TONE["red"]))
+                tone = _result_tone(str(value))
+                if tone:
+                    item.setForeground(QColor(tone))
                 self.table.setItem(row_index, column_index, item)
 
 
@@ -352,11 +538,7 @@ class FlowPanel(QFrame):
         layout.addWidget(self.subtitle_label)
         scroll = QScrollArea()
         scroll.setObjectName("flowScroll")
-        scroll.setStyleSheet(
-            "QScrollArea#flowScroll{background:transparent;border:none;}"
-            "QScrollBar:horizontal{background:#0d293e;height:8px;border-radius:4px;}"
-            "QScrollBar::handle:horizontal{background:#31677f;border-radius:4px;min-width:35px;}"
-        )
+        scroll.setStyleSheet(_flow_scroll_qss())
         scroll.setWidgetResizable(False)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -379,13 +561,8 @@ class FlowPanel(QFrame):
             card.setObjectName("flowNode")
             card.setProperty("tone", tone)
             accent = TONE[tone]
-            fill = QColor(accent)
             card.setFrameShape(QFrame.Shape.NoFrame)
-            card.setStyleSheet(
-                "QFrame#flowNode{"
-                f"background:rgba({fill.red()},{fill.green()},{fill.blue()},0.10);"
-                f"border:1px solid {accent};border-radius:11px;}}"
-            )
+            card.setStyleSheet(_flow_node_qss(tone))
             if self.semantic_color:
                 glow = QGraphicsDropShadowEffect(card)
                 glow_color = QColor(accent)
@@ -505,10 +682,7 @@ class SecantDeepAnalysis(QWidget, _PresentationContext):
         surface.setObjectName("dashboardSurface")
         surface.setFrameShape(QFrame.Shape.NoFrame)
         surface.setMaximumHeight(900)
-        surface.setStyleSheet(
-            "QFrame#dashboardSurface{background:rgba(26,43,61,0.55);"
-            "border:1px solid rgba(255,255,255,0.14);border-radius:20px;}"
-        )
+        surface.setStyleSheet(_frame_qss("dashboardSurface"))
         shadow = QGraphicsDropShadowEffect(surface)
         shadow.setBlurRadius(80)
         shadow.setOffset(0, 30)
@@ -527,12 +701,7 @@ class SecantDeepAnalysis(QWidget, _PresentationContext):
 
         self.body = QScrollArea()
         self.body.setObjectName("dashboardBody")
-        self.body.setStyleSheet(
-            "QScrollArea#dashboardBody{background:transparent;border:none;}"
-            "QScrollArea#dashboardBody > QWidget > QWidget{background:transparent;}"
-            "QScrollBar:vertical{background:rgba(255,255,255,0.03);width:9px;}"
-            "QScrollBar::handle:vertical{background:#34647e;border-radius:4px;min-height:35px;}"
-        )
+        self.body.setStyleSheet(_body_scroll_qss())
         self.body.setWidgetResizable(True)
         self.body.setFrameShape(QFrame.Shape.NoFrame)
         shell.addWidget(self.body, 1)
@@ -558,11 +727,7 @@ class SecantDeepAnalysis(QWidget, _PresentationContext):
         footer = QFrame()
         footer.setObjectName("dashboardFooter")
         footer.setFrameShape(QFrame.Shape.NoFrame)
-        footer.setStyleSheet(
-            "QFrame#dashboardFooter{background:rgba(255,255,255,0.025);"
-            "border:none;border-top:1px solid rgba(145,195,220,0.15);"
-            "border-bottom-left-radius:18px;border-bottom-right-radius:18px;}"
-        )
+        footer.setStyleSheet(_frame_qss("dashboardFooter"))
         foot = QHBoxLayout(footer)
         foot.setContentsMargins(16, 7, 16, 7)
         self.footer_left = _label("SECANT · Overview Analysis", size=8, color=MUTED, mono=True)
@@ -572,22 +737,86 @@ class SecantDeepAnalysis(QWidget, _PresentationContext):
         shell.addWidget(footer)
         self.select_route("overview")
 
-    def _retheme(self, _theme) -> None:
-        """Reassert page-local glass QSS after Control Station's theme pass.
+    def _retheme(self, theme) -> None:
+        """Follow the host's active world after Control Station's theme pass.
 
-        The host replaces every page's stylesheet with global QSS. COSINE's
-        presentation descendants survive by owning per-instance QSS; this
-        dashboard follows that pattern and also restores its root background.
+        The host replaces every page's stylesheet with global QSS, and each
+        widget below owns a per-instance QSS built from the theme tokens.  This
+        restyles them in place -- chrome, panels, tables, buttons, flow nodes --
+        and never touches the evidence, route, selection or scroll state.
         """
-        self.setStyleSheet(self._style())
+        _set_theme(theme)
+        self.setStyleSheet(self._style(theme))
+        self.body.setStyleSheet(_body_scroll_qss(theme))
+        for frame in self.findChildren(QFrame):
+            name = frame.objectName()
+            if name in _CHROME_FRAMES:
+                frame.setStyleSheet(_frame_qss(name, theme))
+            elif name == "analysisPanel":
+                frame.setStyleSheet(_panel_qss(theme))
+            elif name == "metricCard":
+                frame.setStyleSheet(_metric_qss(_accent(TONE[frame.property("tone")], theme), theme))
+            elif name == "activeBreakStrip":
+                frame.setStyleSheet(_strip_qss(True, theme))
+            elif name == "recentBreakStrip":
+                frame.setStyleSheet(_strip_qss(False, theme))
+            elif name == "flowNode":
+                frame.setStyleSheet(_flow_node_qss(frame.property("tone"), theme))
+        for label in self.findChildren(QLabel):
+            name = label.objectName()
+            if name in ("keyCell", "valueCell"):
+                label.setStyleSheet(_kv_cell_qss(name == "keyCell", theme))
+            elif label.property("secantColor"):
+                label.setStyleSheet(
+                    f"color:{_text(label.property('secantColor'), theme)};"
+                    "background:transparent;border:none;")
+        for button in self.findChildren(QPushButton):
+            role = button.property("role")
+            if button.objectName() == "dashboardClose":
+                button.setStyleSheet(_close_qss(theme))
+            elif role:
+                button.setStyleSheet(_button_qss(role, theme))
+                if role == "history":
+                    button.setIcon(_history_icon(theme))
+        for table in self.findChildren(QTableWidget):
+            table.setStyleSheet(_table_qss(theme) + (
+                _HORIZONTAL_TABLE_BAR if table.objectName() in _WIDE_TABLES else ""))
+            for row in range(table.rowCount()):
+                for column in range(table.columnCount()):
+                    item = table.item(row, column)
+                    tone = _result_tone(item.text(), theme) if item is not None else None
+                    if tone:
+                        item.setForeground(QColor(tone))
+        for combo in self.findChildren(QComboBox):
+            combo.setStyleSheet(_combo_qss(theme))
+        for scroll in self.findChildren(QScrollArea):
+            if scroll.objectName() == "flowScroll":
+                scroll.setStyleSheet(_flow_scroll_qss(theme))
+        for connector in self.findChildren(FlowConnector):
+            connector.update()
+        self.update()
 
     def open_overlay(self) -> None:
         """Show the landing face through a blurred, dimmed glass backdrop."""
+        if self.isVisible():
+            self.raise_()
+            self.setFocus()
+            return
+        if self.prepare_overlay():
+            self.reveal_overlay()
+
+    def prepare_overlay(self) -> bool:
+        """Prepare the already-populated analysis without revealing it."""
+        self.hide()
         parent = self.parentWidget()
         if parent is None:
-            return
+            return False
         self.setGeometry(parent.rect())
-        self._backdrop = self._grab_blurred(parent.grab())
+        from CONTROL_STATION.navigation import grab_preparation_background
+        self._backdrop = self._grab_blurred(grab_preparation_background(parent))
+        return True
+
+    def reveal_overlay(self) -> None:
         self.show()
         self.raise_()
         self.setFocus()
@@ -616,9 +845,7 @@ class SecantDeepAnalysis(QWidget, _PresentationContext):
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
-        if self._backdrop is not None:
-            painter.drawPixmap(self.rect(), self._backdrop)
-        painter.fillRect(self.rect(), QColor(4, 8, 16, 140))
+        paint_analysis_backdrop(painter, self.rect(), self._backdrop, _THEME)
         painter.end()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
@@ -637,11 +864,7 @@ class SecantDeepAnalysis(QWidget, _PresentationContext):
         host = QFrame()
         host.setObjectName("dashboardHeader")
         host.setFrameShape(QFrame.Shape.NoFrame)
-        host.setStyleSheet(
-            "QFrame#dashboardHeader{background:rgba(255,255,255,0.035);"
-            "border:none;border-bottom:1px solid rgba(145,195,220,0.18);"
-            "border-top-left-radius:18px;border-top-right-radius:18px;}"
-        )
+        host.setStyleSheet(_frame_qss("dashboardHeader"))
         row = QHBoxLayout(host)
         row.setContentsMargins(20, 9, 20, 9)
         row.setSpacing(12)
@@ -655,10 +878,7 @@ class SecantDeepAnalysis(QWidget, _PresentationContext):
         row.addWidget(title_box, 1)
         face_host = QFrame()
         face_host.setObjectName("dashboardFaceSwitch")
-        face_host.setStyleSheet(
-            "QFrame#dashboardFaceSwitch{background:rgba(4,17,31,0.48);"
-            "border:1px solid rgba(98,151,184,0.40);border-radius:8px;}"
-        )
+        face_host.setStyleSheet(_frame_qss("dashboardFaceSwitch"))
         face_row = QHBoxLayout(face_host)
         face_row.setContentsMargins(2, 2, 2, 2)
         face_row.setSpacing(0)
@@ -690,11 +910,7 @@ class SecantDeepAnalysis(QWidget, _PresentationContext):
         close = self._button("×", "action")
         close.setObjectName("dashboardClose")
         close.setFixedWidth(32)
-        close.setStyleSheet(
-            "QPushButton#dashboardClose{background:rgba(255,255,255,0.03);"
-            "border:1px solid rgba(145,195,220,0.35);border-radius:16px;color:#c7d9e9;}"
-            "QPushButton#dashboardClose:hover{border-color:#04d9ec;color:white;}"
-        )
+        close.setStyleSheet(_close_qss())
         close.setToolTip("Return to SECANT Dashboard")
         close.clicked.connect(self.close_requested.emit)
         row.addWidget(close)
@@ -710,53 +926,14 @@ class SecantDeepAnalysis(QWidget, _PresentationContext):
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.setFont(_font(9, 700))
         button.setMinimumHeight(31)
-        if role in ("secant", "cosecant"):
-            button.setStyleSheet(
-                "QPushButton{color:#a7c6dc;background:transparent;border:1px solid transparent;"
-                "border-radius:6px;padding:5px 15px;}"
-                "QPushButton:checked{color:#02e5eb;background:rgba(3,193,212,0.15);"
-                "border-color:#05c9da;}"
-                "QPushButton:hover{color:white;background:rgba(63,149,185,0.12);}"
-            )
-        elif role in ("nav", "subnav"):
-            button.setStyleSheet(
-                "QPushButton{color:#b6cbe0;background:transparent;border:1px solid transparent;"
-                "border-radius:7px;padding:7px 15px;}"
-                "QPushButton:checked{color:#04d9ec;background:rgba(3,193,212,0.12);"
-                "border-color:rgba(4,217,236,0.60);}"
-                "QPushButton:hover{color:white;background:rgba(255,255,255,0.05);}"
-            )
-        elif role in ("history", "history_action"):
-            button.setStyleSheet(
-                "QPushButton{color:#25dce8;background:rgba(4,217,236,0.025);"
-                "border:1px solid rgba(4,217,236,0.56);border-radius:8px;padding:6px 13px;}"
-                "QPushButton:checked{color:white;background:rgba(4,217,236,0.17);"
-                "border-color:#04d9ec;}"
-                "QPushButton:hover{color:white;background:rgba(4,217,236,0.12);}"
-                "QPushButton:disabled{color:#668a99;border-color:#355265;background:rgba(4,217,236,0.01);}"
-            )
-        elif role == "export":
-            button.setStyleSheet(
-                "QPushButton{color:#ffd747;background:rgba(255,215,71,0.06);"
-                "border:1px solid #b9962e;border-radius:7px;padding:6px 13px;}"
-                "QPushButton:hover{background:rgba(255,215,71,0.14);border-color:#ffd747;}"
-            )
-        else:
-            button.setStyleSheet(
-                "QPushButton{color:#bad1e5;background:rgba(255,255,255,0.025);"
-                "border:1px solid rgba(120,163,193,0.32);border-radius:7px;padding:6px 13px;}"
-                "QPushButton:hover{color:white;border-color:#04d9ec;}"
-            )
+        button.setStyleSheet(_button_qss(role))
         return button
 
     def _navigation(self) -> QWidget:
         host = QFrame()
         host.setObjectName("dashboardNav")
         host.setFrameShape(QFrame.Shape.NoFrame)
-        host.setStyleSheet(
-            "QFrame#dashboardNav{background:rgba(255,255,255,0.02);"
-            "border:none;border-bottom:1px solid rgba(145,195,220,0.14);}"
-        )
+        host.setStyleSheet(_frame_qss("dashboardNav"))
         row = QHBoxLayout(host)
         row.setContentsMargins(16, 5, 16, 5)
         row.setSpacing(6)
@@ -775,10 +952,7 @@ class SecantDeepAnalysis(QWidget, _PresentationContext):
         host = QFrame()
         host.setObjectName("dashboardSubnav")
         host.setFrameShape(QFrame.Shape.NoFrame)
-        host.setStyleSheet(
-            "QFrame#dashboardSubnav{background:rgba(3,29,47,0.68);"
-            "border:none;border-bottom:1px solid rgba(145,195,220,0.12);}"
-        )
+        host.setStyleSheet(_frame_qss("dashboardSubnav"))
         row = QHBoxLayout(host)
         row.setContentsMargins(16, 4, 16, 4)
         row.setSpacing(7)
@@ -795,16 +969,7 @@ class SecantDeepAnalysis(QWidget, _PresentationContext):
         for route, title in (("past_secant_episodes", "PAST SECANT EPISODES"),
                              ("past_study_sessions", "PAST STUDY SESSIONS")):
             button = self._button(title, "history")
-            icon = QPixmap(16, 16)
-            icon.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(icon)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            painter.setPen(QPen(QColor(CYAN), 1.5))
-            painter.drawEllipse(2, 2, 12, 12)
-            painter.drawLine(8, 8, 8, 4)
-            painter.drawLine(8, 8, 11, 9)
-            painter.end()
-            button.setIcon(QIcon(icon))
+            button.setIcon(_history_icon())
             button.setObjectName(f"history_{route}")
             button.clicked.connect(lambda _checked=False, key=route: self.open_history(key))
             row.addWidget(button)
@@ -1110,7 +1275,7 @@ class SecantDeepAnalysis(QWidget, _PresentationContext):
         self._bind_context("about_dashboard_time", architecture.node_labels[1][3])
         layout.addWidget(architecture)
         layout.addWidget(_label("This dashboard does not control timers, Monitor, Resource Intent, Study, SINE, MIRL, MINE, COSINE, SECANT, or COSECANT.",
-                                 size=9, color="#ffd747", wrap=True))
+                                 size=9, color=TONE["amber"], wrap=True))
         layout.addStretch(1)
         return page
 
@@ -1127,14 +1292,14 @@ class SecantDeepAnalysis(QWidget, _PresentationContext):
         for index, width in enumerate((384, 144, 108)):
             events.table.horizontalHeader().setSectionResizeMode(index, QHeaderView.ResizeMode.Fixed)
             events.table.setColumnWidth(index, width)
-        events.table.setStyleSheet(TABLE_STYLE + "QScrollBar:horizontal{height:11px;}")
+        events.table.setStyleSheet(_table_qss() + _HORIZONTAL_TABLE_BAR)
         returns = TablePanel("RETURN HISTORY", "Intended targets; Unavailable marks a demo read failure.",
                              ("INTENDED TARGET", "RETURN CONFIRMED AT", "CONFIRMATION", "OUTCOME"),
                              (), "cosecantReturnTable")
         for index, width in enumerate((360, 242, 158, 192)):
             returns.table.horizontalHeader().setSectionResizeMode(index, QHeaderView.ResizeMode.Fixed)
             returns.table.setColumnWidth(index, width)
-        returns.table.setStyleSheet(TABLE_STYLE + "QScrollBar:horizontal{height:11px;}")
+        returns.table.setStyleSheet(_table_qss() + _HORIZONTAL_TABLE_BAR)
         self.cosecant_break_history = _kv_panel("BREAK HISTORY", tuple(("", "") for _ in demo.BREAK_HISTORY))
         self.cosecant_events = events
         self._bind_context("cosecant_events", events.subtitle_label)
@@ -1155,14 +1320,7 @@ class SecantDeepAnalysis(QWidget, _PresentationContext):
         picker.setMinimumWidth(155)
         picker.setFixedHeight(31)
         picker.setCursor(Qt.CursorShape.PointingHandCursor)
-        picker.setStyleSheet(
-            "QComboBox{color:#25dce8;background:#0a2638;"
-            "border:1px solid rgba(4,217,236,0.56);border-radius:8px;padding:4px 10px;}"
-            "QComboBox:hover{border-color:#04d9ec;background:#10364b;}"
-            "QComboBox::drop-down{border:none;width:19px;}"
-            "QComboBox QAbstractItemView{color:#e6f2ff;background:#0d2639;"
-            "selection-background-color:#0b5269;border:1px solid #34647e;}"
-        )
+        picker.setStyleSheet(_combo_qss())
         return picker
 
     def _history_header(self, title: str, subtitle: str, back_name: str,
@@ -1253,7 +1411,7 @@ class SecantDeepAnalysis(QWidget, _PresentationContext):
         self.body.verticalScrollBar().setValue(state["body_y"])
 
         def restore_scroll() -> None:
-            if (getattr(self, f"_{kind}_restore_token") is not token
+            if (sip.isdeleted(self) or getattr(self, f"_{kind}_restore_token") is not token
                     or self.route != state["route"] or self.face != state["face"]):
                 return
             self.stack.adjustSize()
@@ -1616,32 +1774,14 @@ class SecantDeepAnalysis(QWidget, _PresentationContext):
             QTimer.singleShot(0, self._show_history_flow)
 
     @staticmethod
-    def _style() -> str:
-        rules = [
-            "QWidget#secantCosecantDashboard{background:transparent;}",
-            "QFrame#dashboardSurface{background:rgba(26,43,61,0.55);border:1px solid rgba(255,255,255,0.14);border-radius:20px;}",
-            "QFrame#dashboardHeader{background:rgba(255,255,255,0.02);border-bottom:1px solid rgba(255,255,255,0.10);}",
-            "QFrame#dashboardNav,QFrame#dashboardSubnav{background:rgba(255,255,255,0.015);border-bottom:1px solid rgba(255,255,255,0.08);}",
-            "QFrame#dashboardFooter{background:rgba(255,255,255,0.015);border-top:1px solid rgba(255,255,255,0.08);}",
-            "QFrame#analysisPanel{background:#0d2639;border:1px solid #23536c;border-radius:13px;}",
-            "QFrame#activeBreakStrip{background:#0b3033;border:1px solid #02af86;border-radius:13px;}",
-            "QFrame#recentBreakStrip{background:#182b49;border:1px solid #4267a6;border-radius:13px;}",
-            "QFrame#metricCard{background:#122b41;border:1px solid #1a7492;border-radius:12px;}",
-            "QLabel#keyCell{background:#0d2234;border-bottom:1px solid #1c4157;}",
-            "QLabel#valueCell{background:#0c1f30;border-bottom:1px solid #1c4157;}",
-            "QPushButton{background:#0a2033;color:#bad8f6;border:1px solid #29506b;border-radius:7px;padding:5px 12px;}",
-            "QPushButton:hover{border-color:#04d9ec;color:white;background:#11334b;}",
-            "QPushButton:checked{background:#073b48;color:#0ef0fa;border-color:#04d9ec;}",
-            "QPushButton[role='export']{color:#ffd747;border-color:#d6ae14;}",
-            "QTableWidget{background:#091d2c;alternate-background-color:#0c283b;color:#e6f2ff;border:1px solid #20506a;gridline-color:#24435a;selection-background-color:#0a5566;selection-color:white;}",
-            "QHeaderView::section{background:#12364b;color:#b6d9f5;border:none;border-right:1px solid #2d5269;padding:5px;font-weight:600;}",
+    def _style(theme=None) -> str:
+        """Root QSS: transparent shell plus the world-derived chrome rules."""
+        rules = ["QWidget#secantCosecantDashboard{background:transparent;}"]
+        rules += [_frame_qss(name, theme) for name in _CHROME_FRAMES]
+        rules += [
             "QScrollArea#dashboardBody,QScrollArea#flowScroll{background:transparent;border:none;}",
             "QStackedWidget#dashboardStack{background:transparent;}",
-            "QScrollBar:vertical,QScrollBar:horizontal{background:#0a2030;}",
-            "QScrollBar::handle:vertical,QScrollBar::handle:horizontal{background:#24647a;border-radius:4px;min-height:25px;min-width:25px;}",
         ]
-        for tone, color in TONE.items():
-            rules.append(f"QFrame#flowNode[tone='{tone}']{{background:#10293b;border:1px solid {color};border-radius:10px;}}")
         return "\n".join(rules)
 
 
@@ -1649,27 +1789,23 @@ class SecantLandingPage(QWidget, _PresentationContext):
     """Static main SECANT face, composed like the COSINE landing page."""
 
     open_analysis_requested = pyqtSignal()
+    refresh_requested = pyqtSignal()
 
     def __init__(self) -> None:
         super().__init__()
+        self._refreshing = False
         self._init_context()
         self.setObjectName("secantLandingPage")
-        self.setStyleSheet("QWidget#secantLandingPage{background:#08111d;}")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
         scroll.setObjectName("secantLandingScroll")
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(
-            "QScrollArea#secantLandingScroll{background:transparent;border:none;}"
-            "QScrollBar:vertical{background:#102236;width:9px;}"
-            "QScrollBar::handle:vertical{background:#345f79;border-radius:4px;min-height:32px;}"
-        )
+        scroll.setStyleSheet("QScrollArea#secantLandingScroll{background:transparent;border:none;}")
         root.addWidget(scroll)
         body = QWidget()
         body.setObjectName("secantLandingBody")
-        body.setStyleSheet("QWidget#secantLandingBody{background:#08111d;}")
         scroll.setWidget(body)
         column = QVBoxLayout(body)
         column.setContentsMargins(34, 22, 34, 42)
@@ -1693,6 +1829,68 @@ class SecantLandingPage(QWidget, _PresentationContext):
                               metrics=demo.OVERVIEW_METRICS[:4], behaviour=demo.LANDING_BEHAVIOUR,
                               latest_events=tuple(reversed(demo.LATEST_SECANT_EVENTS)),
                               journey=demo.SECANT_FLOW)
+        self._retheme(DEFAULT_THEME)
+
+    def _retheme(self, theme) -> None:
+        """Follow the host's active world without changing prepared evidence."""
+        _set_theme(theme)
+        self._theme = theme
+        self.setStyleSheet(
+            f"QWidget#secantLandingPage, QWidget#secantLandingBody{{background:{theme.window_background};}}"
+        )
+
+        def accent(color):
+            # Keep semantic hues, with readable contrast on the White world.
+            return color if theme.is_dark else mix(color, 45, theme.text_primary)
+
+        colors = {TEXT: theme.text_primary, MUTED: theme.muted,
+                  CYAN: theme.cyan, "#d2b5cf": theme.muted}
+        for label in self.findChildren(QLabel):
+            color = label.property("secantColor") or TEXT
+            label.setStyleSheet(
+                f"color:{colors.get(color, accent(color))};background:transparent;border:none;"
+            )
+        metric_accents = {
+            labels[1].parentWidget(): accent(TONE[tone])
+            for labels, tone in zip(self.metric_labels, ("teal", "green", "purple", "blue"))
+        }
+        panels = {"secantLandingStatus", "secantLandingRecent",
+                  "secantLandingMetric", "analysisPanel"}
+        for frame in self.findChildren(QFrame):
+            name = frame.objectName()
+            if name in panels:
+                border = metric_accents.get(frame, theme.border)
+                frame.setStyleSheet(
+                    f"QFrame#{name}{{background:{theme.surface};border:1px solid {border};"
+                    f"border-radius:{RADIUS_LG}px;}}"
+                )
+            elif name == "secantLandingPath":
+                frame.setStyleSheet(
+                    f"QFrame#{name}{{background:{theme.surface_soft};border:1px solid {theme.border};"
+                    f"border-radius:{RADIUS_MD}px;}}"
+                )
+            elif name == "secantLandingEvent":
+                frame.setStyleSheet(
+                    f"QFrame#{name}{{background:transparent;border:none;border-bottom:1px solid {theme.border};}}"
+                )
+            elif name == "flowNode":
+                color = accent(TONE[frame.property("tone")])
+                frame.setStyleSheet(
+                    f"QFrame#flowNode{{background:{mix(color, 10, theme.surface)};"
+                    f"border:1px solid {color};border-radius:{RADIUS_MD}px;}}"
+                )
+        self.recent_flow.scroll.setStyleSheet("QScrollArea#flowScroll{background:transparent;border:none;}")
+        for connector in self.recent_flow.findChildren(FlowConnector):
+            connector._landing_theme = theme
+            connector.update()
+        # Refresh uses the same shared dashboard control rules as other pages.
+        self._refresh_button.setStyleSheet("")
+        self._refresh_button.setObjectName("analyticsRefreshButton")
+        self.findChild(QPushButton, "openSecantDeepAnalysis").setStyleSheet(
+            f"QPushButton{{background:{theme.cyan};color:{theme.window_background};"
+            f"border:1px solid {theme.cyan};border-radius:{RADIUS_SM}px;padding:9px 18px;}}"
+            f"QPushButton:hover{{background:{mix(theme.cyan, 80, theme.text_primary)};}}"
+        )
 
     def _heading(self) -> QWidget:
         host = QWidget()
@@ -1703,33 +1901,41 @@ class SecantLandingPage(QWidget, _PresentationContext):
         row.addWidget(dot, 0, Qt.AlignmentFlag.AlignTop)
         text = QVBoxLayout()
         text.setSpacing(5)
-        text.addWidget(_label("SECANT — STUDY RECOVERY REGULATION", size=19, weight=700))
-        text.addWidget(_label("Study Escape and Cognitive Attention Navigation Tracker", size=11, color=MUTED))
+        title = _label("SECANT — STUDY RECOVERY REGULATION", size=19, weight=700, color=CYAN)
+        title.setObjectName("analyticsPageTitle")
+        subtitle = _label("Study Escape and Cognitive Attention Navigation Tracker", size=11, color=MUTED)
+        subtitle.setObjectName("analyticsPageSubtitle")
+        text.addWidget(title)
+        text.addWidget(subtitle)
         row.addLayout(text)
         row.addStretch(1)
+        self._refresh_button = SecantDeepAnalysis._button("REFRESH", "action")
+        self._refresh_button.clicked.connect(self._request_refresh)
+        row.addWidget(self._refresh_button, 0, Qt.AlignmentFlag.AlignVCenter)
         button = QPushButton("OPEN DEEP ANALYSIS")
         button.setObjectName("openSecantDeepAnalysis")
         button.setFont(_font(10, 700))
         button.setMinimumSize(188, 49)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.setStyleSheet(
-            "QPushButton#openSecantDeepAnalysis{background:rgba(4,217,236,0.04);"
-            "color:#02e2e6;border:1px solid #078d99;border-radius:11px;padding:9px 18px;}"
-            "QPushButton#openSecantDeepAnalysis:hover{background:rgba(4,217,236,0.14);"
-            "border-color:#04d9ec;color:white;}"
-        )
         button.clicked.connect(self.open_analysis_requested.emit)
         row.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
         return host
+
+    def _request_refresh(self) -> None:
+        # Idle manual reads remain synchronous; a navigation read may already
+        # own the integration's lane. Preserve that lane's busy state on return.
+        if not self._refresh_button.isEnabled():
+            return
+        self._refresh_button.setEnabled(False)
+        try:
+            self.refresh_requested.emit()
+        finally:
+            self._refresh_button.setEnabled(not self._refreshing)
 
     def _status(self) -> QWidget:
         card = QFrame()
         card.setObjectName("secantLandingStatus")
         card.setMinimumHeight(98)
-        card.setStyleSheet(
-            "QFrame#secantLandingStatus{background:rgba(80,54,81,0.48);"
-            "border:1px solid rgba(221,92,139,0.48);border-radius:23px;}"
-        )
         row = QHBoxLayout(card)
         row.setContentsMargins(28, 18, 28, 18)
         left = QVBoxLayout()
@@ -1747,10 +1953,6 @@ class SecantLandingPage(QWidget, _PresentationContext):
     def _recent(self) -> QWidget:
         card = QFrame()
         card.setObjectName("secantLandingRecent")
-        card.setStyleSheet(
-            "QFrame#secantLandingRecent{background:rgba(35,49,83,0.85);"
-            "border:1px solid rgba(91,123,211,0.47);border-radius:23px;}"
-        )
         row = QHBoxLayout(card)
         row.setContentsMargins(26, 21, 26, 21)
         row.setSpacing(26)
@@ -1792,10 +1994,6 @@ class SecantLandingPage(QWidget, _PresentationContext):
         for tone in ("teal", "green", "purple", "blue"):
             card = QFrame()
             card.setObjectName("secantLandingMetric")
-            card.setStyleSheet(
-                "QFrame#secantLandingMetric{background:rgba(30,44,65,0.94);"
-                f"border:1px solid {TONE[tone]};border-radius:23px;}}"
-            )
             box = QVBoxLayout(card)
             box.setContentsMargins(20, 17, 20, 17)
             box.setSpacing(5)
@@ -1816,10 +2014,6 @@ class SecantLandingPage(QWidget, _PresentationContext):
         left.addWidget(_label("PLATFORM PATH", size=9, color=MUTED, mono=True))
         path = QFrame()
         path.setObjectName("secantLandingPath")
-        path.setStyleSheet(
-            "QFrame#secantLandingPath{background:rgba(49,64,104,0.45);"
-            "border:1px solid rgba(91,123,211,0.46);border-radius:15px;}"
-        )
         path_row = QHBoxLayout(path)
         path_row.setContentsMargins(15, 10, 15, 10)
         self.behaviour_source = _label("", size=13, weight=600)
@@ -1840,10 +2034,6 @@ class SecantLandingPage(QWidget, _PresentationContext):
         for _ in demo.LATEST_SECANT_EVENTS:
             line = QFrame()
             line.setObjectName("secantLandingEvent")
-            line.setStyleSheet(
-                "QFrame#secantLandingEvent{background:rgba(7,24,42,0.26);"
-                "border:none;border-bottom:1px solid rgba(112,161,190,0.19);}"
-            )
             cells = QHBoxLayout(line)
             cells.setContentsMargins(5, 6, 5, 6)
             cells.setSpacing(9)
@@ -1873,6 +2063,7 @@ class SecantLandingPage(QWidget, _PresentationContext):
         caption, message, state, tone = status
         self.status_caption.setText(caption)
         self.status_message.setText(message)
+        self.status_message.setProperty("secantColor", TONE[tone])
         self.status_message.setStyleSheet(f"color:{TONE[tone]};background:transparent;border:none;")
         self.status_state.setText(state)
         self.recent_source.setText(recent_episode[1][1])
@@ -1897,10 +2088,13 @@ class SecantLandingPage(QWidget, _PresentationContext):
             line.show()
             dot.setStyleSheet(f"color:{TONE['teal'] if event_type == 'Derived' else TONE['purple']};"
                               "background:transparent;border:none;")
+            dot.setProperty("secantColor", TONE['teal'] if event_type == 'Derived' else TONE['purple'])
             event_label.setText(event)
             source_label.setText(source)
             stamp_label.setText(stamp)
         self.recent_flow.set_nodes(journey)
+        if hasattr(self, "_theme"):
+            self._retheme(self._theme)
 
 
 class SecantCosecantDashboard(QWidget):
@@ -1922,9 +2116,14 @@ class SecantCosecantDashboard(QWidget):
         self.analysis = SecantDeepAnalysis(self)
         self.analysis.hide()
         self.landing.open_analysis_requested.connect(self.open_analysis)
+        self.landing.refresh_requested.connect(self.refresh_requested.emit)
         self.analysis.close_requested.connect(self.show_landing)
         self.analysis.refresh_requested.connect(self.refresh_requested.emit)
         self.analysis.export_requested.connect(self.export_requested.emit)
+
+    def set_refreshing(self, refreshing: bool) -> None:
+        self.landing._refreshing = bool(refreshing)
+        self.landing._refresh_button.setEnabled(not refreshing)
 
     def set_export_busy(self, busy: bool, message: str = '') -> None:
         self.analysis._export_button.setEnabled(not busy)
@@ -2004,18 +2203,40 @@ class SecantCosecantDashboard(QWidget):
                                                   preserve_state=preserve_state)
 
     @staticmethod
-    def _style() -> str:
-        return "QWidget#secantDashboardPage{background:#08111d;}"
+    def _style(theme=DEFAULT_THEME) -> str:
+        return f"QWidget#secantDashboardPage{{background:{theme.window_background};}}"
 
-    def _retheme(self, _theme) -> None:
-        self.setStyleSheet(self._style())
+    def _retheme(self, theme) -> None:
+        self.setStyleSheet(build_application_stylesheet(theme) + self._style(theme))
 
     def show_landing(self) -> None:
         self.analysis.close_overlay()
 
     def open_analysis(self) -> None:
-        self.analysis.select_route("overview")
-        self.analysis.open_overlay()
+        if self.analysis.isVisible():
+            self.analysis.raise_()
+            self.analysis.setFocus()
+            return
+
+        def prepare() -> None:
+            self.analysis.select_route("overview")
+            if not self.analysis.prepare_overlay():
+                raise RuntimeError("SECANT analysis host is unavailable")
+
+        preparer = getattr(self, "_surface_preparer", None)
+        if callable(preparer):
+            preparer(
+                owner=self,
+                key="secant-analysis",
+                title="Preparing SECANT Analysis",
+                subtitle="Loading study-recovery evidence...",
+                prepare=prepare,
+                reveal=self.analysis.reveal_overlay,
+                cleanup=self.analysis.close_overlay,
+            )
+        else:
+            self.analysis.select_route("overview")
+            self.analysis.open_overlay()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)

@@ -825,7 +825,7 @@ class SinePopupWindow(QWidget):
             return
         total_ms = max(0, round(float(self.request.visible_seconds) * 1000.0))
         remaining_ms = max(0, total_ms - self._elapsed.elapsed())
-        remaining_seconds = remaining_ms / 1000.0
+        remaining_seconds = (remaining_ms + 999) // 1000
         minutes = int(remaining_seconds // 60)
         seconds = int(remaining_seconds % 60)
         self._countdown.setText(f"DISPLAY WINDOW: {minutes:02d}:{seconds:02d}")

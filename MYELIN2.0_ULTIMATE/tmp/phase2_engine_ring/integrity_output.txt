@@ -1,0 +1,29 @@
+{
+  "CONTROL_STATION/application.py": {
+    "changed_methods": [
+      "ControlPage.__init__",
+      "ControlPage._engine_status_changed",
+      "ControlPage._clear_current_resource_presentation",
+      "ControlPage.reset_runtime_presentation",
+      "ControlPage.render_cosine",
+      "ControlPage.render_mine",
+      "ControlPage._render_current_authority_interval",
+      "ControlStationWindow._finish_shutdown"
+    ],
+    "existing_timer_and_animation_calls_unchanged": true,
+    "existing_sine_progress_calculations_unchanged": true,
+    "all_other_classes_unchanged": true
+  },
+  "MINE/mine.py": "PASS: every pre-existing authority function, constant, event and schema unchanged",
+  "COSINE/cosine.py": "PASS: every pre-existing authority function, constant, event and schema unchanged",
+  "manifest_checked_files": 120,
+  "changed_runtime_files": [
+    "CONTROL_STATION/application.py",
+    "COSINE/cosine.py",
+    "MINE/mine.py"
+  ],
+  "engine_ring_renderer_unchanged": true,
+  "secant_phase1_unchanged": true,
+  "database_and_schema_sources_unchanged": true,
+  "result": "PASS"
+}

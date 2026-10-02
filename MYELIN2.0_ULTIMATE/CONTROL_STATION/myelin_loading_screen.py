@@ -110,7 +110,7 @@ STATUS_MESSAGES = (
     "Connecting telemetry feed",
 )
 
-VERSION_CAPTION = "MYELIN Core v1.5.0  ·  Neural Telemetry Interface"
+VERSION_CAPTION = "MYELIN Core v2.0  ·  Neural Telemetry Interface"
 
 LOGO_FILENAMES = (
     "myelin_logo.png",

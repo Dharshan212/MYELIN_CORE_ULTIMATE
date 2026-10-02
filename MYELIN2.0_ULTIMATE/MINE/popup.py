@@ -8,6 +8,8 @@ request identity.  Runtime HIDE/RESTORE effects reuse the same window object.
 """
 from __future__ import annotations
 
+from CONTROL_STATION.command_delivery import PendingCommand, on_popup_reply
+
 import threading
 import time
 import weakref
@@ -318,11 +320,25 @@ else:
                 result = None
                 detail = " ".join(str(exc).split())[:180]
             else:
+                if isinstance(result, PendingCommand):
+                    def completed(reply):
+                        try:
+                            value = reply.result()
+                            message = getattr(value, "message", "Invalid command result")
+                        except RuntimeError as error:
+                            value, message = None, str(error)
+                        self._complete_delivery(kind, close_after_acceptance, value, message)
+                    on_popup_reply(result, self, completed)
+                    return not bool(result.error)
                 detail = (
                     result.message
                     if isinstance(result, MineCommandResult)
                     else "Invalid command result"
                 )
+            return self._complete_delivery(kind, close_after_acceptance, result, detail)
+
+        def _complete_delivery(self, kind, close_after_acceptance, result, detail):
+            """Apply only an actual backend reply, on the GUI thread."""
             self._delivery_in_progress = False
             if not isinstance(result, MineCommandResult) or not result.accepted:
                 self.delivery_label.setText(f"NOT ACCEPTED · {detail or 'PLEASE RETRY'}".upper())

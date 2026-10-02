@@ -1,0 +1,38 @@
+...............................................F                         [100%]
+================================== FAILURES ===================================
+____________________ test_protected_source_bytes_unchanged ____________________
+
+    def test_protected_source_bytes_unchanged():
+        import hashlib
+>       before=json.loads((OUT/'before.json').read_text())['source']
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+..\TIMER_IMPLEMENTATION_20261001\test_timer_fix.py:194: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+E:\Lib\pathlib\_local.py:546: in read_text
+    return PathBase.read_text(self, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E:\Lib\pathlib\_abc.py:632: in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = WindowsPath('C:/Users/Dharshan/Downloads/MYELIN_GENALOGY/MYELIN2.0_ULTIMATE_TRIAL/tmp/phase2_engine_ring/before.json')
+mode = 'r', buffering = -1, encoding = 'locale', errors = None, newline = None
+
+    def open(self, mode='r', buffering=-1, encoding=None,
+             errors=None, newline=None):
+        """
+        Open the file pointed to by this path and return a file object, as
+        the built-in open() function does.
+        """
+        if "b" not in mode:
+            encoding = io.text_encoding(encoding)
+>       return io.open(self, mode, buffering, encoding, errors, newline)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\Dharshan\\Downloads\\MYELIN_GENALOGY\\MYELIN2.0_ULTIMATE_TRIAL\\tmp\\phase2_engine_ring\\before.json'
+
+E:\Lib\pathlib\_local.py:537: FileNotFoundError
+=========================== short test summary info ===========================
+FAILED tmp\phase2_engine_ring::test_protected_source_bytes_unchanged - FileNo...
+1 failed, 47 passed in 6.58s
